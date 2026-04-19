@@ -161,6 +161,7 @@ pub const Context = struct {
     jump_cooldown: f32 = 0,
     dropping: bool = false,
     drop_platform_y: f32 = 0,
+    land_cooldown: f32 = 0,
     climbing: bool = false,
     climb_wall_x: f32 = 0,
     climb_target_y: f32 = 0,
@@ -636,8 +637,10 @@ pub const Context = struct {
         }
 
         // Detect landing on window
-        if (self.grounded and self.landed_on_new) {
+        self.land_cooldown -= dt;
+        if (self.grounded and self.landed_on_new and self.land_cooldown <= 0) {
             self.landed_on_new = false;
+            self.land_cooldown = 1.0;
             self.windows_visited +|= 1;
             if (self.current_window_len > 0) {
                 self.event_log.log("landed on {s}", .{self.current_window[0..self.current_window_len]});
