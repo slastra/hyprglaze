@@ -985,13 +985,14 @@ pub const Context = struct {
 
         // --- Collisions ---
         const was_grounded = self.grounded;
+        const was_falling = self.vy < -10.0;
         self.grounded = false;
 
         if (self.y <= 0) {
             self.y = 0;
             self.vy = 0;
             self.grounded = true;
-            if (!was_grounded) {
+            if (!was_grounded and was_falling) {
                 self.landed_on_new = true;
                 self.current_window_len = 0;
             }
@@ -1016,7 +1017,7 @@ pub const Context = struct {
                 self.y = wt;
                 self.vy = 0;
                 self.dropping = false;
-                if (!self.grounded) {
+                if (!self.grounded and was_falling) {
                     self.landed_on_new = true;
                     // Identify window by class name from cached metadata
                     if (wi < self.cached_window_count) {
