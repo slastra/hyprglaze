@@ -436,11 +436,13 @@ pub const Context = struct {
 
         std.fs.deleteFileAbsolute("/tmp/hyprglaze-ai-done") catch {};
 
-        std.debug.print("AI > standing={s} visited={d} mood={s} time={s}\n", .{
+        std.debug.print("AI > standing={s} focused={s} visited={d} mood={s} time={s}({d}:00)\n", .{
             if (self.current_window_len > 0) self.current_window[0..self.current_window_len] else "ground",
+            if (self.cached_focused_class_len > 0) self.cached_focused_class[0..self.cached_focused_class_len] else "none",
             self.windows_visited,
             moodName(self.mood),
             timePeriodName(timePeriod(self.current_hour)),
+            self.current_hour,
         });
 
         var child = std.process.Child.init(&argv, self.allocator);
@@ -536,9 +538,13 @@ pub const Context = struct {
                 @memcpy(log_buf[lp..lp + name.len], name);
                 lp += name.len;
             }
-            std.debug.print("AI < {s} mood={s}\n", .{ log_buf[0..lp], moodName(self.mood) });
+            std.debug.print("AI < actions={s} mood={s} say=\"{s}\" emote={s}\n", .{
+                log_buf[0..lp],
+                moodName(self.mood),
+                if (self.bubble_len > 0) self.bubble_text[0..self.bubble_len] else "",
+                if (ai_resp.value.object.get("emote")) |ev| (if (ev == .string) ev.string else "none") else "none",
+            });
             self.event_log.log("plan: {s}", .{log_buf[0..lp]});
-            // Log what was said for history
             if (self.bubble_len > 0) {
                 self.event_log.log("said \"{s}\"", .{self.bubble_text[0..self.bubble_len]});
             }
@@ -635,14 +641,17 @@ pub const Context = struct {
             self.windows_visited +|= 1;
             if (self.current_window_len > 0) {
                 self.event_log.log("landed on {s}", .{self.current_window[0..self.current_window_len]});
+                std.debug.print("AI ~ landed on {s}\n", .{self.current_window[0..self.current_window_len]});
             } else {
                 self.event_log.log("landed on ground", .{});
+                std.debug.print("AI ~ landed on ground\n", .{});
             }
             // Landing triggers excited mood briefly
             if (self.mood != .anxious) {
                 self.mood = .excited;
                 self.mood_intensity = 0.7;
                 self.mood_timer = 0;
+                std.debug.print("AI ~ mood->excited (landed)\n", .{});
             }
         }
 
@@ -696,7 +705,7 @@ pub const Context = struct {
         if (self.ai_pending) {
             self.ai_pending_timer += dt;
             if (self.ai_pending_timer > 10.0) {
-                std.debug.print("AI timeout, falling back\n", .{});
+                std.debug.print("AI ! timeout after {d:.1}s, falling back to wander\n", .{self.ai_pending_timer});
                 self.ai_pending = false;
                 self.ai_pending_timer = 0;
                 self.setBehavior(.wander, 3.0);
@@ -719,6 +728,7 @@ pub const Context = struct {
                 self.vx += (state.cursor[0] - self.x) * 3.0;
                 self.setBehavior(.trip, 0.8);
                 self.event_log.log("got knocked by cursor", .{});
+                std.debug.print("AI ~ knocked by cursor! mood->anxious\n", .{});
                 self.mood = .anxious;
                 self.mood_intensity = 0.9;
                 self.mood_timer = 0;
@@ -727,6 +737,7 @@ pub const Context = struct {
                 self.setBehavior(.flee, 1.5);
                 self.wander_dir = if (state.cursor[0] > self.x) -1.0 else 1.0;
                 self.event_log.log("fleeing from cursor", .{});
+                std.debug.print("AI ~ fleeing from cursor!\n", .{});
                 self.mood = .anxious;
                 self.mood_intensity = 0.7;
                 self.mood_timer = 0;
@@ -800,6 +811,7 @@ pub const Context = struct {
                 self.landed_on_new = true;
                 self.setBehavior(.idle, 0.5);
                 self.event_log.log("climbed up", .{});
+                std.debug.print("AI ~ reached top\n", .{});
             }
         } else {
         self.vy -= gravity * dt;
@@ -842,6 +854,7 @@ pub const Context = struct {
                             self.climb_wall_x = wall_x;
                             self.climb_target_y = fw.y + fw.h;
                             self.setBehavior(.climb, 15.0);
+                            std.debug.print("AI ~ climbing wall\n", .{});
                         } else {
                             // Run toward the wall
                             self.facing_right = wall_x > self.x;
@@ -857,6 +870,7 @@ pub const Context = struct {
                         // Target is below — drop through current platform
                         self.dropping = true;
                         self.drop_platform_y = self.y;
+                        std.debug.print("AI ~ dropping through platform\n", .{});
                         self.grounded = false;
                         self.vy = -50.0; // small downward kick
                         // Drift toward target horizontally while falling
