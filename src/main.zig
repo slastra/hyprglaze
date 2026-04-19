@@ -209,10 +209,10 @@ pub fn main() !void {
                 reload_pending -= 1;
                 if (reloadConfig(allocator, &cfg, &effect, &shader_prog, &pal, &trans, &shader_path_expanded, surf_w, surf_h)) |_| {
                     reload_pending = 0;
+                    cw.rewatch(); // re-establish watch on the (possibly new) file
                 } else |err| {
                     if (err == error.FileNotFound and reload_pending > 0) {
                         // Editor save race — retry next frame
-                        cw.rewatch();
                     } else {
                         std.debug.print("Reload failed: {}\n", .{err});
                         reload_pending = 0;
