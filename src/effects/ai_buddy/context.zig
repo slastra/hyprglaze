@@ -644,17 +644,14 @@ pub const Context = struct {
             self.windows_visited +|= 1;
             if (self.current_window_len > 0) {
                 self.event_log.log("landed on {s}", .{self.current_window[0..self.current_window_len]});
-                std.debug.print("AI ~ landed on {s}\n", .{self.current_window[0..self.current_window_len]});
             } else {
                 self.event_log.log("landed on ground", .{});
-                std.debug.print("AI ~ landed on ground\n", .{});
             }
             // Landing triggers excited mood briefly
             if (self.mood != .anxious) {
                 self.mood = .excited;
                 self.mood_intensity = 0.7;
                 self.mood_timer = 0;
-                std.debug.print("AI ~ mood->excited (landed)\n", .{});
             }
         }
 
