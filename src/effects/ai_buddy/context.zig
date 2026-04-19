@@ -357,6 +357,8 @@ pub const Context = struct {
             \\- On the focused window: relax, wave, push, celebrate, or be playful.
             \\- React to your environment: get sleepy at night, excited by new windows, anxious near fast cursor.
             \\- Express emotions through mood and emotes.
+            \\- NEVER repeat the same "say" text. Check "Recent" for what you already said and say something new each time.
+            \\- Vary your actions too — don't chain the same behavior repeatedly.
             \\
             \\{s}
             \\{s}
