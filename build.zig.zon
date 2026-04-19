@@ -1,0 +1,19 @@
+.{
+    .name = .hyprglaze,
+    .version = "0.1.0",
+    .dependencies = .{
+        .toml = .{
+            .url = "git+https://github.com/sam701/zig-toml#a73c9423d88ed413204b39638fab7e9bccdb83fd",
+            .hash = "toml-0.3.0-bV14Be6EAQDr0fkyURz4jYFyTAMPcwlNN0FEPVjDnXTR",
+        },
+    },
+    .fingerprint = 0xe3d08712c8aa10dc,
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "protocols",
+        "shaders",
+    },
+}

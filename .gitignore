@@ -1,0 +1,30 @@
+zig-out/
+zig-cache/
+.zig-cache/
+.cache/
+
+# Temp files
+/tmp/
+*.swp
+*.swo
+
+# AWS credentials — NEVER commit
+hyprglaze-aws.env
+*.env
+
+# Aseprite source files
+*.aseprite
+
+# OS
+.DS_Store
+__MACOSX/
+
+# Downloaded asset packs (not ours to redistribute)
+Prototype_Character/
+
+# Unused sprite assets
+sprites/character.json
+sprites/character.png
+
+# Playwright MCP
+.playwright-mcp/
