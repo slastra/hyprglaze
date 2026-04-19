@@ -23,6 +23,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `cellbloom` | Voronoi cells shaped by window boundaries and cursor, animated drift points |
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
+| `aurora` | Northern lights curtains that drape and bend around windows, cursor distortion |
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `static` | Minimal — just renders a custom shader |
