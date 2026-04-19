@@ -24,7 +24,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
-| `ai-buddy` | AI-driven buddy using Claude Haiku for decision making |
+| `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `static` | Minimal — just renders a custom shader |
 
 ## Dependencies (Arch Linux)
@@ -70,6 +70,18 @@ max_calls_per_minute = 6
 ```
 
 CLI overrides: `zig build run -- --effect particles --theme Nord`
+
+### AI Buddy (AWS Bedrock)
+
+The `ai-buddy` effect uses Claude Haiku via AWS Bedrock for decision-making. To use it, create `~/.config/hypr/hyprglaze-aws.env` with your AWS credentials:
+
+```
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+AWS_DEFAULT_REGION=us-east-1
+```
+
+Requires the `aws` CLI to be installed and model access enabled for `us.anthropic.claude-haiku-4-5-20251001-v1:0` in your AWS account (Bedrock → Model access).
 
 ## Shader Uniforms
 
