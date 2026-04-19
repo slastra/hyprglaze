@@ -203,7 +203,15 @@ pub fn main() !void {
             if (cw.poll()) {
                 std.debug.print("Config changed, reloading...\n", .{});
                 reloadConfig(allocator, &cfg, &effect, &shader_prog, &pal, &trans, &shader_path_expanded, surf_w, surf_h) catch |err| {
-                    std.debug.print("Reload failed: {}\n", .{err});
+                    if (err == error.FileNotFound) {
+                        // Editor save race — file deleted before new one written. Retry.
+                        std.Thread.sleep(50 * std.time.ns_per_ms);
+                        reloadConfig(allocator, &cfg, &effect, &shader_prog, &pal, &trans, &shader_path_expanded, surf_w, surf_h) catch |err2| {
+                            std.debug.print("Reload failed: {}\n", .{err2});
+                        };
+                    } else {
+                        std.debug.print("Reload failed: {}\n", .{err});
+                    }
                 };
             }
         }
