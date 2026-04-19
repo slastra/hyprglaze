@@ -54,7 +54,7 @@ pub const FileWatcher = struct {
         return changed;
     }
 
-    fn rewatch(self: *FileWatcher) void {
+    pub fn rewatch(self: *FileWatcher) void {
         posix.inotify_rm_watch(self.inotify_fd, self.watch_fd);
         self.watch_fd = posix.inotify_add_watch(
             self.inotify_fd,
