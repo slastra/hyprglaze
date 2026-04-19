@@ -160,6 +160,7 @@ pub fn main() !void {
     var frame_count: u32 = 0;
     var ipc_skip: u32 = 0;
     var reload_pending: u8 = 0;
+    var reload_cooldown: u8 = 0;
     var cached_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var cached_collision_rects: [hypr.max_visible_windows]particles.Rect = undefined;
     var cached_window_count: u8 = 0;
@@ -201,7 +202,10 @@ pub fn main() !void {
         try wl.dispatch();
 
         if (config_watcher) |*cw| {
-            if (cw.poll() or reload_pending > 0) {
+            if (reload_cooldown > 0) {
+                reload_cooldown -= 1;
+                _ = cw.poll(); // drain events from rewatch
+            } else if (cw.poll() or reload_pending > 0) {
                 if (reload_pending == 0) {
                     std.debug.print("Config changed, reloading...\n", .{});
                     reload_pending = 5;
@@ -209,7 +213,8 @@ pub fn main() !void {
                 reload_pending -= 1;
                 if (reloadConfig(allocator, &cfg, &effect, &shader_prog, &pal, &trans, &shader_path_expanded, surf_w, surf_h)) |_| {
                     reload_pending = 0;
-                    cw.rewatch(); // re-establish watch on the (possibly new) file
+                    cw.rewatch();
+                    reload_cooldown = 10; // ignore events for next 10 frames
                 } else |err| {
                     if (err == error.FileNotFound and reload_pending > 0) {
                         // Editor save race — retry next frame
