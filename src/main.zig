@@ -162,6 +162,11 @@ pub fn main() !void {
     var cached_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var cached_collision_rects: [hypr.max_visible_windows]particles.Rect = undefined;
     var cached_window_count: u8 = 0;
+    var cached_window_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
+    var cached_focused_class: [64]u8 = [_]u8{0} ** 64;
+    var cached_focused_class_len: u8 = 0;
+    var cached_focused_title: [64]u8 = [_]u8{0} ** 64;
+    var cached_focused_title_len: u8 = 0;
     var fps_timer = try std.time.Timer.start();
     var timer = try std.time.Timer.start();
 
@@ -169,6 +174,11 @@ pub fn main() !void {
     const raw0 = queryRawState(&ipc, allocator, surf_h);
     trans.seed(raw0.win, raw0.cursor, raw0.win_address);
     cacheWindows(&cached_windows, &cached_collision_rects, &cached_window_count, &raw0);
+    for (0..raw0.window_count) |i| cached_window_info[i] = raw0.window_info[i];
+    cached_focused_class = raw0.focused_class;
+    cached_focused_class_len = raw0.focused_class_len;
+    cached_focused_title = raw0.focused_title;
+    cached_focused_title_len = raw0.focused_title_len;
     var cached_raw_win = raw0.win;
     var cached_win_address: u64 = raw0.win_address;
 
@@ -222,7 +232,12 @@ pub fn main() !void {
                 target_window_count = raw.window_count;
                 for (0..raw.window_count) |i| {
                     target_windows[i] = raw.windows[i];
+                    cached_window_info[i] = raw.window_info[i];
                 }
+                cached_focused_class = raw.focused_class;
+                cached_focused_class_len = raw.focused_class_len;
+                cached_focused_title = raw.focused_title;
+                cached_focused_title_len = raw.focused_title_len;
             }
             trans.update(time_f64, cached_raw_win, raw_cursor, cached_win_address);
 
@@ -260,6 +275,11 @@ pub fn main() !void {
                 .focused_win = trans.current_win,
                 .windows = cached_windows[0..cached_window_count],
                 .collision_rects = cached_collision_rects[0..cached_window_count],
+                .window_info = cached_window_info[0..cached_window_count],
+                .focused_class = cached_focused_class,
+                .focused_class_len = cached_focused_class_len,
+                .focused_title = cached_focused_title,
+                .focused_title_len = cached_focused_title_len,
             });
             effect.upload(&shader_prog);
 
@@ -327,6 +347,11 @@ const RawState = struct {
     cursor: [2]f32,
     windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect,
     window_count: u8,
+    window_info: [hypr.max_visible_windows]effects.WindowInfo,
+    focused_class: [64]u8,
+    focused_class_len: u8,
+    focused_title: [64]u8,
+    focused_title_len: u8,
 };
 
 fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h: f32) RawState {
@@ -341,6 +366,7 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
 
     const visible = ipc.visibleWindows(allocator) catch hypr.VisibleWindows{};
     var windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
+    var win_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
     for (0..visible.count) |i| {
         const vw = visible.windows[i];
         windows[i] = .{
@@ -349,7 +375,28 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
             .w = @floatFromInt(vw.w),
             .h = @floatFromInt(vw.h),
         };
+        // Copy class/title metadata
+        var info = effects.WindowInfo{};
+        const clen: u8 = @intCast(@min(vw.class_len, 64));
+        if (clen > 0) @memcpy(info.class[0..clen], vw.class[0..clen]);
+        info.class_len = clen;
+        const tlen: u8 = @intCast(@min(vw.title_len, 64));
+        if (tlen > 0) @memcpy(info.title[0..tlen], vw.title[0..tlen]);
+        info.title_len = tlen;
+        win_info[i] = info;
     }
+
+    // Focused window metadata
+    var fc: [64]u8 = [_]u8{0} ** 64;
+    var fc_len: u8 = 0;
+    var ft: [64]u8 = [_]u8{0} ** 64;
+    var ft_len: u8 = 0;
+    const fcl: u8 = @intCast(@min(win.class_len, 64));
+    if (fcl > 0) @memcpy(fc[0..fcl], win.class[0..fcl]);
+    fc_len = fcl;
+    const ftl: u8 = @intCast(@min(win.title_len, 64));
+    if (ftl > 0) @memcpy(ft[0..ftl], win.title[0..ftl]);
+    ft_len = ftl;
 
     return .{
         .win = .{ .x = wx, .y = surf_h - (wy + wh), .w = ww, .h = wh },
@@ -357,6 +404,11 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
         .cursor = .{ @floatFromInt(cur.x), surf_h - @as(f32, @floatFromInt(cur.y)) },
         .windows = windows,
         .window_count = visible.count,
+        .window_info = win_info,
+        .focused_class = fc,
+        .focused_class_len = fc_len,
+        .focused_title = ft,
+        .focused_title_len = ft_len,
     };
 }
 

@@ -14,9 +14,15 @@ pub const WindowGeometry = struct {
     address: u64 = 0,
     class: [128]u8 = undefined,
     class_len: u8 = 0,
+    title: [128]u8 = undefined,
+    title_len: u8 = 0,
 
     pub fn className(self: *const WindowGeometry) []const u8 {
         return self.class[0..self.class_len];
+    }
+
+    pub fn titleStr(self: *const WindowGeometry) []const u8 {
+        return self.title[0..self.title_len];
     }
 };
 
@@ -154,6 +160,15 @@ pub const HyprIpc = struct {
             }
         }
 
+        if (root.get("title")) |title_val| {
+            if (title_val == .string) {
+                const title = title_val.string;
+                const len: u8 = @intCast(@min(title.len, 128));
+                @memcpy(result.title[0..len], title[0..len]);
+                result.title_len = len;
+            }
+        }
+
         return result;
     }
 
@@ -210,6 +225,15 @@ pub const HyprIpc = struct {
                     const len: u8 = @intCast(@min(class.len, 128));
                     @memcpy(win.class[0..len], class[0..len]);
                     win.class_len = len;
+                }
+            }
+
+            if (obj.get("title")) |title_val| {
+                if (title_val == .string) {
+                    const title = title_val.string;
+                    const len: u8 = @intCast(@min(title.len, 128));
+                    @memcpy(win.title[0..len], title[0..len]);
+                    win.title_len = len;
                 }
             }
 

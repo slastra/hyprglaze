@@ -2,7 +2,7 @@ const std = @import("std");
 const shader_mod = @import("../../core/shader.zig");
 const transition_mod = @import("../../core/transition.zig");
 
-pub const max_events = 8;
+pub const max_events = 16;
 
 pub const Event = struct {
     text: [128]u8 = undefined,
@@ -42,6 +42,9 @@ pub fn describeLayout(
     my_y: f32,
     state_windows: []const shader_mod.ShaderProgram.WindowRect,
     focused: transition_mod.Rect,
+    classes: *const [32][32]u8,
+    class_lens: *const [32]u8,
+    window_count: u8,
     buf: []u8,
 ) []const u8 {
     var pos: usize = 0;
@@ -49,7 +52,7 @@ pub fn describeLayout(
     const me = std.fmt.bufPrint(buf[pos..], "You are at ({d:.0},{d:.0}). ", .{ my_x, my_y }) catch return buf[0..pos];
     pos += me.len;
 
-    for (state_windows) |win| {
+    for (state_windows, 0..) |win, wi| {
         if (win.w < 1) continue;
         if (pos + 100 >= buf.len) break;
         const cx = win.x + win.w * 0.5;
@@ -62,7 +65,14 @@ pub fn describeLayout(
 
         const is_focused = @abs(win.x - focused.x) < 2 and @abs(win.y - focused.y) < 2;
 
-        const desc = std.fmt.bufPrint(buf[pos..], "Window {s}{s} to the {s}. ", .{
+        // Use class name if available
+        const class_name = if (wi < window_count and class_lens[wi] > 0)
+            classes[wi][0..class_lens[wi]]
+        else
+            "Window";
+
+        const desc = std.fmt.bufPrint(buf[pos..], "{s} {s}{s} to the {s}. ", .{
+            class_name,
             if (is_focused) "(focused) " else "",
             vert,
             horiz,

@@ -13,6 +13,13 @@ const fluid = @import("effects/fluid.zig");
 const buddy = @import("effects/buddy/context.zig");
 const ai_buddy = @import("effects/ai_buddy/context.zig");
 
+pub const WindowInfo = struct {
+    class: [64]u8 = undefined,
+    class_len: u8 = 0,
+    title: [64]u8 = undefined,
+    title_len: u8 = 0,
+};
+
 pub const FrameState = struct {
     dt: f32,
     time: f32,
@@ -20,6 +27,11 @@ pub const FrameState = struct {
     focused_win: transition_mod.Rect,
     windows: []const shader_mod.ShaderProgram.WindowRect,
     collision_rects: []const particles_sys.Rect,
+    window_info: ?[]const WindowInfo = null,
+    focused_class: [64]u8 = [_]u8{0} ** 64,
+    focused_class_len: u8 = 0,
+    focused_title: [64]u8 = [_]u8{0} ** 64,
+    focused_title_len: u8 = 0,
 };
 
 pub const Effect = union(enum) {
