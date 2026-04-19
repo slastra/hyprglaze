@@ -162,6 +162,8 @@ pub const Context = struct {
     dropping: bool = false,
     drop_platform_y: f32 = 0,
     land_cooldown: f32 = 0,
+    airborne_time: f32 = 0,
+    flee_cooldown: f32 = 0,
     climbing: bool = false,
     climb_wall_x: f32 = 0,
     climb_target_y: f32 = 0,
@@ -733,11 +735,12 @@ pub const Context = struct {
                 self.mood_intensity = 0.9;
                 self.mood_timer = 0;
                 self.spawnEmote(.exclaim);
-            } else if (self.cursor_speed > 800 and cursor_dist < 80) {
+            } else if (self.cursor_speed > 800 and cursor_dist < 80 and self.flee_cooldown <= 0) {
                 self.setBehavior(.flee, 1.5);
                 self.wander_dir = if (state.cursor[0] > self.x) -1.0 else 1.0;
                 self.event_log.log("fleeing from cursor", .{});
                 std.debug.print("AI ~ fleeing from cursor!\n", .{});
+                self.flee_cooldown = 2.0;
                 self.mood = .anxious;
                 self.mood_intensity = 0.7;
                 self.mood_timer = 0;
@@ -747,6 +750,7 @@ pub const Context = struct {
         // --- Behavior timer ---
         if (!self.climbing) self.behavior_timer += dt;
         self.jump_cooldown -= dt;
+        self.flee_cooldown -= dt;
 
         // Behavior expired — pop next from queue, or procedural fallback
         if (self.behavior_timer >= self.behavior_duration) {
@@ -985,17 +989,18 @@ pub const Context = struct {
 
         // --- Collisions ---
         const was_grounded = self.grounded;
-        const was_falling = self.vy < -10.0;
         self.grounded = false;
+        if (!was_grounded) self.airborne_time += dt;
 
         if (self.y <= 0) {
             self.y = 0;
             self.vy = 0;
             self.grounded = true;
-            if (!was_grounded and was_falling) {
+            if (!was_grounded and self.airborne_time > 0.15) {
                 self.landed_on_new = true;
                 self.current_window_len = 0;
             }
+            self.airborne_time = 0;
         }
 
         // Clear drop state once we've fallen well below the platform
@@ -1017,8 +1022,9 @@ pub const Context = struct {
                 self.y = wt;
                 self.vy = 0;
                 self.dropping = false;
-                if (!self.grounded and was_falling) {
+                if (!self.grounded and self.airborne_time > 0.15) {
                     self.landed_on_new = true;
+                    self.airborne_time = 0;
                     // Identify window by class name from cached metadata
                     if (wi < self.cached_window_count) {
                         const clen = self.cached_window_class_lens[wi];
