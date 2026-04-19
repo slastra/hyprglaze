@@ -132,8 +132,10 @@ pub const Context = struct {
                 const fade: f32 = 1.0 - @as(f32, @floatFromInt(t + 1)) / @as(f32, @floatFromInt(TRAIL_LEN + 1));
                 const trail_size = p.size * fade;
 
+                // Encode trail age: w = color_idx + (trail_step + 1) * 10
+                const age_tag: f32 = @as(f32, @floatFromInt(t + 1)) * 10.0;
                 if (prog.i_particles[slot] >= 0) {
-                    c.glUniform4f(prog.i_particles[slot], pos[0], pos[1], trail_size, p.color_idx);
+                    c.glUniform4f(prog.i_particles[slot], pos[0], pos[1], trail_size, p.color_idx + age_tag);
                 }
                 slot += 1;
             }

@@ -79,7 +79,20 @@ void main() {
             vec4 texel = texture(iSprite, tex_uv);
 
             if (texel.a > 0.1) {
-                col = texel.rgb;
+                // Recolor sprite to match palette
+                float lum = dot(texel.rgb, vec3(0.299, 0.587, 0.114));
+                if (iPaletteSize > 5) {
+                    // Dark parts → background, mid → accent, bright → foreground
+                    vec3 dark = iPalette[0];       // surface
+                    vec3 mid = iPalette[5];         // iris
+                    vec3 light = iPaletteFg;
+                    vec3 recolored = lum < 0.5
+                        ? mix(dark, mid, lum * 2.0)
+                        : mix(mid, light, (lum - 0.5) * 2.0);
+                    col = recolored;
+                } else {
+                    col = texel.rgb;
+                }
             }
         }
 

@@ -27,8 +27,8 @@ pub const ParticleSystem = struct {
     // Forces
     gravity_y: f32 = 0.0,
     damping: f32 = 0.999,
-    cursor_strength: f32 = 200.0,
-    cursor_radius: f32 = 300.0,
+    cursor_strength: f32 = -800.0, // negative = repel
+    cursor_radius: f32 = 400.0,
     bounce_restitution: f32 = 0.5,
     pop_threshold: f32 = 50.0,
 
