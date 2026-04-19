@@ -19,35 +19,26 @@ uniform vec3 iPaletteFg;
 
 out vec4 fragColor;
 
-vec3 samplePalette(float t) {
-    if (iPaletteSize <= 0) return vec3(0.6);
-    float idx = t * float(iPaletteSize - 1);
-    int i0 = int(floor(idx));
-    int i1 = min(i0 + 1, iPaletteSize - 1);
-    return mix(iPalette[i0], iPalette[i1], idx - float(i0));
-}
-
 void main() {
-    vec2 fragCoord = gl_FragCoord.xy;
-    vec2 uv = fragCoord / iResolution.xy;
+    vec2 fc = gl_FragCoord.xy;
 
     vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.02);
     vec3 col = bg;
 
-    // Particles — clean dots with soft falloff
+    // Draw all dots — heads and trail echoes
     for (int i = 0; i < iParticleCount && i < 300; i++) {
         vec4 pd = iParticles[i];
-        vec2 delta = fragCoord - pd.xy;
-
-        // Early-out: skip if clearly outside particle radius
         float r = pd.z;
-        if (abs(delta.x) > r + 1.0 || abs(delta.y) > r + 1.0) continue;
 
-        float dist = length(delta);
+        // Early-out
+        if (abs(fc.x - pd.x) > r + 1.0 || abs(fc.y - pd.y) > r + 1.0) continue;
+
+        float dist = length(fc - pd.xy);
         float dot = 1.0 - smoothstep(r - 0.5, r + 0.5, dist);
 
         if (dot > 0.001) {
-            vec3 pcol = samplePalette(pd.w);
+            int ci = 1 + int(mod(pd.w * 5.99, 6.0));
+            vec3 pcol = (iPaletteSize > ci) ? iPalette[ci] : vec3(0.6);
             col = mix(col, pcol, dot * 0.85);
         }
     }

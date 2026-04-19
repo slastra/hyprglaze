@@ -28,11 +28,21 @@ pub const TransitionState = struct {
     cursor_smoothing: f32 = 0.15,
     geometry_smoothing: f32 = 0.12,
 
+    // Timing for frame-rate independent smoothing
+    last_time: f64 = 0,
+
     pub fn init() TransitionState {
         return .{};
     }
 
     pub fn update(self: *TransitionState, time: f64, raw_win: Rect, raw_cursor: [2]f32, win_address: u64) void {
+        // Frame-rate independent dt
+        const dt: f32 = if (self.last_time > 0)
+            @floatCast(@min(time - self.last_time, 0.1))
+        else
+            1.0 / 30.0;
+        self.last_time = time;
+
         // --- Focus change detection (by identity, not geometry) ---
         if (win_address != 0 and win_address != self.focused_address) {
             self.focused_address = win_address;
@@ -47,19 +57,18 @@ pub const TransitionState = struct {
             self.transition_progress = t;
         }
 
-        // --- Exponential smoothing for window geometry ---
+        // --- Frame-rate independent exponential smoothing ---
         if (raw_win.hasArea()) {
-            const gs = self.geometry_smoothing;
-            self.current_win.x = smoothValue(self.current_win.x, raw_win.x, gs);
-            self.current_win.y = smoothValue(self.current_win.y, raw_win.y, gs);
-            self.current_win.w = smoothValue(self.current_win.w, raw_win.w, gs);
-            self.current_win.h = smoothValue(self.current_win.h, raw_win.h, gs);
+            const ag = smoothAlpha(self.geometry_smoothing, dt);
+            self.current_win.x += (raw_win.x - self.current_win.x) * ag;
+            self.current_win.y += (raw_win.y - self.current_win.y) * ag;
+            self.current_win.w += (raw_win.w - self.current_win.w) * ag;
+            self.current_win.h += (raw_win.h - self.current_win.h) * ag;
         }
 
-        // --- Exponential smoothing for cursor ---
-        const cs = self.cursor_smoothing;
-        self.current_cursor[0] = smoothValue(self.current_cursor[0], raw_cursor[0], cs);
-        self.current_cursor[1] = smoothValue(self.current_cursor[1], raw_cursor[1], cs);
+        const ac = smoothAlpha(self.cursor_smoothing, dt);
+        self.current_cursor[0] += (raw_cursor[0] - self.current_cursor[0]) * ac;
+        self.current_cursor[1] += (raw_cursor[1] - self.current_cursor[1]) * ac;
     }
 
     pub fn seed(self: *TransitionState, win: Rect, cursor: [2]f32, address: u64) void {
@@ -69,9 +78,10 @@ pub const TransitionState = struct {
     }
 };
 
-fn smoothValue(current: f32, target: f32, factor: f32) f32 {
-    const result = current + (target - current) * (1.0 - factor);
-    // Snap when very close to avoid perpetual drift
-    if (@abs(result - target) < 0.5) return target;
-    return result;
+/// Convert a per-frame smoothing factor to a frame-rate independent alpha.
+/// Factor is tuned for 30fps: 0 = instant, 1 = frozen.
+fn smoothAlpha(factor: f32, dt: f32) f32 {
+    const f = std.math.clamp(factor, 0.001, 0.999);
+    const speed = -@log(f) * 30.0;
+    return 1.0 - @exp(-speed * dt);
 }

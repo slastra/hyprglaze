@@ -17,8 +17,11 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 
 | Effect | Description |
 |--------|-------------|
-| `particles` | Physics particles that bounce off windows, attracted to focused window |
-| `windowglow` | Shader glow around windows with focus transitions |
+| `particles` | Verlet physics particles with tracer trails, window collision, focused window gravity |
+| `windowglow` | Subtle accent glow around focused window, surface tint on unfocused |
+| `cellbloom` | Voronoi cells shaped by window boundaries and cursor, animated drift points |
+| `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
+| `fluid` | Metaball contour lines that merge organically around windows and cursor |
 | `buddy` | Animated sprite character with procedural behaviors |
 | `ai-buddy` | AI-driven buddy using Claude Haiku for decision making |
 | `static` | Minimal — just renders a custom shader |

@@ -4,7 +4,7 @@ const c = @cImport({
 });
 const palette_mod = @import("palette.zig");
 const hypr = @import("hypr.zig");
-const particles_mod = @import("../effects/particles.zig");
+const particles_mod = @import("../effects/particles/system.zig");
 
 pub const max_windows = hypr.max_visible_windows;
 pub const max_particles = particles_mod.max_particles;
@@ -120,18 +120,6 @@ pub const ShaderProgram = struct {
         };
     }
 
-    pub fn setParticles(self: *const ShaderProgram, psys: *const particles_mod.ParticleSystem) void {
-        c.glUseProgram(self.program);
-
-        for (0..psys.count) |i| {
-            if (self.i_particles[i] >= 0) {
-                const p = psys.particles[i];
-                c.glUniform4f(self.i_particles[i], p.x, p.y, p.size, p.color_idx);
-            }
-        }
-        if (self.i_particle_count >= 0)
-            c.glUniform1i(self.i_particle_count, @intCast(psys.count));
-    }
 
     pub fn setPalette(self: *const ShaderProgram, pal: *const palette_mod.Palette) void {
         c.glUseProgram(self.program);

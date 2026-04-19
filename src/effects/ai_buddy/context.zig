@@ -1,59 +1,31 @@
 const std = @import("std");
-const shader_mod = @import("../core/shader.zig");
-const texture_mod = @import("../core/texture.zig");
-const effects = @import("../effects.zig");
-const transition_mod = @import("../core/transition.zig");
+const shader_mod = @import("../../core/shader.zig");
+const texture_mod = @import("../../core/texture.zig");
+const config_mod = @import("../../core/config.zig");
+const transition_mod = @import("../../core/transition.zig");
+const effects = @import("../../effects.zig");
+const sprite = @import("../buddy/sprite.zig");
+const ai_mod = @import("ai.zig");
+const events_mod = @import("events.zig");
 
 const c = @cImport({ @cInclude("GLES3/gl3.h"); });
 
-// Same sprite sheet as buddy: 256x352, 32x32 cells, 8 cols x 11 rows
-const CELL: f32 = 32;
-const SHEET_W: f32 = 256;
-const SHEET_H: f32 = 352;
-
-const Anim = struct { row: u8, frames: u8, fps: f32, looping: bool = true };
-const IDLE    = Anim{ .row = 0,  .frames = 4, .fps = 4.0 };
-const WALK    = Anim{ .row = 1,  .frames = 6, .fps = 8.0 };
-const RUN     = Anim{ .row = 2,  .frames = 6, .fps = 12.0 };
-const JUMP    = Anim{ .row = 3,  .frames = 8, .fps = 10.0, .looping = false };
-const ATTACK1 = Anim{ .row = 4,  .frames = 4, .fps = 8.0,  .looping = false };
-const ATTACK2 = Anim{ .row = 5,  .frames = 6, .fps = 10.0, .looping = false };
-const PUSH    = Anim{ .row = 6,  .frames = 6, .fps = 6.0 };
-const THROW   = Anim{ .row = 7,  .frames = 4, .fps = 6.0,  .looping = false };
-const CLIMB   = Anim{ .row = 8,  .frames = 4, .fps = 6.0 };
-const HURT    = Anim{ .row = 9,  .frames = 4, .fps = 8.0,  .looping = false };
-const DEATH   = Anim{ .row = 10, .frames = 8, .fps = 6.0,  .looping = false };
-
-const Behavior = enum {
-    idle, wander, chase, jump_to, wave, push, throw_rock,
-    trip, dramatic_death, climb, curious, flee, celebrate,
-};
-
-// Event log for Haiku context
-const max_events = 8;
-const Event = struct {
-    text: [128]u8 = undefined,
-    len: u8 = 0,
-
-    fn set(self: *Event, msg: []const u8) void {
-        const l: u8 = @intCast(@min(msg.len, 128));
-        @memcpy(self.text[0..l], msg[0..l]);
-        self.len = l;
-    }
-
-    fn slice(self: *const Event) []const u8 {
-        return self.text[0..self.len];
-    }
-};
-
-pub const QueuedAction = struct {
-    behavior: Behavior,
-    duration: f32,
-    dir: f32,
-};
+const Anim = sprite.Anim;
+const Behavior = sprite.Behavior;
+const IDLE = sprite.IDLE;
+const WALK = sprite.WALK;
+const RUN = sprite.RUN;
+const JUMP = sprite.JUMP;
+const ATTACK1 = sprite.ATTACK1;
+const ATTACK2 = sprite.ATTACK2;
+const PUSH = sprite.PUSH;
+const THROW = sprite.THROW;
+const CLIMB = sprite.CLIMB;
+const HURT = sprite.HURT;
+const DEATH = sprite.DEATH;
 
 pub const Context = struct {
-    // Base buddy state (same as buddy.zig)
+    // Base buddy state
     x: f32,
     y: f32,
     vx: f32 = 0,
@@ -88,40 +60,31 @@ pub const Context = struct {
     allocator: std.mem.Allocator,
 
     // AI state
-    events: [max_events]Event = [_]Event{.{}} ** max_events,
-    event_count: u8 = 0,
+    event_log: events_mod.EventLog = .{},
     current_window: [64]u8 = undefined,
     current_window_len: u8 = 0,
-    prev_window: [64]u8 = undefined,
-    prev_window_len: u8 = 0,
     ai_cooldown: f32 = 5.0,
     ai_timer: f32 = 0,
     ai_pending: bool = false,
     ai_pending_timer: f32 = 0,
 
-    action_queue: [8]QueuedAction = undefined,
+    action_queue: [8]ai_mod.QueuedAction = undefined,
     queue_len: u8 = 0,
     queue_pos: u8 = 0,
     landed_on_new: bool = false,
-    prev_focused_addr: u64 = 0,
 
     // Rate limiting
     calls_this_minute: u8 = 0,
     minute_timer: f32 = 0,
-    max_calls_per_minute: u8 = 6, // max 6 calls/min = 360/hr ≈ $0.01/hr
-    last_event_time: f32 = 0,
-    event_debounce: f32 = 2.0, // min seconds between logging same event type
+    max_calls_per_minute: u8 = 6,
     windows_visited: u8 = 0,
     cached_windows: [32]shader_mod.ShaderProgram.WindowRect = undefined,
     cached_window_count: u8 = 0,
     cached_focused: transition_mod.Rect = .{},
 
-    const config_mod = @import("../core/config.zig");
-
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) Context {
         const sprite_path = params.getString("sprite", "sprites/buddy.png") orelse "sprites/buddy.png";
-        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch
-            texture_mod.Texture.loadFromFile("/home/shaun/hyprglaze/sprites/buddy.png") catch null;
+        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch null;
 
         const scale: f32 = params.getFloat("scale", 2.0);
         const walk_spd = (32.0 * scale) / (6.0 / 8.0);
@@ -145,55 +108,6 @@ pub const Context = struct {
         };
     }
 
-    fn logEvent(self: *Context, comptime fmt: []const u8, args: anytype) void {
-        var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-        // Shift events
-        if (self.event_count >= max_events) {
-            for (0..max_events - 1) |i| {
-                self.events[i] = self.events[i + 1];
-            }
-            self.event_count = max_events - 1;
-        }
-        self.events[self.event_count].set(msg);
-        self.event_count += 1;
-    }
-
-    fn describeLayout(self: *Context, state_windows: []const shader_mod.ShaderProgram.WindowRect, focused: transition_mod.Rect, buf: []u8) []const u8 {
-        var pos: usize = 0;
-        const my_x = self.x;
-        const my_y = self.y;
-
-        // Describe buddy position
-        const me = std.fmt.bufPrint(buf[pos..], "You are at ({d:.0},{d:.0}). ", .{ my_x, my_y }) catch return buf[0..pos];
-        pos += me.len;
-
-        // Describe nearby windows
-        for (state_windows) |win| {
-            if (win.w < 1) continue;
-            if (pos + 100 >= buf.len) break;
-            const cx = win.x + win.w * 0.5;
-            const cy = win.y + win.h * 0.5;
-            const dx = cx - my_x;
-            const dy = cy - my_y;
-
-            const horiz: []const u8 = if (dx > 50) "right" else if (dx < -50) "left" else "here";
-            const vert: []const u8 = if (dy > 50) "above" else if (dy < -50) "below" else "level";
-
-            // Is this the focused window?
-            const is_focused = @abs(win.x - focused.x) < 2 and @abs(win.y - focused.y) < 2;
-
-            const desc = std.fmt.bufPrint(buf[pos..], "Window {s}{s} to the {s}. ", .{
-                if (is_focused) "(focused) " else "",
-                vert,
-                horiz,
-            }) catch break;
-            pos += desc.len;
-        }
-
-        return buf[0..pos];
-    }
-
     fn callHaiku(self: *Context) void {
         // Build event context
         var context_buf: [512]u8 = undefined;
@@ -203,8 +117,8 @@ pub const Context = struct {
         @memcpy(context_buf[pos..pos + header.len], header);
         pos += header.len;
 
-        for (0..self.event_count) |i| {
-            const ev = self.events[i].slice();
+        for (0..self.event_log.count) |i| {
+            const ev = self.event_log.events[i].slice();
             if (pos + ev.len + 2 >= context_buf.len) break;
             @memcpy(context_buf[pos..pos + ev.len], ev);
             pos += ev.len;
@@ -217,7 +131,7 @@ pub const Context = struct {
 
         // Build spatial layout description
         var layout_buf: [512]u8 = undefined;
-        const layout = self.describeLayout(self.cached_windows[0..self.cached_window_count], self.cached_focused, &layout_buf);
+        const layout = events_mod.describeLayout(self.x, self.y, self.cached_windows[0..self.cached_window_count], self.cached_focused, &layout_buf);
 
         var prompt_buf: [2048]u8 = undefined;
         const prompt = std.fmt.bufPrint(&prompt_buf,
@@ -250,7 +164,7 @@ pub const Context = struct {
             },
         }) catch return;
 
-        // Build the Bedrock request body — escape prompt for JSON
+        // Escape prompt for JSON embedding
         var escaped_prompt: [2048]u8 = undefined;
         var ep: usize = 0;
         for (prompt) |ch| {
@@ -323,10 +237,8 @@ pub const Context = struct {
     }
 
     fn checkAiResponse(self: *Context) void {
-        // Check if the done marker exists
         std.fs.accessAbsolute("/tmp/hyprglaze-ai-done", .{}) catch return;
 
-        // Read response
         const file = std.fs.openFileAbsolute("/tmp/hyprglaze-ai-response.json", .{}) catch return;
         defer file.close();
 
@@ -334,7 +246,6 @@ pub const Context = struct {
         const resp_len = file.readAll(&resp_buf) catch return;
         const resp = resp_buf[0..resp_len];
 
-        // Parse outer Bedrock response to get content
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return;
         defer parsed.deinit();
 
@@ -366,7 +277,6 @@ pub const Context = struct {
                 }
             }
         } else {
-            // Single action fallback
             self.parseOneAction(ai_resp.value.object);
         }
 
@@ -376,14 +286,14 @@ pub const Context = struct {
             var log_buf: [128]u8 = undefined;
             var lp: usize = 0;
             for (0..self.queue_len) |qi| {
-                const name = actionName(self.action_queue[qi].behavior);
+                const name = ai_mod.actionName(self.action_queue[qi].behavior);
                 if (lp + name.len + 2 >= log_buf.len) break;
                 if (qi > 0) { log_buf[lp] = '>'; lp += 1; }
                 @memcpy(log_buf[lp..lp + name.len], name);
                 lp += name.len;
             }
             std.debug.print("AI < {s}\n", .{log_buf[0..lp]});
-            self.logEvent("plan: {s}", .{log_buf[0..lp]});
+            self.event_log.log("plan: {s}", .{log_buf[0..lp]});
         }
 
         self.ai_pending = false;
@@ -394,7 +304,7 @@ pub const Context = struct {
     fn parseOneAction(self: *Context, obj: std.json.ObjectMap) void {
         const act_val = obj.get("action") orelse return;
         if (act_val != .string) return;
-        const mapped = mapAction(act_val.string) orelse return;
+        const mapped = ai_mod.mapAction(act_val.string) orelse return;
 
         const dir_val = obj.get("direction");
         const dir: f32 = if (dir_val) |d|
@@ -408,36 +318,6 @@ pub const Context = struct {
             .dir = dir,
         };
         self.queue_len += 1;
-    }
-
-    fn mapAction(name: []const u8) ?QueuedAction {
-        const map = [_]struct { n: []const u8, b: Behavior, d: f32 }{
-            .{ .n = "idle", .b = .idle, .d = 2.0 },
-            .{ .n = "wander", .b = .wander, .d = 3.0 },
-            .{ .n = "chase", .b = .chase, .d = 4.0 },
-            .{ .n = "jump", .b = .jump_to, .d = 2.0 },
-            .{ .n = "wave", .b = .wave, .d = 1.5 },
-            .{ .n = "push", .b = .push, .d = 2.0 },
-            .{ .n = "throw", .b = .throw_rock, .d = 1.2 },
-            .{ .n = "trip", .b = .trip, .d = 1.0 },
-            .{ .n = "death", .b = .dramatic_death, .d = 3.0 },
-            .{ .n = "climb", .b = .climb, .d = 1.5 },
-            .{ .n = "celebrate", .b = .celebrate, .d = 1.5 },
-        };
-        for (map) |m| {
-            if (std.mem.eql(u8, name, m.n)) return .{ .behavior = m.b, .duration = m.d, .dir = 1.0 };
-        }
-        return null;
-    }
-
-    fn actionName(b: Behavior) []const u8 {
-        return switch (b) {
-            .idle => "idle", .wander => "wander", .chase => "chase",
-            .jump_to => "jump", .wave => "wave", .push => "push",
-            .throw_rock => "throw", .trip => "trip", .dramatic_death => "death",
-            .climb => "climb", .celebrate => "celebrate",
-            .curious => "curious", .flee => "flee",
-        };
     }
 
     fn popNextAction(self: *Context) void {
@@ -490,20 +370,19 @@ pub const Context = struct {
             self.landed_on_new = false;
             self.windows_visited +|= 1;
             if (self.current_window_len > 0) {
-                self.logEvent("landed on {s}", .{self.current_window[0..self.current_window_len]});
+                self.event_log.log("landed on {s}", .{self.current_window[0..self.current_window_len]});
             } else {
-                self.logEvent("landed on ground", .{});
+                self.event_log.log("landed on ground", .{});
             }
         }
 
         // Detect cursor approach
         if (cursor_dist < 100 and self.cursor_speed < 50) {
-            // Only log occasionally
             if (self.ai_timer > self.ai_cooldown * 0.5) {
-                self.logEvent("cursor hovering nearby", .{});
+                self.event_log.log("cursor hovering nearby", .{});
             }
         } else if (cursor_dist < 80 and self.cursor_speed > 500) {
-            self.logEvent("cursor swooped past", .{});
+            self.event_log.log("cursor swooped past", .{});
         }
 
         // --- Rate limiting ---
@@ -518,7 +397,6 @@ pub const Context = struct {
         if (self.ai_pending) {
             self.ai_pending_timer += dt;
             if (self.ai_pending_timer > 10.0) {
-                // Timed out — give up and fall back to procedural
                 std.debug.print("AI timeout, falling back\n", .{});
                 self.ai_pending = false;
                 self.ai_pending_timer = 0;
@@ -541,11 +419,11 @@ pub const Context = struct {
             if (self.cursor_speed > 2000) {
                 self.vx += (state.cursor[0] - self.x) * 3.0;
                 self.setBehavior(.trip, 0.8);
-                self.logEvent("got knocked by cursor", .{});
+                self.event_log.log("got knocked by cursor", .{});
             } else if (self.cursor_speed > 800 and cursor_dist < 80) {
                 self.setBehavior(.flee, 1.5);
                 self.wander_dir = if (state.cursor[0] > self.x) -1.0 else 1.0;
-                self.logEvent("fleeing from cursor", .{});
+                self.event_log.log("fleeing from cursor", .{});
             }
         }
 
@@ -650,7 +528,7 @@ pub const Context = struct {
                     self.vx = 0;
                     self.vy = 0;
                     self.setBehavior(.idle, 1.0);
-                    self.logEvent("respawned", .{});
+                    self.event_log.log("respawned", .{});
                 }
             },
             .climb => {
@@ -712,10 +590,7 @@ pub const Context = struct {
                 self.vy = 0;
                 if (!self.grounded) {
                     self.landed_on_new = true;
-                    // Try to identify window by matching to focused
                     if (has_target and @abs(win.x - fw.x) < 2 and @abs(win.y - fw.y) < 2) {
-                        // This is the focused window — we know its class from IPC
-                        // For now just mark as "focused window"
                         const label = "focused window";
                         @memcpy(self.current_window[0..label.len], label);
                         self.current_window_len = label.len;
@@ -781,8 +656,8 @@ pub const Context = struct {
             c.glUniform4f(prog.i_particles[0], self.x, self.y, self.scale, facing);
         if (prog.i_particles[1] >= 0)
             c.glUniform4f(prog.i_particles[1],
-                col_f * CELL / SHEET_W, row_f * CELL / SHEET_H,
-                (col_f + 1.0) * CELL / SHEET_W, (row_f + 1.0) * CELL / SHEET_H);
+                col_f * sprite.CELL / sprite.SHEET_W, row_f * sprite.CELL / sprite.SHEET_H,
+                (col_f + 1.0) * sprite.CELL / sprite.SHEET_W, (row_f + 1.0) * sprite.CELL / sprite.SHEET_H);
         if (prog.i_particle_count >= 0)
             c.glUniform1i(prog.i_particle_count, 2);
     }

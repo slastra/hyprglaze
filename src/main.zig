@@ -8,7 +8,7 @@ const transition = @import("core/transition.zig");
 const config_mod = @import("core/config.zig");
 const watcher_mod = @import("core/watcher.zig");
 const effects = @import("effects.zig");
-const particles = @import("effects/particles.zig");
+const particles = @import("effects/particles/system.zig");
 
 const c = @cImport({
     @cInclude("wayland-client.h");
@@ -63,7 +63,7 @@ pub fn main() !void {
     std.debug.print("Shader: {s}\n", .{shader_path});
     if (cfg.theme) |t| std.debug.print("Theme: {s}\n", .{t});
 
-    const shader_path_expanded = try config_mod.expandHome(allocator, shader_path);
+    var shader_path_expanded = try config_mod.expandHome(allocator, shader_path);
     defer allocator.free(shader_path_expanded);
 
     const frag_source = loadShaderFile(allocator, shader_path_expanded) catch |err| {
@@ -169,6 +169,15 @@ pub fn main() !void {
     const raw0 = queryRawState(&ipc, allocator, surf_h);
     trans.seed(raw0.win, raw0.cursor, raw0.win_address);
     cacheWindows(&cached_windows, &cached_collision_rects, &cached_window_count, &raw0);
+    var cached_raw_win = raw0.win;
+    var cached_win_address: u64 = raw0.win_address;
+
+    // Raw window targets for smoothing
+    var target_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
+    var target_window_count: u8 = raw0.window_count;
+    for (0..raw0.window_count) |i| {
+        target_windows[i] = raw0.windows[i];
+    }
 
     // Initial render
     effect.upload(&shader_prog);
@@ -183,7 +192,7 @@ pub fn main() !void {
         if (config_watcher) |*cw| {
             if (cw.poll()) {
                 std.debug.print("Config changed, reloading...\n", .{});
-                reloadConfig(allocator, &cfg, &shader_prog, &pal, &trans, shader_path_expanded) catch |err| {
+                reloadConfig(allocator, &cfg, &effect, &shader_prog, &pal, &trans, &shader_path_expanded, surf_w, surf_h) catch |err| {
                     std.debug.print("Reload failed: {}\n", .{err});
                 };
             }
@@ -207,10 +216,40 @@ pub fn main() !void {
             if (ipc_skip >= 6) {
                 ipc_skip = 0;
                 const raw = queryRawState(&ipc, allocator, surf_h);
-                trans.update(time_f64, raw.win, raw_cursor, raw.win_address);
-                cacheWindows(&cached_windows, &cached_collision_rects, &cached_window_count, &raw);
-            } else {
-                trans.update(time_f64, trans.current_win, raw_cursor, trans.focused_address);
+                cached_raw_win = raw.win;
+                cached_win_address = raw.win_address;
+                // Update targets
+                target_window_count = raw.window_count;
+                for (0..raw.window_count) |i| {
+                    target_windows[i] = raw.windows[i];
+                }
+            }
+            trans.update(time_f64, cached_raw_win, raw_cursor, cached_win_address);
+
+            // Smooth all window positions toward targets
+            const gs = @max(cfg.geometry_smoothing, @as(f32, 0.001));
+            const win_speed = -@log(gs) * 30.0;
+            const win_alpha = 1.0 - @exp(-win_speed * dt);
+
+            // New windows snap, removed windows drop
+            if (target_window_count > cached_window_count) {
+                for (cached_window_count..target_window_count) |i| {
+                    cached_windows[i] = target_windows[i];
+                }
+            }
+            cached_window_count = target_window_count;
+
+            for (0..cached_window_count) |i| {
+                cached_windows[i].x += (target_windows[i].x - cached_windows[i].x) * win_alpha;
+                cached_windows[i].y += (target_windows[i].y - cached_windows[i].y) * win_alpha;
+                cached_windows[i].w += (target_windows[i].w - cached_windows[i].w) * win_alpha;
+                cached_windows[i].h += (target_windows[i].h - cached_windows[i].h) * win_alpha;
+                cached_collision_rects[i] = .{
+                    .x = cached_windows[i].x,
+                    .y = cached_windows[i].y,
+                    .w = cached_windows[i].w,
+                    .h = cached_windows[i].h,
+                };
             }
 
             // Update effect
@@ -362,10 +401,13 @@ fn loadConfig(allocator: std.mem.Allocator, cli: *const CliArgs) !config_mod.Con
 fn reloadConfig(
     allocator: std.mem.Allocator,
     cfg: *config_mod.Config,
+    effect: *effects.Effect,
     shader_prog: *shader_mod.ShaderProgram,
     pal: *?palette_mod.Palette,
     trans: *transition.TransitionState,
-    current_shader_path: []const u8,
+    current_shader_path: *[]const u8,
+    surf_w: f32,
+    surf_h: f32,
 ) !void {
     var new_cfg = try config_mod.load(allocator, cfg.config_path);
 
@@ -373,34 +415,48 @@ fn reloadConfig(
     trans.cursor_smoothing = new_cfg.cursor_smoothing;
     trans.geometry_smoothing = new_cfg.geometry_smoothing;
 
+    // Theme change
     if (!strEql(cfg.theme, new_cfg.theme)) {
         if (new_cfg.theme) |theme_name| {
-            const new_pal = palette_mod.loadTheme(allocator, theme_name) catch |err| {
+            pal.* = palette_mod.loadTheme(allocator, theme_name) catch |err| {
                 config_mod.deinit(&new_cfg, allocator);
                 return err;
             };
-            pal.* = new_pal;
-            shader_prog.setPalette(&new_pal);
             std.debug.print("Theme reloaded: {s}\n", .{theme_name});
         } else {
             pal.* = null;
         }
     }
 
-    const new_shader_path = config_mod.expandHome(allocator, if (new_cfg.shader.len > 0) new_cfg.shader else current_shader_path) catch |err| {
+    // Effect change
+    if (!std.mem.eql(u8, cfg.effect, new_cfg.effect)) {
+        effect.deinit();
+        effect.* = effects.Effect.init(new_cfg.effect, allocator, surf_w, surf_h, &new_cfg) catch |err| {
+            std.debug.print("Effect '{s}' failed: {}, falling back to static\n", .{ new_cfg.effect, err });
+            effect.* = effects.Effect.init("static", allocator, 0, 0, &new_cfg) catch unreachable;
+            config_mod.deinit(&new_cfg, allocator);
+            return err;
+        };
+        std.debug.print("Effect switched: {s}\n", .{new_cfg.effect});
+    }
+
+    // Shader — resolve from explicit config or effect default
+    const desired_shader = if (new_cfg.shader.len > 0) new_cfg.shader else effect.defaultShader();
+    const new_shader_path = config_mod.expandHome(allocator, desired_shader) catch |err| {
         config_mod.deinit(&new_cfg, allocator);
         return err;
     };
-    defer allocator.free(new_shader_path);
 
-    if (!std.mem.eql(u8, new_shader_path, current_shader_path)) {
+    if (!std.mem.eql(u8, new_shader_path, current_shader_path.*)) {
         const new_source = loadShaderFile(allocator, new_shader_path) catch |err| {
+            allocator.free(new_shader_path);
             config_mod.deinit(&new_cfg, allocator);
             return err;
         };
         defer allocator.free(new_source);
 
         var new_prog = shader_mod.ShaderProgram.init(new_source) catch |err| {
+            allocator.free(new_shader_path);
             config_mod.deinit(&new_cfg, allocator);
             return err;
         };
@@ -409,6 +465,12 @@ fn reloadConfig(
         shader_prog.deinit();
         shader_prog.* = new_prog;
         std.debug.print("Shader reloaded: {s}\n", .{new_shader_path});
+
+        allocator.free(current_shader_path.*);
+        current_shader_path.* = new_shader_path;
+    } else {
+        allocator.free(new_shader_path);
+        if (pal.*) |*p| shader_prog.setPalette(p);
     }
 
     config_mod.deinit(cfg, allocator);

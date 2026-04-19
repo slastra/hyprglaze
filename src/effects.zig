@@ -3,11 +3,15 @@ const shader_mod = @import("core/shader.zig");
 const transition_mod = @import("core/transition.zig");
 const config_mod = @import("core/config.zig");
 
-const particles = @import("effects/particles.zig");
+const particles_sys = @import("effects/particles/system.zig");
+const particles = @import("effects/particles/context.zig");
 const windowglow = @import("effects/windowglow.zig");
 const static = @import("effects/static.zig");
-const buddy = @import("effects/buddy.zig");
-const ai_buddy = @import("effects/ai_buddy.zig");
+const cellbloom = @import("effects/cellbloom.zig");
+const concentric = @import("effects/concentric.zig");
+const fluid = @import("effects/fluid.zig");
+const buddy = @import("effects/buddy/context.zig");
+const ai_buddy = @import("effects/ai_buddy/context.zig");
 
 pub const FrameState = struct {
     dt: f32,
@@ -15,7 +19,7 @@ pub const FrameState = struct {
     cursor: [2]f32,
     focused_win: transition_mod.Rect,
     windows: []const shader_mod.ShaderProgram.WindowRect,
-    collision_rects: []const particles.Rect,
+    collision_rects: []const particles_sys.Rect,
 };
 
 pub const Effect = union(enum) {
@@ -24,6 +28,9 @@ pub const Effect = union(enum) {
     static: static.Context,
     buddy: buddy.Context,
     ai_buddy: ai_buddy.Context,
+    cellbloom: cellbloom.Context,
+    concentric: concentric.Context,
+    fluid: fluid.Context,
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
         if (std.mem.eql(u8, name, "particles")) {
@@ -39,8 +46,14 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "ai-buddy")) {
             const params = config_mod.effectParams(cfg, "buddy");
             return .{ .ai_buddy = ai_buddy.Context.init(allocator, width, height, params) };
+        } else if (std.mem.eql(u8, name, "cellbloom")) {
+            return .{ .cellbloom = cellbloom.Context.init() };
+        } else if (std.mem.eql(u8, name, "concentric")) {
+            return .{ .concentric = concentric.Context.init() };
+        } else if (std.mem.eql(u8, name, "fluid")) {
+            return .{ .fluid = fluid.Context.init() };
         }
-        std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, static, buddy, ai-buddy\n", .{name});
+        std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, static, buddy, ai-buddy\n", .{name});
         return error.UnknownEffect;
     }
 
@@ -69,6 +82,9 @@ pub const Effect = union(enum) {
             .static => "shaders/test.frag",
             .buddy => "shaders/buddy.frag",
             .ai_buddy => "shaders/buddy.frag",
+            .cellbloom => "shaders/cellbloom.frag",
+            .concentric => "shaders/concentric.frag",
+            .fluid => "shaders/fluid.frag",
         };
     }
 };

@@ -1,7 +1,4 @@
 const std = @import("std");
-const shader_mod = @import("../core/shader.zig");
-const transition_mod = @import("../core/transition.zig");
-const effects = @import("../effects.zig");
 
 pub const max_particles = 300;
 
@@ -33,7 +30,7 @@ pub const ParticleSystem = struct {
     cursor_strength: f32 = 200.0,
     cursor_radius: f32 = 300.0,
     bounce_restitution: f32 = 0.5,
-    pop_threshold: f32 = 50.0, // velocity at which particles pop on collision
+    pop_threshold: f32 = 50.0,
 
     pub fn init(count: u32, width: f32, height: f32) ParticleSystem {
         var sys = ParticleSystem{
@@ -42,7 +39,6 @@ pub const ParticleSystem = struct {
             .height = height,
         };
 
-        // Seed particles with deterministic random positions + small initial velocity
         var rng = std.Random.DefaultPrng.init(0xDEADBEEF);
         const rand = rng.random();
 
@@ -57,7 +53,7 @@ pub const ParticleSystem = struct {
                 .y = y,
                 .prev_x = x - vx,
                 .prev_y = y - vy,
-                .size = 30.0 + rand.float(f32) * 30.0,
+                .size = 6.0 + rand.float(f32) * 8.0,
                 .color_idx = rand.float(f32),
             };
         }
@@ -85,7 +81,6 @@ pub const ParticleSystem = struct {
                 const dy = b.y - a.y;
                 const min_dist = a.size + b.size;
 
-                // Quick rejection
                 if (@abs(dx) > min_dist or @abs(dy) > min_dist) continue;
 
                 const dist_sq = dx * dx + dy * dy;
@@ -96,7 +91,6 @@ pub const ParticleSystem = struct {
                 const nx = dx / dist;
                 const ny = dy / dist;
 
-                // Relative velocity along collision normal
                 const va_x = a.x - a.prev_x;
                 const va_y = a.y - a.prev_y;
                 const vb_x = b.x - b.prev_x;
@@ -104,12 +98,9 @@ pub const ParticleSystem = struct {
                 const rel_v = (vb_x - va_x) * nx + (vb_y - va_y) * ny;
                 const impact_speed = @abs(rel_v);
 
-                // Pop if impact too hard
                 if (impact_speed > self.pop_threshold) {
-                    // Pop the smaller particle, blast the other away
                     const blast: f32 = impact_speed * 2.0;
                     if (a.size <= b.size) {
-                        // Push all nearby particles away from pop site
                         self.blastFrom(a.x, a.y, blast, i);
                         self.respawn(a);
                     } else {
@@ -119,15 +110,13 @@ pub const ParticleSystem = struct {
                     continue;
                 }
 
-                // Separate: push apart by half overlap each
                 const sep = overlap * 0.5;
                 a.x -= nx * sep;
                 a.y -= ny * sep;
                 b.x += nx * sep;
                 b.y += ny * sep;
 
-                // Bounce: reflect velocity along normal
-                if (rel_v < 0) { // approaching
+                if (rel_v < 0) {
                     const impulse = rel_v * self.bounce_restitution;
                     a.prev_x -= nx * impulse;
                     a.prev_y -= ny * impulse;
@@ -141,14 +130,11 @@ pub const ParticleSystem = struct {
         for (0..self.count) |pi| {
             var p = &self.particles[pi];
 
-            // Verlet velocity
             var vx = (p.x - p.prev_x) * self.damping;
             var vy = (p.y - p.prev_y) * self.damping;
 
-            // Gravity (negative = down in GL coords where Y=0 is bottom)
             vy += self.gravity_y * step;
 
-            // Cursor attraction (inverse square)
             const cdx = mouse_x - p.x;
             const cdy = mouse_y - p.y;
             const cdist_sq = cdx * cdx + cdy * cdy;
@@ -160,15 +146,11 @@ pub const ParticleSystem = struct {
                 vy += cdy / cdist * force;
             }
 
-            // No ambient drift — window forces drive all motion
-
-            // Integrate
             p.prev_x = p.x;
             p.prev_y = p.y;
             p.x += vx;
             p.y += vy;
 
-            // Bounce off screen edges
             if (p.x < 0) {
                 p.x = -p.x;
                 p.prev_x = p.x + vx * self.bounce_restitution;
@@ -184,7 +166,6 @@ pub const ParticleSystem = struct {
                 p.prev_y = p.y + vy * self.bounce_restitution;
             }
 
-            // Bounce off windows
             for (windows) |win| {
                 if (win.w < 1 or win.h < 1) continue;
                 self.bounceOffRect(p, win);
@@ -210,22 +191,20 @@ pub const ParticleSystem = struct {
     }
 
     fn respawn(self: *ParticleSystem, p: *Particle) void {
-        // Respawn at a random edge position with low velocity
-        // Use current position as seed for deterministic-ish randomness
         const seed = @as(u64, @bitCast(@as(i64, @intFromFloat(p.x * 1000.0 + p.y))));
         var rng = std.Random.DefaultPrng.init(seed);
         const rand = rng.random();
 
         const edge = rand.intRangeAtMost(u8, 0, 3);
         switch (edge) {
-            0 => { p.x = 0; p.y = rand.float(f32) * self.height; },         // left
-            1 => { p.x = self.width; p.y = rand.float(f32) * self.height; }, // right
-            2 => { p.x = rand.float(f32) * self.width; p.y = 0; },          // bottom
-            else => { p.x = rand.float(f32) * self.width; p.y = self.height; }, // top
+            0 => { p.x = 0; p.y = rand.float(f32) * self.height; },
+            1 => { p.x = self.width; p.y = rand.float(f32) * self.height; },
+            2 => { p.x = rand.float(f32) * self.width; p.y = 0; },
+            else => { p.x = rand.float(f32) * self.width; p.y = self.height; },
         }
         p.prev_x = p.x;
         p.prev_y = p.y;
-        p.size = 30.0 + rand.float(f32) * 30.0;
+        p.size = 6.0 + rand.float(f32) * 8.0;
     }
 
     fn bounceOffRect(self: *ParticleSystem, p: *Particle, win: Rect) void {
@@ -260,59 +239,4 @@ pub const ParticleSystem = struct {
             p.prev_y = p.y - @abs(vy) * rest;
         }
     }
-};
-
-// --- Effect Context ---
-
-pub const Context = struct {
-    sys: ParticleSystem,
-    accumulator: f32 = 0,
-    physics_dt: f32 = 4.0 / 120.0,
-
-    const config_mod = @import("../core/config.zig");
-
-    pub fn init(_: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) Context {
-        const count: u32 = @intCast(params.getInt("count", 40));
-        var sys = ParticleSystem.init(count, width, height);
-        sys.damping = params.getFloat("damping", 0.999);
-        sys.pop_threshold = params.getFloat("pop_threshold", 50.0);
-        return .{ .sys = sys };
-    }
-
-    pub fn update(self: *Context, state: effects.FrameState) void {
-        // Focused window gravity (inverse square)
-        const fw = state.focused_win;
-        if (fw.w > 0 and fw.h > 0) {
-            const cx = fw.x + fw.w * 0.5;
-            const cy = fw.y + fw.h * 0.5;
-            for (0..self.sys.count) |i| {
-                const p = &self.sys.particles[i];
-                const dx = cx - p.x;
-                const dy = cy - p.y;
-                const dist_sq = dx * dx + dy * dy;
-                const dist = @sqrt(dist_sq + 1.0);
-                const force: f32 = 120000.0 / (dist_sq + 1500.0);
-                p.prev_x += -dx / dist * force * 0.016;
-                p.prev_y += -dy / dist * force * 0.016;
-            }
-        }
-
-        // Fixed timestep physics
-        self.accumulator += @min(state.dt, 0.05);
-        while (self.accumulator >= self.physics_dt) {
-            self.sys.update(
-                self.physics_dt,
-                state.cursor[0],
-                state.cursor[1],
-                state.collision_rects,
-            );
-            self.accumulator -= self.physics_dt;
-        }
-    }
-
-    pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
-        prog.setParticles(&self.sys);
-    }
-
-    pub fn deinit(_: *Context) void {}
 };

@@ -1,42 +1,26 @@
 const std = @import("std");
-const shader_mod = @import("../core/shader.zig");
-const texture_mod = @import("../core/texture.zig");
-const effects = @import("../effects.zig");
+const shader_mod = @import("../../core/shader.zig");
+const texture_mod = @import("../../core/texture.zig");
+const config_mod = @import("../../core/config.zig");
+const transition_mod = @import("../../core/transition.zig");
+const effects = @import("../../effects.zig");
+const sprite = @import("sprite.zig");
 
 const c = @cImport({ @cInclude("GLES3/gl3.h"); });
 
-// Sprite sheet: 256x352, 32x32 cells, 8 cols x 11 rows
-const CELL: f32 = 32;
-const SHEET_W: f32 = 256;
-const SHEET_H: f32 = 352;
-
-const Anim = struct { row: u8, frames: u8, fps: f32, looping: bool = true };
-const IDLE    = Anim{ .row = 0,  .frames = 4, .fps = 4.0 };
-const WALK    = Anim{ .row = 1,  .frames = 6, .fps = 8.0 };
-const RUN     = Anim{ .row = 2,  .frames = 6, .fps = 12.0 };
-const JUMP    = Anim{ .row = 3,  .frames = 8, .fps = 10.0, .looping = false };
-const ATTACK1 = Anim{ .row = 4,  .frames = 4, .fps = 8.0,  .looping = false };
-const ATTACK2 = Anim{ .row = 5,  .frames = 6, .fps = 10.0, .looping = false };
-const PUSH    = Anim{ .row = 6,  .frames = 6, .fps = 6.0 };
-const THROW   = Anim{ .row = 7,  .frames = 4, .fps = 6.0,  .looping = false };
-const CLIMB   = Anim{ .row = 8,  .frames = 4, .fps = 6.0 };
-const HURT    = Anim{ .row = 9,  .frames = 4, .fps = 8.0,  .looping = false };
-const DEATH   = Anim{ .row = 10, .frames = 8, .fps = 6.0,  .looping = false };
-
-const Behavior = enum {
-    idle,
-    wander,
-    chase,       // run toward focused window
-    jump_to,     // jump to reach target
-    wave,        // wave at cursor when it's nearby
-    push,        // push against window edge
-    throw_rock,  // throw toward cursor
-    trip,        // random stumble
-    dramatic_death, // collapse then respawn
-    climb,       // climb window edge
-    curious,     // approach cursor
-    flee,        // run from cursor
-};
+const Anim = sprite.Anim;
+const Behavior = sprite.Behavior;
+const IDLE = sprite.IDLE;
+const WALK = sprite.WALK;
+const RUN = sprite.RUN;
+const JUMP = sprite.JUMP;
+const ATTACK1 = sprite.ATTACK1;
+const ATTACK2 = sprite.ATTACK2;
+const PUSH = sprite.PUSH;
+const THROW = sprite.THROW;
+const CLIMB = sprite.CLIMB;
+const HURT = sprite.HURT;
+const DEATH = sprite.DEATH;
 
 pub const Context = struct {
     x: f32,
@@ -54,10 +38,8 @@ pub const Context = struct {
     anim_done: bool = false,
     facing_right: bool = true,
 
-    // Movement speeds synced to animation:
-    // Walk: 6 frames @ 8fps = 0.75s per cycle, move ~1 body width (32*scale) per cycle
-    // Run:  6 frames @ 12fps = 0.5s per cycle, move ~2 body widths per cycle
-    walk_speed: f32 = 0, // computed from scale in init
+    // Movement speeds synced to animation
+    walk_speed: f32 = 0,
     run_speed: f32 = 0,
 
     // Behavior
@@ -81,18 +63,13 @@ pub const Context = struct {
     // Texture
     sprite_tex: ?texture_mod.Texture = null,
 
-    const config_mod = @import("../core/config.zig");
-
     pub fn init(_: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) Context {
         const sprite_path = params.getString("sprite", "sprites/buddy.png") orelse "sprites/buddy.png";
-        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch
-            texture_mod.Texture.loadFromFile("/home/shaun/hyprglaze/sprites/buddy.png") catch null;
+        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch null;
 
         const scale: f32 = params.getFloat("scale", 2.0);
-        // Walk: 1 body per cycle. cycle_time = frames/fps = 6/8 = 0.75s
-        const walk_spd = (32.0 * scale) / (6.0 / 8.0);   // ~85 px/s
-        // Run: 2 bodies per cycle. cycle_time = 6/12 = 0.5s
-        const run_spd = (32.0 * scale * 2.0) / (6.0 / 12.0); // ~256 px/s
+        const walk_spd = (32.0 * scale) / (6.0 / 8.0);
+        const run_spd = (32.0 * scale * 2.0) / (6.0 / 12.0);
 
         return .{
             .x = width * 0.5,
@@ -123,7 +100,7 @@ pub const Context = struct {
         );
         const cursor_dx_to_buddy = state.cursor[0] - self.x;
 
-        // --- Cursor reactions (set behavior, don't move directly) ---
+        // --- Cursor reactions ---
         if (self.grounded and cursor_dist < 120 and
             self.behavior != .trip and self.behavior != .dramatic_death)
         {
@@ -155,7 +132,6 @@ pub const Context = struct {
         const fw = state.focused_win;
         const has_target = fw.w > 0 and fw.h > 0;
 
-        // Check if behavior is done
         var pick_new = self.behavior_timer >= self.behavior_duration;
         if (self.behavior == .wave or self.behavior == .throw_rock or
             self.behavior == .trip or self.behavior == .dramatic_death)
@@ -164,7 +140,7 @@ pub const Context = struct {
         }
 
         if (pick_new) {
-            self.pickBehavior(rand, has_target, fw, cursor_dist);
+            self.pickBehavior(rand, has_target, cursor_dist);
         }
 
         // --- Execute current behavior ---
@@ -178,7 +154,6 @@ pub const Context = struct {
             },
             .wander => {
                 if (self.grounded) {
-                    // Lerp toward walk speed for smooth start/stop
                     const target_vx = self.wander_dir * self.walk_speed;
                     self.vx += (target_vx - self.vx) * 5.0 * dt;
                 }
@@ -195,13 +170,11 @@ pub const Context = struct {
                     self.facing_right = dx > 0;
                     const dir: f32 = if (dx > 0) 1.0 else -1.0;
 
-                    // Use run speed if far, walk speed if close
                     const use_run = @abs(dx) > 200;
                     const target_vx = dir * (if (use_run) self.run_speed else self.walk_speed);
                     self.vx += (target_vx - self.vx) * 5.0 * dt;
                     self.setAnim(if (use_run) RUN else WALK);
 
-                    // Need to jump?
                     const target_y = fw.y + fw.h;
                     if (target_y - self.y > 30 and self.jump_cooldown <= 0) {
                         self.behavior = .jump_to;
@@ -209,7 +182,6 @@ pub const Context = struct {
                         self.behavior_duration = 2.0;
                     }
 
-                    // Arrived?
                     if (@abs(dx) < 30 and @abs(fw.y + fw.h - self.y) < 10) {
                         self.behavior = .idle;
                         self.behavior_timer = 0;
@@ -224,7 +196,6 @@ pub const Context = struct {
                     self.grounded = false;
                     self.jump_cooldown = 0.8;
 
-                    // Horizontal impulse toward target
                     const dx = (fw.x + fw.w * 0.5) - self.x;
                     self.vx += std.math.clamp(dx * 0.5, -150, 150);
                 }
@@ -237,14 +208,13 @@ pub const Context = struct {
                     self.behavior_timer = 0;
                 }
             },
-            .wave => {
+            .wave, .celebrate => {
                 self.vx *= 0.9;
                 self.facing_right = state.cursor[0] > self.x;
-                self.setAnim(ATTACK1);
+                self.setAnim(if (self.behavior == .celebrate) ATTACK2 else ATTACK1);
             },
             .push => {
                 self.setAnim(PUSH);
-                // Slowly push against nearest window edge
                 if (has_target) {
                     const edge_left = fw.x;
                     const edge_right = fw.x + fw.w;
@@ -271,7 +241,6 @@ pub const Context = struct {
             .dramatic_death => {
                 self.vx *= 0.95;
                 self.setAnim(DEATH);
-                // Respawn after death animation
                 if (self.anim_done) {
                     self.x = self.screen_w * 0.5;
                     self.y = self.screen_h;
@@ -291,7 +260,6 @@ pub const Context = struct {
                 self.vx *= 0.8;
             },
             .curious => {
-                // Walk toward cursor
                 self.facing_right = state.cursor[0] > self.x;
                 const cdx = state.cursor[0] - self.x;
                 if (@abs(cdx) > 40) {
@@ -299,7 +267,6 @@ pub const Context = struct {
                     self.vx += (dir * self.walk_speed - self.vx) * 5.0 * dt;
                     self.setAnim(WALK);
                 } else {
-                    // Close enough — wave
                     self.vx *= 0.85;
                     self.setAnim(ATTACK1);
                 }
@@ -349,9 +316,7 @@ pub const Context = struct {
         self.advanceFrame(dt);
     }
 
-    const transition_mod = @import("../core/transition.zig");
-
-    fn pickBehavior(self: *Context, rand: std.Random, has_target: bool, _: transition_mod.Rect, cursor_dist: f32) void {
+    fn pickBehavior(self: *Context, rand: std.Random, has_target: bool, cursor_dist: f32) void {
         self.behavior_timer = 0;
         self.anim_done = false;
         self.frame = 0;
@@ -359,7 +324,6 @@ pub const Context = struct {
 
         const roll = rand.float(f32);
 
-        // Cursor nearby? Wave or throw
         if (cursor_dist < 150 and roll < 0.4) {
             if (roll < 0.2) {
                 self.behavior = .wave;
@@ -371,7 +335,6 @@ pub const Context = struct {
             return;
         }
 
-        // Need to reach focused window?
         if (has_target and roll < 0.5) {
             self.behavior = .chase;
             self.behavior_duration = 3.0 + rand.float(f32) * 2.0;
@@ -379,7 +342,6 @@ pub const Context = struct {
             return;
         }
 
-        // Idle too long? Do something quirky
         if (self.idle_time > 5.0 and roll < 0.3) {
             if (roll < 0.05) {
                 self.behavior = .dramatic_death;
@@ -398,7 +360,6 @@ pub const Context = struct {
             return;
         }
 
-        // Default: idle or wander
         if (roll < 0.6) {
             self.behavior = .idle;
             self.behavior_duration = 2.0 + rand.float(f32) * 3.0;
@@ -429,18 +390,12 @@ pub const Context = struct {
     }
 
     fn advanceFrame(self: *Context, dt: f32) void {
-        // Jump frames are velocity-mapped, not timer-driven
         if (self.anim.row == JUMP.row and !self.grounded) return;
-
         self.frame_timer += dt * self.anim.fps;
         if (self.frame_timer >= 1.0) {
             self.frame_timer -= 1.0;
             if (self.frame + 1 >= self.anim.frames) {
-                if (self.anim.looping) {
-                    self.frame = 0;
-                } else {
-                    self.anim_done = true;
-                }
+                if (self.anim.looping) { self.frame = 0; } else { self.anim_done = true; }
             } else {
                 self.frame += 1;
             }
@@ -456,7 +411,6 @@ pub const Context = struct {
         }
 
         c.glUseProgram(prog.program);
-
         const facing: f32 = if (self.facing_right) 1.0 else -1.0;
         const col_f: f32 = @floatFromInt(self.frame);
         const row_f: f32 = @floatFromInt(self.anim.row);
@@ -465,10 +419,10 @@ pub const Context = struct {
             c.glUniform4f(prog.i_particles[0], self.x, self.y, self.scale, facing);
         if (prog.i_particles[1] >= 0)
             c.glUniform4f(prog.i_particles[1],
-                col_f * CELL / SHEET_W,
-                row_f * CELL / SHEET_H,
-                (col_f + 1.0) * CELL / SHEET_W,
-                (row_f + 1.0) * CELL / SHEET_H);
+                col_f * sprite.CELL / sprite.SHEET_W,
+                row_f * sprite.CELL / sprite.SHEET_H,
+                (col_f + 1.0) * sprite.CELL / sprite.SHEET_W,
+                (row_f + 1.0) * sprite.CELL / sprite.SHEET_H);
         if (prog.i_particle_count >= 0)
             c.glUniform1i(prog.i_particle_count, 2);
     }
