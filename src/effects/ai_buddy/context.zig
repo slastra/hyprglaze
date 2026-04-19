@@ -168,6 +168,7 @@ pub const Context = struct {
     climb_wall_x: f32 = 0,
     climb_target_y: f32 = 0,
     climb_speed: f32 = 80.0,
+    failed_jumps: u8 = 0,
 
     rng: std.Random.DefaultPrng,
     sprite_tex: ?texture_mod.Texture = null,
@@ -813,6 +814,7 @@ pub const Context = struct {
                 self.grounded = true;
                 self.climbing = false;
                 self.landed_on_new = true;
+                self.failed_jumps = 0;
                 self.setBehavior(.idle, 0.5);
                 self.event_log.log("climbed up", .{});
                 std.debug.print("AI ~ reached top\n", .{});
@@ -844,9 +846,10 @@ pub const Context = struct {
 
                     // Arrived: horizontally close AND on the same vertical level
                     if (@abs(dx) < 30 and @abs(dy) < 10) {
+                        self.failed_jumps = 0;
                         self.setBehavior(.idle, 1.0);
-                    } else if (dy > 400) {
-                        // Target is too high to jump — run toward wall and climb
+                    } else if (dy > 200 or (dy > 30 and self.failed_jumps >= 2)) {
+                        // Target is too high to jump (or jump failed twice) — climb
                         const dist_left = @abs(self.x - fw.x);
                         const dist_right = @abs(self.x - (fw.x + fw.w));
                         const wall_x = if (dist_left < dist_right) fw.x else fw.x + fw.w;
@@ -869,6 +872,7 @@ pub const Context = struct {
                         }
                     } else if (dy > 30 and self.jump_cooldown <= 0) {
                         // Target is above — jump
+                        self.failed_jumps +|= 1;
                         self.setBehavior(.jump_to, 2.0);
                     } else if (dy < -30) {
                         // Target is below — drop through current platform
