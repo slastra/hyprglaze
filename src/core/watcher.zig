@@ -55,7 +55,8 @@ pub const FileWatcher = struct {
     }
 
     pub fn rewatch(self: *FileWatcher) void {
-        posix.inotify_rm_watch(self.inotify_fd, self.watch_fd);
+        // Remove old watch — may already be invalid after MOVE_SELF, so ignore errors
+        _ = linux.inotify_rm_watch(self.inotify_fd, self.watch_fd);
         self.watch_fd = posix.inotify_add_watch(
             self.inotify_fd,
             self.path,
@@ -64,7 +65,7 @@ pub const FileWatcher = struct {
     }
 
     pub fn deinit(self: *FileWatcher) void {
-        posix.inotify_rm_watch(self.inotify_fd, self.watch_fd);
+        _ = linux.inotify_rm_watch(self.inotify_fd, self.watch_fd);
         posix.close(self.inotify_fd);
         self.allocator.free(self.path);
     }
