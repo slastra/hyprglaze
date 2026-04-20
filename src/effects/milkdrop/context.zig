@@ -251,6 +251,18 @@ pub const Context = struct {
         const dt = @min(state.dt, 0.05);
         const wave = self.audio.getWaveform();
 
+        // Cache palette from FrameState
+        if (state.palette) |pal| {
+            self.palette_size = @intCast(pal.color_count);
+            for (0..pal.color_count) |i| {
+                self.palette[i * 3] = pal.colors[i].r;
+                self.palette[i * 3 + 1] = pal.colors[i].g;
+                self.palette[i * 3 + 2] = pal.colors[i].b;
+            }
+            self.palette_bg = .{ pal.background.r, pal.background.g, pal.background.b };
+            self.palette_fg = .{ pal.foreground.r, pal.foreground.g, pal.foreground.b };
+        }
+
         // Compute energy bands
         var bass_e: f32 = 0;
         var mid_e: f32 = 0;
@@ -284,9 +296,6 @@ pub const Context = struct {
         const time: f32 = @floatCast(@as(f64, @floatFromInt(std.time.milliTimestamp())) / 1000.0);
         const prev = 1 - self.current;
         const curr = self.current;
-
-        // Cache palette from main shader
-        self.cachePalette(prog);
 
         // --- Pass 1: Warp ---
         c.glBindFramebuffer(c.GL_FRAMEBUFFER, self.fbo);
@@ -345,24 +354,6 @@ pub const Context = struct {
         c.glBindTexture(c.GL_TEXTURE_2D, self.tex[curr]);
         const sprite_loc = c.glGetUniformLocation(prog.program, "iSprite");
         if (sprite_loc >= 0) c.glUniform1i(sprite_loc, 0);
-    }
-
-    fn cachePalette(self: *Context, prog: *const shader_mod.ShaderProgram) void {
-        c.glUseProgram(prog.program);
-        if (prog.i_palette_size >= 0) {
-            var ps: c.GLint = 0;
-            c.glGetUniformiv(prog.program, prog.i_palette_size, &ps);
-            self.palette_size = ps;
-        }
-        for (0..16) |i| {
-            if (prog.i_palette[i] >= 0) {
-                c.glGetUniformfv(prog.program, prog.i_palette[i], self.palette[i * 3 ..][0..3]);
-            }
-        }
-        if (prog.i_palette_bg >= 0)
-            c.glGetUniformfv(prog.program, prog.i_palette_bg, &self.palette_bg);
-        if (prog.i_palette_fg >= 0)
-            c.glGetUniformfv(prog.program, prog.i_palette_fg, &self.palette_fg);
     }
 
     pub fn deinit(self: *Context) void {

@@ -2,6 +2,7 @@ const std = @import("std");
 const shader_mod = @import("core/shader.zig");
 const transition_mod = @import("core/transition.zig");
 const config_mod = @import("core/config.zig");
+const palette_mod = @import("core/palette.zig");
 
 const particles_sys = @import("effects/particles/system.zig");
 const particles = @import("effects/particles/context.zig");
@@ -35,6 +36,7 @@ pub const FrameState = struct {
     focused_class_len: u8 = 0,
     focused_title: [64]u8 = [_]u8{0} ** 64,
     focused_title_len: u8 = 0,
+    palette: ?*const palette_mod.Palette = null,
 };
 
 pub const Effect = union(enum) {

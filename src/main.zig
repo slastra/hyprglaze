@@ -280,6 +280,7 @@ pub fn main() !void {
                 .focused_class_len = cached_focused_class_len,
                 .focused_title = cached_focused_title,
                 .focused_title_len = cached_focused_title_len,
+                .palette = if (pal) |*p| p else null,
             });
             effect.upload(&shader_prog);
 
@@ -287,9 +288,10 @@ pub fn main() !void {
             try wl.requestFrame();
             egl_state.swapBuffers();
 
-            // FPS tracking (silent)
+            // FPS tracking
             frame_count += 1;
             if (fps_timer.read() >= std.time.ns_per_s) {
+                std.debug.print("FPS: {d}\n", .{frame_count});
                 frame_count = 0;
                 fps_timer.reset();
             }
