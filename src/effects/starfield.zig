@@ -25,7 +25,8 @@ pub const Context = struct {
     beat: f32 = 0,           // 0-1, decays smoothly
     beat_cooldown: f32 = 0,
     velocity: f32 = 1.0,     // smoothed flight speed multiplier
-    wobble: f32 = 0,         // oscillating velocity offset from beat
+    wobble: f32 = 0,         // velocity offset from beat
+    flight_time: f32 = 0,    // accumulated time scaled by velocity (only increases)
 
     pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) Context {
         const sink = params.getString("sink", null);
@@ -93,6 +94,9 @@ pub const Context = struct {
         const target_vel = 0.4 + self.bass * 0.15 + self.wobble * 0.4;
         self.velocity += (target_vel - self.velocity) * @min(1.0, 4.0 * dt);
         self.velocity = @max(self.velocity, 0.3);
+
+        // Accumulate flight time — only ever increases
+        self.flight_time += self.velocity * dt;
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
@@ -106,7 +110,7 @@ pub const Context = struct {
                 self.bands[0], self.bands[1], self.bands[2], self.bands[3]);
         if (prog.i_particles[1] >= 0)
             c.glUniform4f(prog.i_particles[1],
-                self.bands[4], self.bands[5], self.beat, self.velocity);
+                self.bands[4], self.bands[5], self.beat, self.flight_time);
         if (prog.i_particle_count >= 0)
             c.glUniform1i(prog.i_particle_count, 2);
     }

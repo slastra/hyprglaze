@@ -10,7 +10,7 @@ uniform int iWindowCount;
 uniform float iTransition;
 
 // [0] = (band0, band1, band2, band3)  — sub-bass, bass, low-mid, mid
-// [1] = (band4, band5, beat, velocity) — high-mid, high, beat, smoothed speed
+// [1] = (band4, band5, beat, flight_time) — high-mid, high, beat, accumulated time
 uniform vec4 iParticles[300];
 uniform int iParticleCount;
 
@@ -37,7 +37,7 @@ float getBand(int i) {
 }
 
 float getBeat() { return iParticles[1].z; }
-float getVelocity() { return iParticles[1].w; }
+float getFlightTime() { return iParticles[1].w; }
 
 float windowSDF(vec2 p) {
     float d = 1e6;
@@ -62,14 +62,11 @@ void main() {
 
     vec2 origin = iMouse.xy;
     float beat = getBeat();
-    float velocity = getVelocity();
-
-    // Flight speed from smoothed velocity (already includes beat + bass)
-    float speed_mult = velocity;
+    float flight_time = getFlightTime();
 
     for (int layer = 0; layer < 4; layer++) {
         float fl = float(layer);
-        float layer_speed = (0.06 + fl * 0.05) * speed_mult;
+        float layer_speed = 0.06 + fl * 0.05;
         float num_stars = 80.0 + fl * 40.0;
         float star_max_r = 2.0 + fl * 1.5;
 
@@ -83,7 +80,7 @@ void main() {
             int color_idx = int(mod(seed, 6.0));
             float band_energy = getBand(color_idx);
 
-            float t = fract(phase + iTime * layer_speed);
+            float t = fract(phase + flight_time * layer_speed);
 
             float max_dist = length(iResolution.xy) * 0.8;
             float r = t * t * max_dist;
@@ -108,7 +105,8 @@ void main() {
             float size = star_max_r * (0.2 + t * 0.8) * (0.5 + star_bright * 0.5);
             size *= 1.0 + band_energy * 0.8;
 
-            float brightness = smoothstep(0.0, 0.1, t) * star_bright;
+            // Fade in at birth, fade out before reset — hides the teleport
+            float brightness = smoothstep(0.0, 0.1, t) * smoothstep(1.0, 0.9, t) * star_bright;
             // Brightness boost from band energy
             brightness *= 1.0 + band_energy * 1.5;
 
