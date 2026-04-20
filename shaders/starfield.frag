@@ -139,8 +139,8 @@ void main() {
                 float tail = length(vec2(along / trail_len, perp));
                 float dist = (along > 0.0) ? head : tail;
 
-                // Size scales with distance from origin (parallax)
-                float size = star_max_r * (0.3 + t_norm * 0.7) * (0.5 + star_bright * 0.5);
+                // Size grows as stars approach — tiny at origin, large at edges
+                float size = star_max_r * (0.1 + t_life * t_life * 2.0) * (0.5 + star_bright * 0.5);
                 size *= 1.0 + band_energy * 0.6;
 
                 // Brightness: fade edges, pulse with band
