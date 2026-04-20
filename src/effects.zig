@@ -77,7 +77,8 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "aurora")) {
             return .{ .aurora = aurora.Context.init() };
         } else if (std.mem.eql(u8, name, "starfield")) {
-            return .{ .starfield = starfield.Context.init() };
+            const params = config_mod.effectParams(cfg, "visualizer");
+            return .{ .starfield = starfield.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "visualizer")) {
             const params = config_mod.effectParams(cfg, "visualizer");
             return .{ .visualizer = visualizer.Context.init(allocator, params) };
