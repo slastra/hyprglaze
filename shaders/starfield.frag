@@ -87,8 +87,8 @@ void main() {
         float slice_size = 6.28318 / num_slices;
         float ring_size = max_dist / num_rings;
 
-        // Flight offset — stars move outward over time
-        float depth_offset = flight_time * layer_speed * max_dist;
+        // Flight offset — negative so stars stream outward from origin
+        float depth_offset = -flight_time * layer_speed * max_dist;
 
         // Which cell is this pixel in?
         float depth_shifted = pixel_dist + depth_offset;
