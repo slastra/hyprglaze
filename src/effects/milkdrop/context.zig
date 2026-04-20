@@ -116,60 +116,53 @@ const reactive_frag_src: [*:0]const u8 =
     \\
     \\void main() {
     \\    vec2 uv = gl_FragCoord.xy / uRes;
-    \\    vec2 centered = uv - 0.5;
-    \\    float dist = length(centered);
-    \\    float angle = atan(centered.y, centered.x);
-    \\    float norm_a = (angle + 3.14159) / 6.28318;
     \\    vec4 out_col = vec4(0.0);
     \\
-    \\    // --- Waveform ring (main visual) ---
-    \\    float ring_r = 0.12 + uBass * 0.06;
-    \\    float left = getSample(0, norm_a);
-    \\    float right = getSample(32, norm_a);
-    \\    float wave = (left + right) * 0.5;
-    \\    float wave_r = ring_r + wave * 0.1;
-    \\    float ring_dist = abs(dist - wave_r);
-    \\    float ring = 1.0 - smoothstep(0.0, 0.003, ring_dist);
-    \\    float ring_glow = 1.0 - smoothstep(0.0, 0.025 + uBass * 0.02, ring_dist);
+    \\    // --- Horizontal waveform lines ---
+    \\    // Left channel
+    \\    float left = getSample(0, uv.x);
+    \\    float left_y = 0.5 + left * 0.2;
+    \\    float left_amp = abs(left);
+    \\    float ld = abs(uv.y - left_y);
+    \\    float l_line = 1.0 - smoothstep(0.0, 0.002, ld);
+    \\    float l_glow = 1.0 - smoothstep(0.0, 0.02 + left_amp * 0.03, ld);
+    \\    float lcp = clamp(left_amp * 12.0, 0.0, 5.0);
+    \\    int lc0 = 1 + int(lcp); int lc1 = min(lc0 + 1, 6);
+    \\    vec3 l_col = mix(palColor(lc0), palColor(lc1), fract(lcp));
+    \\    out_col.rgb += l_col * (l_line + l_glow * 0.4);
+    \\    out_col.a = max(out_col.a, l_line * 0.9 + l_glow * 0.3);
     \\
-    \\    // Color cycles through palette based on angle
-    \\    float color_phase = norm_a * 6.0;
-    \\    int ci0 = 1 + int(mod(color_phase, 6.0));
-    \\    int ci1 = 1 + int(mod(color_phase + 1.0, 6.0));
-    \\    vec3 ring_col = mix(palColor(ci0), palColor(ci1), fract(color_phase));
-    \\    out_col.rgb += ring_col * (ring + ring_glow * 0.4);
-    \\    out_col.a = max(out_col.a, ring * 0.9 + ring_glow * 0.3);
+    \\    // Right channel (offset)
+    \\    float right = getSample(32, uv.x);
+    \\    float right_y = 0.5 + right * 0.2;
+    \\    float right_amp = abs(right);
+    \\    float rd = abs(uv.y - right_y);
+    \\    float r_line = 1.0 - smoothstep(0.0, 0.002, rd);
+    \\    float r_glow = 1.0 - smoothstep(0.0, 0.02 + right_amp * 0.03, rd);
+    \\    float rcp = clamp(right_amp * 12.0, 0.0, 5.0);
+    \\    int rc0 = 1 + int(rcp); int rc1 = min(rc0 + 1, 6);
+    \\    vec3 r_col = mix(palColor(rc0), palColor(rc1), fract(rcp));
+    \\    out_col.rgb += r_col * (r_line + r_glow * 0.4);
+    \\    out_col.a = max(out_col.a, r_line * 0.9 + r_glow * 0.3);
     \\
-    \\    // --- Inner ring (second waveform) ---
-    \\    float inner_r = 0.06 + uMid * 0.03;
-    \\    float inner_wave = (left - right) * 0.5;
-    \\    float inner_dist = abs(dist - inner_r - inner_wave * 0.05);
-    \\    float inner = 1.0 - smoothstep(0.0, 0.002, inner_dist);
-    \\    float inner_glow = 1.0 - smoothstep(0.0, 0.015, inner_dist);
-    \\    vec3 inner_col = mix(palColor(3), palColor(5), norm_a);
-    \\    out_col.rgb += inner_col * (inner + inner_glow * 0.3);
-    \\    out_col.a = max(out_col.a, inner * 0.7);
+    \\    // --- Vertical waveform (perpendicular, adds complexity to kaleidoscope) ---
+    \\    float v_left = getSample(0, uv.y);
+    \\    float v_x = 0.5 + v_left * 0.15;
+    \\    float vd = abs(uv.x - v_x);
+    \\    float v_line = 1.0 - smoothstep(0.0, 0.002, vd);
+    \\    float v_glow = 1.0 - smoothstep(0.0, 0.015, vd);
+    \\    out_col.rgb += palColor(3) * (v_line + v_glow * 0.3) * 0.6;
+    \\    out_col.a = max(out_col.a, v_line * 0.5);
     \\
-    \\    // --- Beat flash — starburst ---
+    \\    // --- Beat flash — diagonal rays ---
     \\    if (uBeat > 0.3) {
-    \\        float rays = abs(sin(angle * 8.0 + uTime * 2.0));
-    \\        float burst = (1.0 - smoothstep(0.0, 0.3, dist)) * rays * uBeat;
-    \\        vec3 burst_col = mix(palColor(1), palColor(2), rays);
-    \\        out_col.rgb += burst_col * burst * 0.5;
-    \\        out_col.a = max(out_col.a, burst * 0.4);
-    \\    }
-    \\
-    \\    // --- Outer shimmer particles ---
-    \\    float outer_r = 0.3 + uHigh * 0.1;
-    \\    for (int i = 0; i < 12; i++) {
-    \\        float a = float(i) * 0.5236 + uTime * (0.2 + uMid * 0.3);
-    \\        float r = outer_r + sin(uTime * 0.7 + float(i)) * 0.03;
-    \\        vec2 pos = vec2(cos(a), sin(a)) * r + 0.5;
-    \\        float dd = length(uv - pos);
-    \\        float dot = 1.0 - smoothstep(0.0, 0.006 + uBeat * 0.008, dd);
-    \\        int dci = 1 + i % 6;
-    \\        out_col.rgb += palColor(dci) * dot * 0.6;
-    \\        out_col.a = max(out_col.a, dot * 0.4);
+    \\        float diag1 = abs(uv.x - uv.y);
+    \\        float diag2 = abs(uv.x - (1.0 - uv.y));
+    \\        float ray1 = 1.0 - smoothstep(0.0, 0.01 + uBeat * 0.02, diag1);
+    \\        float ray2 = 1.0 - smoothstep(0.0, 0.01 + uBeat * 0.02, diag2);
+    \\        vec3 beat_col = mix(palColor(1), palColor(5), uBeat);
+    \\        out_col.rgb += beat_col * (ray1 + ray2) * uBeat * 0.4;
+    \\        out_col.a = max(out_col.a, (ray1 + ray2) * uBeat * 0.3);
     \\    }
     \\
     \\    fragColor = out_col;
