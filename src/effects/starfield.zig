@@ -86,14 +86,13 @@ pub const Context = struct {
         self.beat *= @exp(-4.0 * dt);
         if (self.beat < 0.01) self.beat = 0;
 
-        // Wobble: damped oscillation, always positive (speed up then settle)
-        self.wobble *= @exp(-3.0 * dt);
-        const wobble_val = self.wobble * @abs(@sin(self.wobble * 15.0));
+        // Wobble: gentle pulse that decays, no oscillation
+        self.wobble *= @exp(-2.0 * dt);
 
-        // Velocity: always forward, wobble adds speed on top
-        const target_vel = 0.4 + self.bass * 0.2 + wobble_val * 1.2;
-        const vel_speed: f32 = 6.0;
-        self.velocity += (target_vel - self.velocity) * @min(1.0, vel_speed * dt);
+        // Velocity: always forward, clamp minimum
+        const target_vel = 0.4 + self.bass * 0.15 + self.wobble * 0.4;
+        self.velocity += (target_vel - self.velocity) * @min(1.0, 4.0 * dt);
+        self.velocity = @max(self.velocity, 0.3);
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
