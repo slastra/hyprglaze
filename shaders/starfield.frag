@@ -69,7 +69,7 @@ void main() {
 
     for (int layer = 0; layer < 4; layer++) {
         float fl = float(layer);
-        float layer_speed = (0.15 + fl * 0.12) * speed_mult;
+        float layer_speed = (0.06 + fl * 0.05) * speed_mult;
         float num_stars = 80.0 + fl * 40.0;
         float star_max_r = 2.0 + fl * 1.5;
 

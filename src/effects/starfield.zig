@@ -25,6 +25,7 @@ pub const Context = struct {
     beat: f32 = 0,           // 0-1, decays smoothly
     beat_cooldown: f32 = 0,
     velocity: f32 = 1.0,     // smoothed flight speed multiplier
+    wobble: f32 = 0,         // oscillating velocity offset from beat
 
     pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) Context {
         const sink = params.getString("sink", null);
@@ -75,18 +76,24 @@ pub const Context = struct {
         self.flux_avg += (flux_raw - self.flux_avg) * @min(1.0, 1.5 * dt);
 
         // Beat triggers when flux significantly exceeds its running average
+        // Higher threshold + longer cooldown to avoid false triggers
         self.beat_cooldown -= dt;
-        if (self.flux > self.flux_avg * 2.5 + 0.01 and self.beat_cooldown <= 0) {
+        if (self.flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0 and self.bass_instant > self.bass_smooth * 1.5) {
             self.beat = 1.0;
-            self.beat_cooldown = 0.2;
+            self.wobble = 1.0;
+            self.beat_cooldown = 0.25;
         }
-        // Smooth exponential decay
         self.beat *= @exp(-4.0 * dt);
         if (self.beat < 0.01) self.beat = 0;
 
-        // Velocity: smoothly ramps up on beat, decays back to 1.0
-        const target_vel = 1.0 + self.beat * 3.0 + self.bass * 0.5;
-        const vel_speed: f32 = if (target_vel > self.velocity) 8.0 else 2.0;
+        // Wobble: damped oscillation triggered by beat
+        // sin(frequency * time_since_beat) * decay
+        self.wobble *= @exp(-3.0 * dt);
+        const wobble_val = self.wobble * @sin(self.wobble * 20.0 + 3.0);
+
+        // Velocity: slow base + wobble creates push-pull on beat
+        const target_vel = 0.4 + self.bass * 0.2 + wobble_val * 0.8;
+        const vel_speed: f32 = 6.0;
         self.velocity += (target_vel - self.velocity) * @min(1.0, vel_speed * dt);
     }
 
