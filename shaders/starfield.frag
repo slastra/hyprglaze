@@ -149,8 +149,11 @@ void main() {
 
                 float twinkle = 0.8 + 0.2 * sin(iTime * (3.0 + star_bright * 4.0) + hash(cell_id) * 100.0);
 
-                float core = 1.0 - smoothstep(0.0, size * 0.6, dist);
-                float intensity = core * brightness * twinkle;
+                // Crisp head
+                float core = 1.0 - smoothstep(0.0, size * 0.5, head);
+                // Soft trail behind
+                float trail = 1.0 - smoothstep(0.0, size * 0.8, tail);
+                float intensity = max(core, trail * 0.5) * brightness * twinkle;
                 intensity *= smoothstep(0.0, 30.0, wd);
 
                 int ci = 1 + color_idx;
