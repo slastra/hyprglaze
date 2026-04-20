@@ -83,7 +83,7 @@ void main() {
 
         // Tile the radial space into angular slices and depth rings
         float num_slices = 60.0 + fl * 20.0;
-        float num_rings = 12.0 + fl * 4.0;
+        float num_rings = 30.0 + fl * 10.0;
         float slice_size = 6.28318 / num_slices;
         float ring_size = max_dist / num_rings;
 
@@ -109,14 +109,12 @@ void main() {
                 float star_depth = (ri + h.x) * ring_size - depth_offset;
                 float star_angle = (si + h.y) * slice_size;
 
-                // Convert to screen position — gentle radial acceleration
-                float linear_r = star_depth;
-                if (linear_r < 0.0 || linear_r > max_dist) continue;
-                float t_life = linear_r / max_dist;
-                float star_r = t_life * (0.5 + t_life * 0.5) * max_dist;
+                // Linear radial motion
+                float star_r = star_depth;
+                if (star_r < 0.0 || star_r > max_dist) continue;
+                float t_life = star_r / max_dist;
 
-                // Slight spiral warp
-                float warped_angle = star_angle + t_life * t_life * 0.15;
+                float warped_angle = star_angle;
                 vec2 star_pos = origin + vec2(cos(warped_angle), sin(warped_angle)) * star_r;
 
                 // Skip inside windows
@@ -146,7 +144,7 @@ void main() {
                 size *= 1.0 + band_energy * 0.6;
 
                 // Brightness: fade edges, pulse with band
-                float brightness = smoothstep(0.0, 0.05, t_norm) * smoothstep(1.0, 0.95, t_norm);
+                float brightness = smoothstep(0.0, 0.05, t_life);
                 brightness *= star_bright * (1.0 + band_energy * 1.2);
 
                 float twinkle = 0.8 + 0.2 * sin(iTime * (3.0 + star_bright * 4.0) + hash(cell_id) * 100.0);
