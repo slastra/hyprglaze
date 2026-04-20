@@ -109,15 +109,14 @@ void main() {
                 float star_depth = (ri + h.x) * ring_size - depth_offset;
                 float star_angle = (si + h.y) * slice_size;
 
-                // Convert to screen position — exponential radial warp
-                // Stars accelerate outward: slow near origin, fast at edges
+                // Convert to screen position — gentle radial acceleration
                 float linear_r = star_depth;
                 if (linear_r < 0.0 || linear_r > max_dist) continue;
                 float t_life = linear_r / max_dist;
-                float star_r = t_life * t_life * t_life * max_dist;
+                float star_r = t_life * (0.5 + t_life * 0.5) * max_dist;
 
-                // Slight spiral warp — stars curve as they fly out
-                float warped_angle = star_angle + t_life * t_life * 0.3;
+                // Slight spiral warp
+                float warped_angle = star_angle + t_life * t_life * 0.15;
                 vec2 star_pos = origin + vec2(cos(warped_angle), sin(warped_angle)) * star_r;
 
                 // Skip inside windows
@@ -135,7 +134,7 @@ void main() {
 
                 // Trail stretches dramatically at edges
                 float t_norm = star_r / max_dist;
-                float trail_len = 1.0 + t_life * t_life * (20.0 + band_energy * 15.0);
+                float trail_len = 1.0 + t_life * t_life * (10.0 + band_energy * 8.0);
                 float along = dot(diff, dir);
                 float perp = length(diff - dir * along);
                 float head = length(vec2(max(along, 0.0), perp));
