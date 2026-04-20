@@ -7,7 +7,7 @@ const palette_mod = @import("core/palette.zig");
 const particles_sys = @import("effects/particles/system.zig");
 const particles = @import("effects/particles/context.zig");
 const windowglow = @import("effects/windowglow.zig");
-const static = @import("effects/static.zig");
+const glitch = @import("effects/glitch.zig");
 const cellbloom = @import("effects/cellbloom.zig");
 const concentric = @import("effects/concentric.zig");
 const fluid = @import("effects/fluid.zig");
@@ -43,7 +43,7 @@ pub const FrameState = struct {
 pub const Effect = union(enum) {
     particles: particles.Context,
     windowglow: windowglow.Context,
-    static: static.Context,
+    glitch: glitch.Context,
     buddy: buddy.Context,
     ai_buddy: ai_buddy.Context,
     cellbloom: cellbloom.Context,
@@ -60,8 +60,9 @@ pub const Effect = union(enum) {
             return .{ .particles = particles.Context.init(allocator, width, height, params) };
         } else if (std.mem.eql(u8, name, "windowglow")) {
             return .{ .windowglow = windowglow.Context.init() };
-        } else if (std.mem.eql(u8, name, "static")) {
-            return .{ .static = static.Context.init() };
+        } else if (std.mem.eql(u8, name, "glitch")) {
+            const params = config_mod.effectParams(cfg, "glitch");
+            return .{ .glitch = glitch.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "buddy")) {
             const params = config_mod.effectParams(cfg, "buddy");
             return .{ .buddy = buddy.Context.init(allocator, width, height, params) };
@@ -86,7 +87,7 @@ pub const Effect = union(enum) {
             const params = config_mod.effectParams(cfg, "visualizer");
             return .{ .milkdrop = milkdrop.Context.init(allocator, width, height, params) };
         }
-        std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, visualizer, milkdrop, static, buddy, ai-buddy\n", .{name});
+        std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, starfield, visualizer, milkdrop, glitch, buddy, ai-buddy\n", .{name});
         return error.UnknownEffect;
     }
 
@@ -112,7 +113,7 @@ pub const Effect = union(enum) {
         return switch (self.*) {
             .particles => "shaders/particles.frag",
             .windowglow => "shaders/windowglow.frag",
-            .static => "shaders/test.frag",
+            .glitch => "shaders/glitch.frag",
             .buddy => "shaders/buddy.frag",
             .ai_buddy => "shaders/buddy.frag",
             .cellbloom => "shaders/cellbloom.frag",

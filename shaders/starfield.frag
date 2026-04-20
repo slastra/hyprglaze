@@ -132,7 +132,7 @@ void main() {
 
                 // Trail stretches dramatically at edges
                 float t_norm = star_r / max_dist;
-                float trail_len = 1.0 + t_life * (1.5 + band_energy * 1.0);
+                float trail_len = 1.0 + t_life * t_life * (10.0 + band_energy * 8.0);
                 float along = dot(diff, dir);
                 float perp = length(diff - dir * along);
                 float head = length(vec2(max(along, 0.0), perp));
@@ -149,11 +149,8 @@ void main() {
 
                 float twinkle = 0.8 + 0.2 * sin(iTime * (3.0 + star_bright * 4.0) + hash(cell_id) * 100.0);
 
-                // Crisp head
-                float core = 1.0 - smoothstep(0.0, size * 0.5, head);
-                // Soft trail behind
-                float trail = 1.0 - smoothstep(0.0, size * 0.3, tail);
-                float intensity = max(core, trail * 0.1) * brightness * twinkle;
+                float core = 1.0 - smoothstep(0.0, size * 0.6, dist);
+                float intensity = core * brightness * twinkle;
                 intensity *= smoothstep(0.0, 30.0, wd);
 
                 int ci = 1 + color_idx;

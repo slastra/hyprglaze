@@ -32,7 +32,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `milkdrop` | Feedback-loop visualizer with kaleidoscope, beat detection, FBO pipeline |
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
-| `static` | Minimal - just renders a custom shader |
+| `glitch` | Audio-reactive glitch art with RGB split, block displacement, VHS wobble, scanlines |
 
 ## Install (Arch Linux)
 
@@ -56,7 +56,7 @@ zig build run
 
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
-#          starfield, visualizer, milkdrop, buddy, ai-buddy, static
+#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy
 effect = "fluid"
 theme = "Rosé Pine"
 

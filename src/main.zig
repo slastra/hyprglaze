@@ -514,8 +514,8 @@ fn reloadConfig(
     if (!std.mem.eql(u8, cfg.effect, new_cfg.effect)) {
         effect.deinit();
         effect.* = effects.Effect.init(new_cfg.effect, allocator, surf_w, surf_h, &new_cfg) catch |err| {
-            std.debug.print("Effect '{s}' failed: {}, falling back to static\n", .{ new_cfg.effect, err });
-            effect.* = effects.Effect.init("static", allocator, 0, 0, &new_cfg) catch unreachable;
+            std.debug.print("Effect '{s}' failed: {}, falling back to windowglow\n", .{ new_cfg.effect, err });
+            effect.* = effects.Effect.init("windowglow", allocator, 0, 0, &new_cfg) catch unreachable;
             config_mod.deinit(&new_cfg, allocator);
             return err;
         };
@@ -594,7 +594,7 @@ fn printUsage() void {
         \\
         \\Options:
         \\  --config <path>     TOML config (default: ~/.config/hypr/hyprglaze.toml)
-        \\  --effect <name>     Effect: particles, windowglow, static
+        \\  --effect <name>     Effect: particles, windowglow, glitch, starfield, etc.
         \\  --shader <path>     Fragment shader (overrides effect default)
         \\  --theme <name>      Gogh color scheme
         \\  --list-themes       List available themes
