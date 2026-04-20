@@ -292,11 +292,8 @@ pub const Context = struct {
             self.beat = 1.0;
             self.beat_cooldown = 0.15;
             self.beat_count += 1;
-            // Change kaleidoscope every 4 beats
-            if (self.beat_count % 4 == 0) {
-                const segments = [_]i32{ 3, 4, 6, 8, 10, 12 };
-                self.kaleido_segments = segments[self.beat_count / 4 % segments.len];
-            }
+            const segments = [_]i32{ 3, 4, 6, 8, 10, 12 };
+            self.kaleido_segments = segments[self.beat_count % segments.len];
         }
         self.beat *= @max(0.0, 1.0 - 8.0 * dt);
     }
