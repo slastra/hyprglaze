@@ -62,6 +62,17 @@ void main() {
     vec3 col = bg;
     vec3 wave_col = (iPaletteSize > 5) ? iPalette[5] : vec3(0.5, 0.8, 1.0);
 
+    // Bass energy from first ~10 samples of both channels
+    float bass = 0.0;
+    for (int i = 0; i < 10; i++) {
+        bass += abs(rawSample(0, i)) + abs(rawSample(32, i));
+    }
+    bass /= 20.0;
+
+    // Bass flash — tint the background
+    float flash = bass * bass * 4.0; // squared for punch
+    col += wave_col * flash * 0.08;
+
     // Left channel - upper half (center = 0.7)
     float left = getSample(0, uv.x);
     float left_y = 0.7 + left * 0.2;
