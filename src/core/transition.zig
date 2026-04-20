@@ -48,6 +48,10 @@ pub const TransitionState = struct {
             self.focused_address = win_address;
             self.transition_start = time;
             self.transition_progress = 0;
+            // Snap geometry to new window — don't lerp between unrelated windows
+            if (raw_win.hasArea()) {
+                self.current_win = raw_win;
+            }
         }
 
         // Advance transition timer
