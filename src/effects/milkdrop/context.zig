@@ -27,6 +27,7 @@ const warp_frag_src: [*:0]const u8 =
     \\uniform float uTime;
     \\uniform vec2 uRes;
     \\uniform int uKaleidoSegments;
+    \\uniform vec3 uBg;
     \\out vec4 fragColor;
     \\
     \\void main() {
@@ -64,9 +65,10 @@ const warp_frag_src: [*:0]const u8 =
     \\    float rdist = length(rd);
     \\    wuv += normalize(rd + 0.001) * sin(rdist * 12.0 - uTime * 1.5) * 0.003 * (1.0 + uBass * 2.0);
     \\
-    \\    // Sample with decay — less decay on beat for brighter trails
+    \\    // Sample with decay toward background color
     \\    float decay = 0.955 - uBeat * 0.02;
-    \\    vec3 prev = texture(uPrev, clamp(wuv, 0.0, 1.0)).rgb * decay;
+    \\    vec3 prev = texture(uPrev, clamp(wuv, 0.0, 1.0)).rgb;
+    \\    prev = mix(uBg, prev, decay);
     \\    fragColor = vec4(prev, 1.0);
     \\}
 ;
@@ -313,6 +315,8 @@ pub const Context = struct {
         setU1f(self.warp_prog, "uTime", time);
         setU2f(self.warp_prog, "uRes", @floatFromInt(self.width), @floatFromInt(self.height));
         setU1i(self.warp_prog, "uKaleidoSegments", 8);
+        const warp_bg_loc = c.glGetUniformLocation(self.warp_prog, "uBg");
+        if (warp_bg_loc >= 0) c.glUniform3fv(warp_bg_loc, 1, &self.palette_bg);
 
         c.glBindVertexArray(self.vao);
         c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
