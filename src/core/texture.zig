@@ -9,12 +9,24 @@ pub const Texture = struct {
     width: i32,
     height: i32,
 
+    const system_data_dir = "/usr/share/hyprglaze";
+
     pub fn loadFromFile(path: []const u8) !Texture {
+        // Resolve path: relative, absolute, then system data dir
+        var resolved = path;
+        var sys_buf: [512]u8 = undefined;
+        if (std.fs.cwd().access(path, .{})) |_| {} else |_| {
+            const sys_path = std.fmt.bufPrint(&sys_buf, "{s}/{s}", .{ system_data_dir, path }) catch path;
+            if (std.fs.accessAbsolute(sys_path, .{})) |_| {
+                resolved = sys_path;
+            } else |_| {}
+        }
+
         // Need null-terminated path for stb
         var path_buf: [512]u8 = undefined;
-        if (path.len >= path_buf.len) return error.PathTooLong;
-        @memcpy(path_buf[0..path.len], path);
-        path_buf[path.len] = 0;
+        if (resolved.len >= path_buf.len) return error.PathTooLong;
+        @memcpy(path_buf[0..resolved.len], resolved);
+        path_buf[resolved.len] = 0;
 
         var w: c_int = 0;
         var h: c_int = 0;

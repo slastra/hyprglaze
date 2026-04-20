@@ -572,9 +572,28 @@ fn printUsage() void {
     , .{});
 }
 
+const system_data_dir = "/usr/share/hyprglaze";
+
+/// Resolve a data file path: try relative, then absolute, then /usr/share/hyprglaze/
+fn resolveDataPath(path: []const u8, buf: *[512]u8) ?[]const u8 {
+    // 1. Relative to CWD
+    if (std.fs.cwd().access(path, .{})) |_| return path else |_| {}
+    // 2. Absolute path
+    if (path.len > 0 and path[0] == '/') {
+        if (std.fs.accessAbsolute(path, .{})) |_| return path else |_| {}
+    }
+    // 3. System data dir fallback
+    const full = std.fmt.bufPrint(buf, "{s}/{s}", .{ system_data_dir, path }) catch return null;
+    if (std.fs.accessAbsolute(full, .{})) |_| return full else |_| {}
+    return null;
+}
+
 fn loadShaderFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const u8 {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        const abs_file = std.fs.openFileAbsolute(path, .{}) catch return err;
+    var resolve_buf: [512]u8 = undefined;
+    const resolved = resolveDataPath(path, &resolve_buf) orelse path;
+
+    const file = std.fs.cwd().openFile(resolved, .{}) catch |err| {
+        const abs_file = std.fs.openFileAbsolute(resolved, .{}) catch return err;
         defer abs_file.close();
         const source = try abs_file.readToEndAlloc(allocator, 1024 * 1024);
         const with_sentinel = try allocator.realloc(source, source.len + 1);
