@@ -25,6 +25,10 @@ float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+vec2 hash2(vec2 p) {
+    return vec2(hash(p), hash(p + vec2(37.0, 91.0)));
+}
+
 float getBand(int i) {
     if (i < 4) {
         if (i == 0) return iParticles[0].x;
@@ -64,73 +68,102 @@ void main() {
     float beat = getBeat();
     float flight_time = getFlightTime();
 
+    // Radial coordinates from cursor
+    vec2 from_origin = fc - origin;
+    float pixel_angle = atan(from_origin.y, from_origin.x);
+    float pixel_dist = length(from_origin);
+    float max_dist = length(iResolution.xy) * 0.8;
+
+    // Grid-based starfield: tile in (angle, depth) space
+    // Each pixel checks only its local cell — O(1) per star layer
     for (int layer = 0; layer < 4; layer++) {
         float fl = float(layer);
         float layer_speed = 0.06 + fl * 0.05;
-        float num_stars = 80.0 + fl * 40.0;
         float star_max_r = 2.0 + fl * 1.5;
 
-        for (float si = 0.0; si < num_stars; si += 1.0) {
-            float seed = si + fl * 200.0;
-            float angle = hash(vec2(seed, 1.0)) * 6.28318;
-            float phase = hash(vec2(seed, 2.0));
-            float star_bright = hash(vec2(seed, 3.0));
+        // Tile the radial space into angular slices and depth rings
+        float num_slices = 60.0 + fl * 20.0;
+        float num_rings = 12.0 + fl * 4.0;
+        float slice_size = 6.28318 / num_slices;
+        float ring_size = max_dist / num_rings;
 
-            // Each star is assigned a palette color (1-6) and responds to that band
-            int color_idx = int(mod(seed, 6.0));
-            float band_energy = getBand(color_idx);
+        // Flight offset — stars move outward over time
+        float depth_offset = flight_time * layer_speed * max_dist;
 
-            float t = fract(phase + flight_time * layer_speed);
+        // Which cell is this pixel in?
+        float depth_shifted = pixel_dist + depth_offset;
+        float ring_idx = floor(depth_shifted / ring_size);
+        float slice_idx = floor(pixel_angle / slice_size);
 
-            float max_dist = length(iResolution.xy) * 0.8;
-            float r = t * t * max_dist;
+        // Check 3x3 neighborhood
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int ds = -1; ds <= 1; ds++) {
+                float ri = ring_idx + float(dr);
+                float si = slice_idx + float(ds);
 
-            vec2 dir = vec2(cos(angle), sin(angle));
-            vec2 star_pos = origin + dir * r;
+                // Star identity from cell coords + layer
+                vec2 cell_id = vec2(ri, si + fl * 100.0);
+                vec2 h = hash2(cell_id);
 
-            float wd = windowSDF(star_pos);
-            if (wd < 0.0) continue;
+                // Star position in radial space
+                float star_depth = (ri + h.x) * ring_size - depth_offset;
+                float star_angle = (si + h.y) * slice_size;
 
-            vec2 diff = fc - star_pos;
+                // Convert to screen position
+                float star_r = star_depth;
+                if (star_r < 0.0 || star_r > max_dist) continue;
 
-            // Trail length driven by speed + this star's band energy
-            float trail_len = 1.0 + t * t * (10.0 + band_energy * 15.0);
-            float along = dot(diff, dir);
-            float perp = length(diff - dir * along);
-            float head = length(vec2(max(along, 0.0), perp));
-            float tail = length(vec2(along / trail_len, perp));
-            float dist = (along > 0.0) ? head : tail;
+                vec2 star_pos = origin + vec2(cos(star_angle), sin(star_angle)) * star_r;
 
-            // Star size pulses with its band energy
-            float size = star_max_r * (0.2 + t * 0.8) * (0.5 + star_bright * 0.5);
-            size *= 1.0 + band_energy * 0.8;
+                // Skip inside windows
+                float wd = windowSDF(star_pos);
+                if (wd < 0.0) continue;
 
-            // Fade in at birth, fade out before reset — hides the teleport
-            float brightness = smoothstep(0.0, 0.1, t) * smoothstep(1.0, 0.9, t) * star_bright;
-            // Brightness boost from band energy
-            brightness *= 1.0 + band_energy * 1.5;
+                // Distance from this pixel to star
+                vec2 diff = fc - star_pos;
+                vec2 dir = vec2(cos(star_angle), sin(star_angle));
 
-            float twinkle = 0.75 + 0.25 * sin(iTime * (3.0 + star_bright * 5.0) + seed);
+                // Band-reactive properties
+                int color_idx = int(mod(hash(cell_id + vec2(53.0, 17.0)) * 6.0, 6.0));
+                float band_energy = getBand(color_idx);
+                float star_bright = hash(cell_id + vec2(7.0, 13.0));
 
-            float core = 1.0 - smoothstep(0.0, size * 0.6, dist);
-            float intensity = core * brightness * twinkle;
-            intensity *= smoothstep(0.0, 30.0, wd);
+                // Trail along radial direction
+                float t_norm = star_r / max_dist;
+                float trail_len = 1.0 + t_norm * t_norm * (8.0 + band_energy * 10.0);
+                float along = dot(diff, dir);
+                float perp = length(diff - dir * along);
+                float head = length(vec2(max(along, 0.0), perp));
+                float tail = length(vec2(along / trail_len, perp));
+                float dist = (along > 0.0) ? head : tail;
 
-            // Color from palette based on assigned band
-            int ci = 1 + color_idx;
-            vec3 star_col = (iPaletteSize > ci) ? iPalette[ci] : vec3(0.7, 0.8, 1.0);
+                // Size scales with distance from origin (parallax)
+                float size = star_max_r * (0.3 + t_norm * 0.7) * (0.5 + star_bright * 0.5);
+                size *= 1.0 + band_energy * 0.6;
 
-            // Hot stars (high energy) shift toward foreground
-            if (band_energy > 0.5) {
-                star_col = mix(star_col, (iPaletteSize > 0) ? iPaletteFg : vec3(1.0),
-                    (band_energy - 0.5) * 0.6);
+                // Brightness: fade edges, pulse with band
+                float brightness = smoothstep(0.0, 0.1, t_norm) * smoothstep(1.0, 0.85, t_norm);
+                brightness *= star_bright * (1.0 + band_energy * 1.2);
+
+                float twinkle = 0.8 + 0.2 * sin(iTime * (3.0 + star_bright * 4.0) + hash(cell_id) * 100.0);
+
+                float core = 1.0 - smoothstep(0.0, size * 0.6, dist);
+                float intensity = core * brightness * twinkle;
+                intensity *= smoothstep(0.0, 30.0, wd);
+
+                int ci = 1 + color_idx;
+                vec3 star_col = (iPaletteSize > ci) ? iPalette[ci] : vec3(0.7, 0.8, 1.0);
+                if (band_energy > 0.5) {
+                    star_col = mix(star_col, (iPaletteSize > 0) ? iPaletteFg : vec3(1.0),
+                        (band_energy - 0.5) * 0.6);
+                }
+
+                col += star_col * intensity;
             }
-
-            col += star_col * intensity;
         }
     }
 
-    // Beat flash — brief screen tint
+    // Beat flash
     col += bg * beat * 0.3;
 
     // Focused window nebula
