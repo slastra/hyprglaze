@@ -73,23 +73,47 @@ void main() {
     float flash = bass * bass * 4.0; // squared for punch
     col += wave_col * flash * 0.08;
 
-    // Left channel - upper half (center = 0.7)
+    // Color by amplitude — quiet=base color, loud=shifts through palette
+    // Uses chromatic indices 1-6
     float left = getSample(0, uv.x);
+    float right = getSample(1, uv.x);
+
+    float left_amp = abs(left);
+    float right_amp = abs(right);
+
+    // Map amplitude to palette position (0=quiet, 5=loud)
+    float left_ci = clamp(left_amp * 15.0, 0.0, 5.0);
+    float right_ci = clamp(right_amp * 15.0, 0.0, 5.0);
+
+    int lci0 = 1 + int(left_ci);
+    int lci1 = min(lci0 + 1, 6);
+    float lt = fract(left_ci);
+    vec3 left_col = (iPaletteSize > lci1)
+        ? mix(iPalette[lci0], iPalette[lci1], lt)
+        : wave_col;
+
+    int rci0 = 1 + int(right_ci);
+    int rci1 = min(rci0 + 1, 6);
+    float rt = fract(right_ci);
+    vec3 right_col = (iPaletteSize > rci1)
+        ? mix(iPalette[rci0], iPalette[rci1], rt)
+        : wave_col;
+
+    // Left channel - upper half (center = 0.7)
     float left_y = 0.7 + left * 0.2;
     float left_dist = abs(uv.y - left_y);
     float left_line = 1.0 - smoothstep(0.0, 0.002, left_dist);
-    float left_glow = 1.0 - smoothstep(0.0, 0.015, left_dist);
-    col = mix(col, wave_col, left_glow * 0.3);
-    col = mix(col, wave_col, left_line);
+    float left_glow = 1.0 - smoothstep(0.0, 0.02 + left_amp * 0.03, left_dist);
+    col = mix(col, left_col, left_glow * 0.3);
+    col = mix(col, left_col, left_line);
 
     // Right channel - lower half (center = 0.3)
-    float right = getSample(1, uv.x);
     float right_y = 0.3 + right * 0.2;
     float right_dist = abs(uv.y - right_y);
     float right_line = 1.0 - smoothstep(0.0, 0.002, right_dist);
-    float right_glow = 1.0 - smoothstep(0.0, 0.015, right_dist);
-    col = mix(col, wave_col, right_glow * 0.3);
-    col = mix(col, wave_col, right_line);
+    float right_glow = 1.0 - smoothstep(0.0, 0.02 + right_amp * 0.03, right_dist);
+    col = mix(col, right_col, right_glow * 0.3);
+    col = mix(col, right_col, right_line);
 
     fragColor = vec4(col, 1.0);
 }
