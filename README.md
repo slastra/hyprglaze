@@ -2,6 +2,8 @@
 
 A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and modular effects to the background layer, with cursor tracking, window geometry awareness, and live config reload.
 
+<video src="https://raw.githubusercontent.com/slastra/hyprglaze/master/demo.mp4" autoplay loop muted playsinline></video>
+
 ## Features
 
 - **Layer-shell wallpaper** — renders behind all windows via wlr-layer-shell
