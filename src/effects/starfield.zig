@@ -15,9 +15,16 @@ pub const Context = struct {
     // Smoothed energy bands (6 bands mapped to 6 palette colors)
     bands: [6]f32 = [_]f32{0} ** 6,
     bass: f32 = 0,
-    bass_avg: f32 = 0,
-    beat: f32 = 0,
+
+    // Beat detection: energy flux (derivative) based
+    bass_instant: f32 = 0,
+    bass_smooth: f32 = 0,    // slow-moving average
+    bass_prev: f32 = 0,      // previous frame instant
+    flux: f32 = 0,           // positive energy derivative
+    flux_avg: f32 = 0,       // running average of flux
+    beat: f32 = 0,           // 0-1, decays smoothly
     beat_cooldown: f32 = 0,
+    velocity: f32 = 1.0,     // smoothed flight speed multiplier
 
     pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) Context {
         const sink = params.getString("sink", null);
@@ -55,16 +62,32 @@ pub const Context = struct {
             self.bands[b] += (raw - self.bands[b]) * (if (raw > self.bands[b]) attack else decay);
         }
 
-        // Overall bass for beat detection
+        // Beat detection: spectral flux (energy derivative)
         const bass_e = (self.bands[0] + self.bands[1]) * 0.5;
         self.bass = bass_e;
-        self.bass_avg += (bass_e - self.bass_avg) * 0.5 * dt;
+        self.bass_instant = bass_e;
+        self.bass_smooth += (bass_e - self.bass_smooth) * @min(1.0, 0.8 * dt);
+
+        // Spectral flux: only count positive energy changes (onsets, not decays)
+        const flux_raw = @max(0.0, self.bass_instant - self.bass_prev);
+        self.bass_prev = self.bass_instant;
+        self.flux = flux_raw;
+        self.flux_avg += (flux_raw - self.flux_avg) * @min(1.0, 1.5 * dt);
+
+        // Beat triggers when flux significantly exceeds its running average
         self.beat_cooldown -= dt;
-        if (bass_e > self.bass_avg * 1.8 + 0.05 and self.beat_cooldown <= 0) {
+        if (self.flux > self.flux_avg * 2.5 + 0.01 and self.beat_cooldown <= 0) {
             self.beat = 1.0;
-            self.beat_cooldown = 0.15;
+            self.beat_cooldown = 0.2;
         }
-        self.beat *= @max(0.0, 1.0 - 6.0 * dt);
+        // Smooth exponential decay
+        self.beat *= @exp(-4.0 * dt);
+        if (self.beat < 0.01) self.beat = 0;
+
+        // Velocity: smoothly ramps up on beat, decays back to 1.0
+        const target_vel = 1.0 + self.beat * 3.0 + self.bass * 0.5;
+        const vel_speed: f32 = if (target_vel > self.velocity) 8.0 else 2.0;
+        self.velocity += (target_vel - self.velocity) * @min(1.0, vel_speed * dt);
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
@@ -78,7 +101,7 @@ pub const Context = struct {
                 self.bands[0], self.bands[1], self.bands[2], self.bands[3]);
         if (prog.i_particles[1] >= 0)
             c.glUniform4f(prog.i_particles[1],
-                self.bands[4], self.bands[5], self.beat, self.bass);
+                self.bands[4], self.bands[5], self.beat, self.velocity);
         if (prog.i_particle_count >= 0)
             c.glUniform1i(prog.i_particle_count, 2);
     }

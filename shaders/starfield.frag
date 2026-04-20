@@ -10,7 +10,7 @@ uniform int iWindowCount;
 uniform float iTransition;
 
 // [0] = (band0, band1, band2, band3)  — sub-bass, bass, low-mid, mid
-// [1] = (band4, band5, beat, bass)    — high-mid, high, beat, overall bass
+// [1] = (band4, band5, beat, velocity) — high-mid, high, beat, smoothed speed
 uniform vec4 iParticles[300];
 uniform int iParticleCount;
 
@@ -37,7 +37,7 @@ float getBand(int i) {
 }
 
 float getBeat() { return iParticles[1].z; }
-float getBass() { return iParticles[1].w; }
+float getVelocity() { return iParticles[1].w; }
 
 float windowSDF(vec2 p) {
     float d = 1e6;
@@ -62,10 +62,10 @@ void main() {
 
     vec2 origin = iMouse.xy;
     float beat = getBeat();
-    float bass = getBass();
+    float velocity = getVelocity();
 
-    // Flight speed: base + beat pulse
-    float speed_mult = 1.0 + beat * 3.0 + bass * 0.5;
+    // Flight speed from smoothed velocity (already includes beat + bass)
+    float speed_mult = velocity;
 
     for (int layer = 0; layer < 4; layer++) {
         float fl = float(layer);
