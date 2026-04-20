@@ -246,19 +246,47 @@ pub fn main() !void {
             const win_speed = -@log(gs) * 30.0;
             const win_alpha = 1.0 - @exp(-win_speed * dt);
 
-            // New windows snap, removed windows drop
-            if (target_window_count > cached_window_count) {
-                for (cached_window_count..target_window_count) |i| {
+            // Match target windows to cached windows by nearest position
+            // (Hyprland can reorder windows on focus change)
+            if (target_window_count != cached_window_count) {
+                // Window count changed — snap all
+                for (0..target_window_count) |i| {
                     cached_windows[i] = target_windows[i];
                 }
+                cached_window_count = target_window_count;
+            } else {
+                // Same count — match each target to nearest cached window
+                var used: [hypr.max_visible_windows]bool = [_]bool{false} ** hypr.max_visible_windows;
+                var matched_targets: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
+
+                for (0..target_window_count) |ti| {
+                    var best: u8 = 0;
+                    var best_dist: f32 = std.math.inf(f32);
+                    for (0..cached_window_count) |ci| {
+                        if (used[ci]) continue;
+                        const dx = cached_windows[ci].x - target_windows[ti].x;
+                        const dy = cached_windows[ci].y - target_windows[ti].y;
+                        const dw = cached_windows[ci].w - target_windows[ti].w;
+                        const dh = cached_windows[ci].h - target_windows[ti].h;
+                        const d = dx * dx + dy * dy + dw * dw + dh * dh;
+                        if (d < best_dist) {
+                            best_dist = d;
+                            best = @intCast(ci);
+                        }
+                    }
+                    used[best] = true;
+                    matched_targets[best] = target_windows[ti];
+                }
+
+                for (0..cached_window_count) |i| {
+                    cached_windows[i].x += (matched_targets[i].x - cached_windows[i].x) * win_alpha;
+                    cached_windows[i].y += (matched_targets[i].y - cached_windows[i].y) * win_alpha;
+                    cached_windows[i].w += (matched_targets[i].w - cached_windows[i].w) * win_alpha;
+                    cached_windows[i].h += (matched_targets[i].h - cached_windows[i].h) * win_alpha;
+                }
             }
-            cached_window_count = target_window_count;
 
             for (0..cached_window_count) |i| {
-                cached_windows[i].x += (target_windows[i].x - cached_windows[i].x) * win_alpha;
-                cached_windows[i].y += (target_windows[i].y - cached_windows[i].y) * win_alpha;
-                cached_windows[i].w += (target_windows[i].w - cached_windows[i].w) * win_alpha;
-                cached_windows[i].h += (target_windows[i].h - cached_windows[i].h) * win_alpha;
                 cached_collision_rects[i] = .{
                     .x = cached_windows[i].x,
                     .y = cached_windows[i].y,
