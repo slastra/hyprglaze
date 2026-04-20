@@ -72,7 +72,7 @@ void main() {
     vec2 from_origin = fc - origin;
     float pixel_angle = atan(from_origin.y, from_origin.x);
     float pixel_dist = length(from_origin);
-    float max_dist = length(iResolution.xy) * 0.8;
+    float max_dist = length(iResolution.xy) * 1.3;
 
     // Grid-based starfield: tile in (angle, depth) space
     // Each pixel checks only its local cell — O(1) per star layer
@@ -146,7 +146,7 @@ void main() {
                 size *= 1.0 + band_energy * 0.6;
 
                 // Brightness: fade edges, pulse with band
-                float brightness = smoothstep(0.0, 0.1, t_norm) * smoothstep(1.0, 0.85, t_norm);
+                float brightness = smoothstep(0.0, 0.05, t_norm) * smoothstep(1.0, 0.95, t_norm);
                 brightness *= star_bright * (1.0 + band_energy * 1.2);
 
                 float twinkle = 0.8 + 0.2 * sin(iTime * (3.0 + star_bright * 4.0) + hash(cell_id) * 100.0);
