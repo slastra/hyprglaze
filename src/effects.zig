@@ -72,7 +72,7 @@ pub const Effect = union(enum) {
             return .{ .aurora = aurora.Context.init() };
         } else if (std.mem.eql(u8, name, "visualizer")) {
             const params = config_mod.effectParams(cfg, "visualizer");
-            return .{ .visualizer = visualizer.Context.init(params) };
+            return .{ .visualizer = visualizer.Context.init(allocator, params) };
         }
         std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, visualizer, static, buddy, ai-buddy\n", .{name});
         return error.UnknownEffect;

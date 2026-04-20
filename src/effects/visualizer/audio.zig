@@ -5,33 +5,32 @@ const c = @cImport({
     @cInclude("pulse/error.h");
 });
 
-pub const sample_count = 256;
-pub const bin_count = 64;
+pub const samples_per_channel = 128;
+
+const sample_rate = 44100;
+const channels = 2;
+const frames_per_read = sample_rate / 60;
+const read_floats = frames_per_read * channels;
 
 pub const AudioCapture = struct {
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    // Double buffer: audio thread writes to back, main thread reads front
-    bins: [2][bin_count]f32 = [_][bin_count]f32{[_]f32{0} ** bin_count} ** 2,
-    back: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-    has_data: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    waveform: [3][256]f32 = [_][256]f32{[_]f32{0} ** 256} ** 3,
+    write_idx: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+    read_idx: std.atomic.Value(u8) = std.atomic.Value(u8).init(2),
 
     source: [256]u8 = undefined,
     source_len: u16 = 0,
 
     pub fn init(sink_name: ?[]const u8) AudioCapture {
         var self = AudioCapture{};
-
         if (sink_name) |name| {
-            // User specified a sink - append .monitor
             const monitor = std.fmt.bufPrint(&self.source, "{s}.monitor", .{name}) catch "";
             self.source_len = @intCast(monitor.len);
         } else {
-            // Auto-detect: run `pactl get-default-sink` and append .monitor
             self.source_len = autoDetectMonitor(&self.source);
         }
-
         return self;
     }
 
@@ -49,95 +48,79 @@ pub const AudioCapture = struct {
         self.thread = null;
     }
 
-    /// Get current frequency bins (called from main thread)
-    pub fn getBins(self: *AudioCapture) [bin_count]f32 {
-        if (!self.has_data.load(.acquire)) return [_]f32{0} ** bin_count;
-        const front: u8 = 1 - self.back.load(.acquire);
-        return self.bins[front];
+    pub fn getWaveform(self: *AudioCapture) [256]f32 {
+        return self.waveform[self.read_idx.load(.acquire)];
     }
 
     fn getSourceZ(self: *AudioCapture) ?[*:0]const u8 {
         if (self.source_len == 0) return null;
-        if (self.source_len < self.source.len) {
-            self.source[self.source_len] = 0;
-            return @ptrCast(self.source[0..self.source_len :0]);
-        }
-        return null;
+        self.source[self.source_len] = 0;
+        return @ptrCast(self.source[0..self.source_len :0]);
     }
 
     fn captureLoop(self: *AudioCapture) void {
         const ss = c.pa_sample_spec{
             .format = c.PA_SAMPLE_FLOAT32LE,
-            .rate = 44100,
-            .channels = 1,
+            .rate = sample_rate,
+            .channels = channels,
+        };
+        const ba = c.pa_buffer_attr{
+            .maxlength = @intCast(read_floats * @sizeOf(f32) * 2),
+            .tlength = std.math.maxInt(u32),
+            .prebuf = std.math.maxInt(u32),
+            .minreq = std.math.maxInt(u32),
+            .fragsize = @intCast(read_floats * @sizeOf(f32)),
         };
 
         const source_z = self.getSourceZ();
-
         var err: c_int = 0;
         const pa = c.pa_simple_new(
-            null,
-            "hyprglaze",
-            c.PA_STREAM_RECORD,
-            source_z,
-            "visualizer",
-            &ss,
-            null,
-            null,
-            &err,
-        );
-
-        if (pa == null) {
+            null, "hyprglaze", c.PA_STREAM_RECORD,
+            source_z, "visualizer", &ss, null, &ba, &err,
+        ) orelse {
             std.debug.print("PulseAudio connect failed: {s}\n", .{c.pa_strerror(err)});
             return;
-        }
+        };
         defer c.pa_simple_free(pa);
 
-        if (source_z) |sz| {
-            std.debug.print("Audio capture started: {s}\n", .{sz});
-        } else {
-            std.debug.print("Audio capture started: default source\n", .{});
-        }
+        std.debug.print("Audio capture started: {s}\n", .{
+            if (source_z) |sz| std.mem.sliceTo(sz, 0) else "default",
+        });
 
-        var samples: [sample_count]f32 = undefined;
+        var raw: [read_floats]f32 = undefined;
+        const step = frames_per_read / samples_per_channel;
 
         while (self.running.load(.acquire)) {
-            const ret = c.pa_simple_read(
-                pa,
-                @ptrCast(&samples),
-                sample_count * @sizeOf(f32),
-                &err,
-            );
-            if (ret < 0) continue;
+            if (c.pa_simple_read(pa, @ptrCast(&raw), read_floats * @sizeOf(f32), &err) < 0) continue;
 
-            // Simple DFT -> magnitude for bin_count bins
-            var result: [bin_count]f32 = undefined;
-            for (0..bin_count) |k| {
-                var re: f32 = 0;
-                var im: f32 = 0;
-                for (0..sample_count) |n| {
-                    const angle = -2.0 * std.math.pi * @as(f32, @floatFromInt(k + 1)) * @as(f32, @floatFromInt(n)) / @as(f32, @floatFromInt(sample_count));
-                    re += samples[n] * @cos(angle);
-                    im += samples[n] * @sin(angle);
+            // Downsample to 128 samples per channel, averaging each step
+            const wi = self.write_idx.load(.acquire);
+            for (0..samples_per_channel) |i| {
+                var left: f32 = 0;
+                var right: f32 = 0;
+                for (0..step) |j| {
+                    const src = (i * step + j) * channels;
+                    left += raw[src];
+                    right += raw[src + 1];
                 }
-                const mag = @sqrt(re * re + im * im) / @as(f32, @floatFromInt(sample_count));
-                result[k] = @max(0, @log2(1.0 + mag * 50.0));
+                const inv = 1.0 / @as(f32, @floatFromInt(step));
+                self.waveform[wi][i] = left * inv;
+                self.waveform[wi][128 + i] = right * inv;
             }
 
-            // Write to back buffer, flip
-            const b = self.back.load(.acquire);
-            self.bins[b] = result;
-            self.back.store(1 - b, .release);
-            self.has_data.store(true, .release);
+            // Publish
+            const old_read = self.read_idx.load(.acquire);
+            self.read_idx.store(wi, .release);
+            self.write_idx.store(old_read, .release);
         }
-
-        std.debug.print("Audio capture stopped\n", .{});
     }
 };
 
 fn autoDetectMonitor(buf: *[256]u8) u16 {
-    const argv = [_][]const u8{ "pactl", "get-default-sink" };
-    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    var child = std.process.Child.init(
+        &[_][]const u8{ "pactl", "get-default-sink" },
+        std.heap.page_allocator,
+    );
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;
     child.spawn() catch return 0;
@@ -148,22 +131,19 @@ fn autoDetectMonitor(buf: *[256]u8) u16 {
         return 0;
     };
     _ = child.wait() catch {};
-
     if (n == 0) return 0;
 
-    // Strip trailing newline
-    var sink_len = n;
-    while (sink_len > 0 and (read_buf[sink_len - 1] == '\n' or read_buf[sink_len - 1] == '\r')) sink_len -= 1;
-    if (sink_len == 0) return 0;
+    // Strip trailing whitespace
+    var len = n;
+    while (len > 0 and (read_buf[len - 1] == '\n' or read_buf[len - 1] == '\r')) len -= 1;
+    if (len == 0) return 0;
 
-    // Copy sink name + append .monitor
-    const monitor_suffix = ".monitor";
-    if (sink_len + monitor_suffix.len < buf.len) {
-        @memcpy(buf[0..sink_len], read_buf[0..sink_len]);
-        @memcpy(buf[sink_len .. sink_len + monitor_suffix.len], monitor_suffix);
-        const total: u16 = @intCast(sink_len + monitor_suffix.len);
-        std.debug.print("Auto-detected monitor: {s}\n", .{buf[0..total]});
-        return total;
-    }
-    return 0;
+    const suffix = ".monitor";
+    if (len + suffix.len >= buf.len) return 0;
+
+    @memcpy(buf[0..len], read_buf[0..len]);
+    @memcpy(buf[len .. len + suffix.len], suffix);
+    const total: u16 = @intCast(len + suffix.len);
+    std.debug.print("Auto-detected monitor: {s}\n", .{buf[0..total]});
+    return total;
 }
