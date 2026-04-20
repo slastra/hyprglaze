@@ -12,6 +12,7 @@ const cellbloom = @import("effects/cellbloom.zig");
 const concentric = @import("effects/concentric.zig");
 const fluid = @import("effects/fluid.zig");
 const aurora = @import("effects/aurora.zig");
+const starfield = @import("effects/starfield.zig");
 const visualizer = @import("effects/visualizer/context.zig");
 const milkdrop = @import("effects/milkdrop/context.zig");
 const buddy = @import("effects/buddy/context.zig");
@@ -49,6 +50,7 @@ pub const Effect = union(enum) {
     concentric: concentric.Context,
     fluid: fluid.Context,
     aurora: aurora.Context,
+    starfield: starfield.Context,
     visualizer: visualizer.Context,
     milkdrop: milkdrop.Context,
 
@@ -74,6 +76,8 @@ pub const Effect = union(enum) {
             return .{ .fluid = fluid.Context.init() };
         } else if (std.mem.eql(u8, name, "aurora")) {
             return .{ .aurora = aurora.Context.init() };
+        } else if (std.mem.eql(u8, name, "starfield")) {
+            return .{ .starfield = starfield.Context.init() };
         } else if (std.mem.eql(u8, name, "visualizer")) {
             const params = config_mod.effectParams(cfg, "visualizer");
             return .{ .visualizer = visualizer.Context.init(allocator, params) };
@@ -114,6 +118,7 @@ pub const Effect = union(enum) {
             .concentric => "shaders/concentric.frag",
             .fluid => "shaders/fluid.frag",
             .aurora => "shaders/aurora.frag",
+            .starfield => "shaders/starfield.frag",
             .visualizer => "shaders/visualizer.frag",
             .milkdrop => "shaders/milkdrop.frag",
         };
