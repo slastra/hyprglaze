@@ -11,6 +11,7 @@ const cellbloom = @import("effects/cellbloom.zig");
 const concentric = @import("effects/concentric.zig");
 const fluid = @import("effects/fluid.zig");
 const aurora = @import("effects/aurora.zig");
+const visualizer = @import("effects/visualizer/context.zig");
 const buddy = @import("effects/buddy/context.zig");
 const ai_buddy = @import("effects/ai_buddy/context.zig");
 
@@ -45,6 +46,7 @@ pub const Effect = union(enum) {
     concentric: concentric.Context,
     fluid: fluid.Context,
     aurora: aurora.Context,
+    visualizer: visualizer.Context,
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
         if (std.mem.eql(u8, name, "particles")) {
@@ -68,8 +70,11 @@ pub const Effect = union(enum) {
             return .{ .fluid = fluid.Context.init() };
         } else if (std.mem.eql(u8, name, "aurora")) {
             return .{ .aurora = aurora.Context.init() };
+        } else if (std.mem.eql(u8, name, "visualizer")) {
+            const params = config_mod.effectParams(cfg, "visualizer");
+            return .{ .visualizer = visualizer.Context.init(params) };
         }
-        std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, static, buddy, ai-buddy\n", .{name});
+        std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, visualizer, static, buddy, ai-buddy\n", .{name});
         return error.UnknownEffect;
     }
 
@@ -102,6 +107,7 @@ pub const Effect = union(enum) {
             .concentric => "shaders/concentric.frag",
             .fluid => "shaders/fluid.frag",
             .aurora => "shaders/aurora.frag",
+            .visualizer => "shaders/visualizer.frag",
         };
     }
 };

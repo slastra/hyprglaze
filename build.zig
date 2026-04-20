@@ -47,6 +47,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("wayland-egl", .{});
     exe.root_module.linkSystemLibrary("EGL", .{});
     exe.root_module.linkSystemLibrary("GLESv2", .{});
+    exe.root_module.linkSystemLibrary("pulse-simple", .{});
+    exe.root_module.linkSystemLibrary("pulse", .{});
     exe.root_module.link_libc = true;
 
     b.installArtifact(exe);

@@ -26,6 +26,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
 | `aurora` | Northern lights curtains that drape and bend around windows, cursor distortion |
+| `visualizer` | Audio visualizer with frequency bars, circular ring around focused window, bass pulse |
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `static` | Minimal - just renders a custom shader |
@@ -73,6 +74,17 @@ max_calls_per_minute = 6
 ```
 
 CLI overrides: `zig build run -- --effect particles --theme Nord`
+
+### Visualizer
+
+The `visualizer` effect captures system audio via PipeWire/PulseAudio. It auto-detects your default output sink. To specify a different sink:
+
+```toml
+[visualizer]
+sink = "alsa_output.pci-0000_00_1f.3.analog-stereo"
+```
+
+List available sinks with `pactl list short sinks`.
 
 ### AI Buddy (AWS Bedrock)
 
