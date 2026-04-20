@@ -34,28 +34,30 @@ void main() {
     vec3 col = bg;
     float corner = 12.0;
 
-    // --- Unfocused windows: surface-colored glow ---
+    // Smooth transition curve (ease in-out)
+    float t = iTransition * iTransition * (3.0 - 2.0 * iTransition);
+
+    // --- All windows ---
     for (int i = 0; i < iWindowCount && i < 32; i++) {
         vec4 win = iWindows[i];
         if (win.z < 1.0 || win.w < 1.0) continue;
 
         float dist = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, corner);
-        if (dist < 0.0) continue; // skip inside
+        bool is_focused = abs(win.x - iWindow.x) < 1.0 && abs(win.y - iWindow.y) < 1.0;
 
-        float glow = exp(-dist / 40.0); // soft exponential falloff
-        col = mix(col, surface, glow * 0.5);
-    }
-
-    // --- Focused window: accent fill + glow ---
-    if (iWindow.z > 1.0 && iWindow.w > 1.0) {
-        float dist = sdRoundBox(fc, iWindow.xy + iWindow.zw * 0.5, iWindow.zw * 0.5, corner);
-        if (dist <= 0.0) {
-            // Inside: solid accent fill
-            col = mix(col, accent, 0.25);
+        if (is_focused) {
+            // Focused: accent glow fades in with transition
+            if (dist <= 0.0) {
+                col = mix(col, accent, 0.25 * t);
+            } else {
+                float glow_radius = 30.0 + t * 30.0; // glow expands during transition
+                float glow = exp(-dist / glow_radius);
+                col = mix(col, accent, glow * 0.3 * t);
+            }
         } else {
-            // Outside: soft glow
-            float glow = exp(-dist / 60.0);
-            col = mix(col, accent, glow * 0.3);
+            if (dist < 0.0) continue;
+            float glow = exp(-dist / 40.0);
+            col = mix(col, surface, glow * 0.5);
         }
     }
 
