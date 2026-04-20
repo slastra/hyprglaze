@@ -76,11 +76,14 @@ void main() {
             // Distance from pixel to star
             vec2 diff = fc - star_pos;
 
-            // Streak: elongate along radial direction based on speed (t)
-            float streak = 1.0 + t * t * 8.0; // more streak as star flies outward
+            // Trail: elongate behind the star along radial direction
+            float trail_len = 1.0 + t * t * 15.0;
             float along = dot(diff, dir);
             float perp = length(diff - dir * along);
-            float dist = length(vec2(along / streak, perp));
+            // Sharp head, soft trail behind (along < 0 = behind star)
+            float head = length(vec2(max(along, 0.0), perp));
+            float tail = length(vec2(along / trail_len, perp));
+            float dist = (along > 0.0) ? head : tail;
 
             // Star size grows as it approaches (parallax)
             float size = star_max_r * (0.2 + t * 0.8) * (0.5 + star_bright * 0.5);
@@ -91,10 +94,9 @@ void main() {
             // Twinkle
             float twinkle = 0.75 + 0.25 * sin(iTime * (3.0 + star_bright * 5.0) + seed);
 
-            // Render
-            float glow = 1.0 - smoothstep(0.0, size * 3.0, dist);
-            float core = 1.0 - smoothstep(0.0, size * 0.4, dist);
-            float intensity = (glow * 0.25 + core * 0.75) * brightness * twinkle;
+            // Render — crisp core with tight falloff
+            float core = 1.0 - smoothstep(0.0, size * 0.6, dist);
+            float intensity = core * brightness * twinkle;
 
             // Dim near windows
             intensity *= smoothstep(0.0, 30.0, wd);
