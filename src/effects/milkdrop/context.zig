@@ -199,6 +199,8 @@ pub const Context = struct {
     bass_avg: f32 = 0,
     beat: f32 = 0,
     beat_cooldown: f32 = 0,
+    kaleido_segments: i32 = 6,
+    beat_count: u32 = 0,
 
     // Palette cache (read from main shader)
     palette: [48]f32 = [_]f32{0.5} ** 48,
@@ -288,9 +290,15 @@ pub const Context = struct {
         self.beat_cooldown -= dt;
         if (bass_e > self.bass_avg * 1.8 + 0.02 and self.beat_cooldown <= 0) {
             self.beat = 1.0;
-            self.beat_cooldown = 0.15; // minimum 150ms between beats
+            self.beat_cooldown = 0.15;
+            self.beat_count += 1;
+            // Change kaleidoscope every 4 beats
+            if (self.beat_count % 4 == 0) {
+                const segments = [_]i32{ 3, 4, 6, 8, 10, 12 };
+                self.kaleido_segments = segments[self.beat_count / 4 % segments.len];
+            }
         }
-        self.beat *= @max(0.0, 1.0 - 8.0 * dt); // fast decay
+        self.beat *= @max(0.0, 1.0 - 8.0 * dt);
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
@@ -314,7 +322,7 @@ pub const Context = struct {
         setU1f(self.warp_prog, "uBeat", self.beat);
         setU1f(self.warp_prog, "uTime", time);
         setU2f(self.warp_prog, "uRes", @floatFromInt(self.width), @floatFromInt(self.height));
-        setU1i(self.warp_prog, "uKaleidoSegments", 8);
+        setU1i(self.warp_prog, "uKaleidoSegments", self.kaleido_segments);
         const warp_bg_loc = c.glGetUniformLocation(self.warp_prog, "uBg");
         if (warp_bg_loc >= 0) c.glUniform3fv(warp_bg_loc, 1, &self.palette_bg);
 
