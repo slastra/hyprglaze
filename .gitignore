@@ -15,6 +15,13 @@ hyprglaze-aws.env
 # Aseprite source files
 *.aseprite
 
+# makepkg / AUR build artifacts
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+pkg/
+src/*.tar.gz
+
 # OS
 .DS_Store
 __MACOSX/
