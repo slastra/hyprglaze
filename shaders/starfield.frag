@@ -109,11 +109,16 @@ void main() {
                 float star_depth = (ri + h.x) * ring_size - depth_offset;
                 float star_angle = (si + h.y) * slice_size;
 
-                // Convert to screen position
-                float star_r = star_depth;
-                if (star_r < 0.0 || star_r > max_dist) continue;
+                // Convert to screen position — exponential radial warp
+                // Stars accelerate outward: slow near origin, fast at edges
+                float linear_r = star_depth;
+                if (linear_r < 0.0 || linear_r > max_dist) continue;
+                float t_life = linear_r / max_dist;
+                float star_r = t_life * t_life * t_life * max_dist;
 
-                vec2 star_pos = origin + vec2(cos(star_angle), sin(star_angle)) * star_r;
+                // Slight spiral warp — stars curve as they fly out
+                float warped_angle = star_angle + t_life * t_life * 0.3;
+                vec2 star_pos = origin + vec2(cos(warped_angle), sin(warped_angle)) * star_r;
 
                 // Skip inside windows
                 float wd = windowSDF(star_pos);
@@ -121,16 +126,16 @@ void main() {
 
                 // Distance from this pixel to star
                 vec2 diff = fc - star_pos;
-                vec2 dir = vec2(cos(star_angle), sin(star_angle));
+                vec2 dir = vec2(cos(warped_angle), sin(warped_angle));
 
                 // Band-reactive properties
                 int color_idx = int(mod(hash(cell_id + vec2(53.0, 17.0)) * 6.0, 6.0));
                 float band_energy = getBand(color_idx);
                 float star_bright = hash(cell_id + vec2(7.0, 13.0));
 
-                // Trail along radial direction
+                // Trail stretches dramatically at edges
                 float t_norm = star_r / max_dist;
-                float trail_len = 1.0 + t_norm * t_norm * (8.0 + band_energy * 10.0);
+                float trail_len = 1.0 + t_life * t_life * (20.0 + band_energy * 15.0);
                 float along = dot(diff, dir);
                 float perp = length(diff - dir * along);
                 float head = length(vec2(max(along, 0.0), perp));
