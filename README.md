@@ -6,15 +6,15 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 
 ## Features
 
-- **Layer-shell wallpaper** — renders behind all windows via wlr-layer-shell
+- **Layer-shell wallpaper** - renders behind all windows via wlr-layer-shell
 - **GLSL shaders** with Shadertoy-compatible uniforms (iResolution, iTime, iMouse, iWindow)
-- **Window awareness** — all visible windows passed to shaders with smooth position tracking
-- **365 color schemes** — Gogh terminal themes via palette uniforms, sprites auto-recolor to match
-- **Modular effect system** — pluggable effects with per-effect config
-- **Live config reload** — edit TOML, changes apply instantly via inotify (including effect switching)
-- **Frame-rate independent smoothing** — cursor, window geometry, and focus transitions
-- **CPU particle physics** — Verlet integration, tracer trails, window collision, cursor repulsion
-- **Desktop buddy** — animated sprite character with AI-driven behavior (Claude Haiku via Bedrock)
+- **Window awareness** - all visible windows passed to shaders with smooth position tracking
+- **365 color schemes** - Gogh terminal themes via palette uniforms, sprites auto-recolor to match
+- **Modular effect system** - pluggable effects with per-effect config
+- **Live config reload** - edit TOML, changes apply instantly via inotify (including effect switching)
+- **Frame-rate independent smoothing** - cursor, window geometry, and focus transitions
+- **CPU particle physics** - Verlet integration, tracer trails, window collision, cursor repulsion
+- **Desktop buddy** - animated sprite character with AI-driven behavior (Claude Haiku via Bedrock)
 
 ## Effects
 
@@ -28,7 +28,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `aurora` | Northern lights curtains that drape and bend around windows, cursor distortion |
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
-| `static` | Minimal — just renders a custom shader |
+| `static` | Minimal - just renders a custom shader |
 
 ## Dependencies (Arch Linux)
 
@@ -84,7 +84,7 @@ AWS_SECRET_ACCESS_KEY=your-secret-key
 AWS_DEFAULT_REGION=us-east-1
 ```
 
-Requires the `aws` CLI to be installed and model access enabled for `us.anthropic.claude-haiku-4-5-20251001-v1:0` in your AWS account (Bedrock → Model access).
+Requires the `aws` CLI to be installed and model access enabled for `us.anthropic.claude-haiku-4-5-20251001-v1:0` in your AWS account (Bedrock -> Model access).
 
 ## Shader Uniforms
 
@@ -96,7 +96,7 @@ Requires the `aws` CLI to be installed and model access enabled for `us.anthropi
 | `iWindow` | `vec4` | Focused window rect (smoothed) |
 | `iWindows[32]` | `vec4[]` | All visible window rects (smoothed) |
 | `iWindowCount` | `int` | Number of visible windows |
-| `iTransition` | `float` | Focus change progress (0→1) |
+| `iTransition` | `float` | Focus change progress (0->1) |
 | `iPalette[16]` | `vec3[]` | Theme color ramp |
 | `iPaletteSize` | `int` | Number of palette colors |
 | `iPaletteBg/Fg` | `vec3` | Theme background/foreground |
@@ -108,7 +108,7 @@ Requires the `aws` CLI to be installed and model access enabled for `us.anthropi
 
 1. Create `src/effects/myeffect.zig` with a `pub const Context` struct (or a directory for complex effects)
 2. Implement `init()`, `update(state)`, `upload(shader)`, `deinit()`
-3. Register in `src/effects.zig` — add import, tagged union variant, init branch, and default shader path
+3. Register in `src/effects.zig` - add import, tagged union variant, init branch, and default shader path
 4. Add default shader to `shaders/myeffect.frag`
 5. Configure via `[myeffect]` section in TOML, read params with `config_mod.EffectParams`
 
