@@ -21,31 +21,37 @@ uniform vec3 iPaletteFg;
 
 out vec4 fragColor;
 
+float rawSample(int base, int i) {
+    i = clamp(i, 0, 127);
+    int slot = base + i / 4;
+    int sub = i - (i / 4) * 4;
+    if (sub == 0) return iParticles[slot].x;
+    if (sub == 1) return iParticles[slot].y;
+    if (sub == 2) return iParticles[slot].z;
+    return iParticles[slot].w;
+}
+
+// Catmull-Rom cubic interpolation for smooth waveform
 float getSample(int channel, float x) {
     float fi = x * 127.0;
-    int i0 = int(fi);
-    int i1 = min(i0 + 1, 127);
+    int i1 = int(fi);
     float t = fract(fi);
 
-    int base = channel * 32; // left=0, right=32
+    int base = channel * 32;
+    float p0 = rawSample(base, i1 - 1);
+    float p1 = rawSample(base, i1);
+    float p2 = rawSample(base, i1 + 1);
+    float p3 = rawSample(base, i1 + 2);
 
-    int slot0 = base + i0 / 4;
-    int sub0 = i0 - (i0 / 4) * 4;
-    float v0;
-    if (sub0 == 0) v0 = iParticles[slot0].x;
-    else if (sub0 == 1) v0 = iParticles[slot0].y;
-    else if (sub0 == 2) v0 = iParticles[slot0].z;
-    else v0 = iParticles[slot0].w;
-
-    int slot1 = base + i1 / 4;
-    int sub1 = i1 - (i1 / 4) * 4;
-    float v1;
-    if (sub1 == 0) v1 = iParticles[slot1].x;
-    else if (sub1 == 1) v1 = iParticles[slot1].y;
-    else if (sub1 == 2) v1 = iParticles[slot1].z;
-    else v1 = iParticles[slot1].w;
-
-    return mix(v0, v1, t);
+    // Catmull-Rom spline
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return 0.5 * (
+        (2.0 * p1) +
+        (-p0 + p2) * t +
+        (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+        (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    );
 }
 
 void main() {
