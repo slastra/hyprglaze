@@ -90,9 +90,11 @@ pub const Context = struct {
         // Wobble: gentle pulse that decays, no oscillation
         self.wobble *= @exp(-2.0 * dt);
 
-        // Velocity: always forward, clamp minimum
-        const target_vel = 0.4 + self.bass * 0.15 + self.wobble * 0.4;
-        self.velocity += (target_vel - self.velocity) * @min(1.0, 4.0 * dt);
+        // Velocity: cruise speed + beat kick
+        const target_vel = 0.4 + self.bass * 0.15;
+        self.velocity += (target_vel - self.velocity) * @min(1.0, 3.0 * dt);
+        // Beat adds an instant kick that decays naturally via the wobble
+        self.velocity += self.wobble * 2.0 * dt;
         self.velocity = @max(self.velocity, 0.3);
 
         // Accumulate flight time — only ever increases
