@@ -1,6 +1,6 @@
 # hyprglaze
 
-A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and modular effects to the background layer, with cursor tracking, window geometry awareness, and live config reload.
+A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and modular effects to the background layer, with cursor tracking, window geometry awareness, audio reactivity, and live config reload.
 
 ![demo](demo.gif)
 
@@ -9,6 +9,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 - **Layer-shell wallpaper** - renders behind all windows via wlr-layer-shell
 - **GLSL shaders** with Shadertoy-compatible uniforms (iResolution, iTime, iMouse, iWindow)
 - **Window awareness** - all visible windows passed to shaders with smooth position tracking
+- **Audio capture** - PipeWire/PulseAudio integration with auto-detected output monitor
 - **365 color schemes** - Gogh terminal themes via palette uniforms, sprites auto-recolor to match
 - **Modular effect system** - pluggable effects with per-effect config
 - **Live config reload** - edit TOML, changes apply instantly via inotify (including effect switching)
@@ -26,20 +27,25 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
 | `aurora` | Northern lights curtains that drape and bend around windows, cursor distortion |
-| `visualizer` | Audio visualizer with frequency bars, circular ring around focused window, bass pulse |
+| `starfield` | Radial starfield with audio-reactive speed, per-band star colors, beat pulses |
+| `visualizer` | Stereo waveform with Catmull-Rom interpolation, amplitude-driven palette colors |
+| `milkdrop` | Feedback-loop visualizer with kaleidoscope, beat detection, FBO pipeline |
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `static` | Minimal - just renders a custom shader |
 
-## Dependencies (Arch Linux)
+## Install (Arch Linux)
+
+### From AUR
 
 ```
-sudo pacman -S zig wayland wayland-protocols mesa libglvnd stb
+yay -S hyprglaze-git
 ```
 
-## Build & Run
+### From source
 
 ```
+sudo pacman -S zig wayland wayland-protocols mesa libglvnd stb libpulse
 zig build
 zig build run
 ```
@@ -49,6 +55,8 @@ zig build run
 `~/.config/hypr/hyprglaze.toml`:
 
 ```toml
+# Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
+#          starfield, visualizer, milkdrop, buddy, ai-buddy, static
 effect = "fluid"
 theme = "Rosé Pine"
 
@@ -75,9 +83,9 @@ max_calls_per_minute = 6
 
 CLI overrides: `zig build run -- --effect particles --theme Nord`
 
-### Visualizer
+### Audio Effects (visualizer, milkdrop, starfield)
 
-The `visualizer` effect captures system audio via PipeWire/PulseAudio. It auto-detects your default output sink. To specify a different sink:
+Audio effects capture system audio via PipeWire/PulseAudio. The output monitor is auto-detected. To specify a different sink:
 
 ```toml
 [visualizer]
@@ -88,7 +96,7 @@ List available sinks with `pactl list short sinks`.
 
 ### AI Buddy (AWS Bedrock)
 
-The `ai-buddy` effect uses Claude Haiku via AWS Bedrock for decision-making. To use it, create `~/.config/hypr/hyprglaze-aws.env` with your AWS credentials:
+The `ai-buddy` effect uses Claude Haiku via AWS Bedrock for decision-making. Create `~/.config/hypr/hyprglaze-aws.env`:
 
 ```
 AWS_ACCESS_KEY_ID=your-access-key
@@ -96,7 +104,7 @@ AWS_SECRET_ACCESS_KEY=your-secret-key
 AWS_DEFAULT_REGION=us-east-1
 ```
 
-Requires the `aws` CLI to be installed and model access enabled for `us.anthropic.claude-haiku-4-5-20251001-v1:0` in your AWS account (Bedrock -> Model access).
+Requires the `aws` CLI and model access enabled for `us.anthropic.claude-haiku-4-5-20251001-v1:0` in Bedrock.
 
 ## Shader Uniforms
 
@@ -114,7 +122,7 @@ Requires the `aws` CLI to be installed and model access enabled for `us.anthropi
 | `iPaletteBg/Fg` | `vec3` | Theme background/foreground |
 | `iParticles[300]` | `vec4[]` | Effect data (particles, trails, buddy state) |
 | `iParticleCount` | `int` | Number of active entries |
-| `iSprite` | `sampler2D` | Sprite sheet texture |
+| `iSprite` | `sampler2D` | Sprite sheet texture / FBO feedback |
 
 ## Adding an Effect
 
