@@ -2,6 +2,8 @@ const std = @import("std");
 
 const log = std.log.scoped(.palette);
 
+const embedded_themes_json = @embedFile("../data/themes.json");
+
 pub const max_palette_colors = 16;
 
 pub const Color = struct {
@@ -46,27 +48,43 @@ const color_keys = [16][]const u8{
     "color_13", "color_14", "color_15", "color_16",
 };
 
+const ThemesData = struct {
+    data: []const u8,
+    owned: bool,
+};
+
+/// Returns the themes.json payload. Prefers a user override at
+/// `$XDG_CONFIG_HOME/hyprglaze/themes.json` (or `~/.config/hyprglaze/themes.json`);
+/// otherwise falls back to the embedded Gogh snapshot baked in at build time.
+fn readThemesData(allocator: std.mem.Allocator) !ThemesData {
+    var path_buf: [512]u8 = undefined;
+    const override_path = blk: {
+        if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
+            break :blk std.fmt.bufPrint(&path_buf, "{s}/hyprglaze/themes.json", .{config_home}) catch null;
+        }
+        if (std.posix.getenv("HOME")) |home| {
+            break :blk std.fmt.bufPrint(&path_buf, "{s}/.config/hyprglaze/themes.json", .{home}) catch null;
+        }
+        break :blk null;
+    };
+
+    if (override_path) |p| {
+        if (std.fs.openFileAbsolute(p, .{})) |file| {
+            defer file.close();
+            const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+            log.info("using theme override: {s}", .{p});
+            return .{ .data = data, .owned = true };
+        } else |_| {}
+    }
+
+    return .{ .data = embedded_themes_json, .owned = false };
+}
+
 pub fn loadTheme(allocator: std.mem.Allocator, theme_name: []const u8) !Palette {
-    const themes_path = getThemesPath(allocator) catch |err| {
-        log.err("failed to resolve themes path: {}", .{err});
-        return err;
-    };
-    defer allocator.free(themes_path);
+    const td = try readThemesData(allocator);
+    defer if (td.owned) allocator.free(td.data);
 
-    const file = std.fs.openFileAbsolute(themes_path, .{}) catch |err| {
-        log.err("failed to open {s}: {}", .{ themes_path, err });
-        log.err("download Gogh themes: bgen --fetch, or manually place themes.json", .{});
-        return err;
-    };
-    defer file.close();
-
-    const data = file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch |err| {
-        log.err("failed to read themes.json: {}", .{err});
-        return err;
-    };
-    defer allocator.free(data);
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |err| {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, td.data, .{}) catch |err| {
         log.err("failed to parse themes.json: {}", .{err});
         return err;
     };
@@ -85,21 +103,15 @@ pub fn loadTheme(allocator: std.mem.Allocator, theme_name: []const u8) !Palette 
         }
     }
 
-    log.err("theme '{s}' not found in themes.json", .{theme_name});
+    log.err("theme '{s}' not found", .{theme_name});
     return error.ThemeNotFound;
 }
 
 pub fn listThemes(allocator: std.mem.Allocator) !void {
-    const themes_path = try getThemesPath(allocator);
-    defer allocator.free(themes_path);
+    const td = try readThemesData(allocator);
+    defer if (td.owned) allocator.free(td.data);
 
-    const file = try std.fs.openFileAbsolute(themes_path, .{});
-    defer file.close();
-
-    const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
-    defer allocator.free(data);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, td.data, .{});
     defer parsed.deinit();
 
     var stdout_buf: [4096]u8 = undefined;
@@ -152,16 +164,6 @@ fn parseTheme(obj: std.json.ObjectMap, name: []const u8) Palette {
     }
 
     return palette;
-}
-
-fn getThemesPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
-        return std.fmt.allocPrint(allocator, "{s}/bgen/themes.json", .{config_home});
-    }
-    if (std.posix.getenv("HOME")) |home| {
-        return std.fmt.allocPrint(allocator, "{s}/.config/bgen/themes.json", .{home});
-    }
-    return error.NoHomeDir;
 }
 
 fn eqlInsensitive(a: []const u8, b: []const u8) bool {
