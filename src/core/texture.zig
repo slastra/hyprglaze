@@ -4,6 +4,8 @@ const c = @cImport({
     @cInclude("stb/stb_image.h");
 });
 
+const log = std.log.scoped(.texture);
+
 pub const Texture = struct {
     id: c.GLuint,
     width: i32,
@@ -35,7 +37,7 @@ pub const Texture = struct {
         c.stbi_set_flip_vertically_on_load(0); // handle flip in shader
         const data = c.stbi_load(&path_buf, &w, &h, &channels, 4); // force RGBA
         if (data == null) {
-            std.debug.print("Failed to load texture: {s}\n", .{path});
+            log.err("failed to load texture: {s}", .{path});
             return error.TextureLoadFailed;
         }
         defer c.stbi_image_free(data);
@@ -61,7 +63,7 @@ pub const Texture = struct {
             data,
         );
 
-        std.debug.print("Texture loaded: {s} ({d}x{d})\n", .{ path, w, h });
+        log.info("texture loaded: {s} ({d}x{d})", .{ path, w, h });
 
         return .{
             .id = tex_id,

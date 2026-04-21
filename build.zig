@@ -13,6 +13,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // --- flags dependency ---
+    const flags_dep = b.dependency("flags", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- main executable ---
     const exe = b.addExecutable(.{
         .name = "hyprglaze",
@@ -22,6 +28,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
+                .{ .name = "flags", .module = flags_dep.module("flags") },
             },
         }),
     });
@@ -78,6 +85,20 @@ pub fn build(b: *std.Build) void {
     const ipc_run_cmd = b.addRunArtifact(ipc_test);
     ipc_run_step.dependOn(&ipc_run_cmd.step);
     ipc_run_cmd.step.dependOn(b.getInstallStep());
+
+    // --- unit tests ---
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "toml", .module = toml_dep.module("toml") },
+            },
+        }),
+    });
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 const WaylandProtocols = struct {

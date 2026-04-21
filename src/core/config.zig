@@ -1,6 +1,8 @@
 const std = @import("std");
 const toml = @import("toml");
 
+const log = std.log.scoped(.config);
+
 /// Generic key-value params for effects to read from their config section.
 /// Avoids coupling effects to the Config struct.
 pub const EffectParams = struct {
@@ -77,7 +79,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
     defer allocator.free(expanded);
 
     const data = readFile(allocator, expanded) catch |err| {
-        std.debug.print("Failed to read config '{s}': {}\n", .{ expanded, err });
+        log.err("failed to read config '{s}': {}", .{ expanded, err });
         return err;
     };
     defer allocator.free(data);
@@ -93,8 +95,8 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8, source_path: []cons
     const result = parser.parseString(data) catch |err| {
         if (parser.error_info) |info| {
             switch (info) {
-                .parse => |pos| std.debug.print("TOML parse error at line {d} (pos {d})\n", .{ pos.line, pos.pos }),
-                .struct_mapping => std.debug.print("TOML struct mapping error\n", .{}),
+                .parse => |pos| log.warn("TOML parse error at line {d} (pos {d})", .{ pos.line, pos.pos }),
+                .struct_mapping => log.warn("TOML struct mapping error", .{}),
             }
         }
         return err;
@@ -183,4 +185,70 @@ fn fileExists(path: []const u8) bool {
     const file = std.fs.openFileAbsolute(path, .{}) catch return false;
     file.close();
     return true;
+}
+
+test "parse minimal config" {
+    const src =
+        \\effect = "particles"
+        \\shader = "shaders/particles.frag"
+        \\theme = "rose-pine"
+        \\
+    ;
+    var cfg = try parse(std.testing.allocator, src, "/tmp/test.toml");
+    defer deinit(&cfg, std.testing.allocator);
+
+    try std.testing.expectEqualStrings("particles", cfg.effect);
+    try std.testing.expectEqualStrings("shaders/particles.frag", cfg.shader);
+    try std.testing.expect(cfg.theme != null);
+    try std.testing.expectEqualStrings("rose-pine", cfg.theme.?);
+    try std.testing.expectEqualStrings("/tmp/test.toml", cfg.config_path);
+}
+
+test "parse config with no theme uses null" {
+    const src = "effect = \"windowglow\"\n";
+    var cfg = try parse(std.testing.allocator, src, "/tmp/x.toml");
+    defer deinit(&cfg, std.testing.allocator);
+
+    try std.testing.expectEqualStrings("windowglow", cfg.effect);
+    try std.testing.expect(cfg.theme == null);
+    try std.testing.expectEqualStrings("", cfg.shader);
+}
+
+test "parse config defaults when fields missing" {
+    const src = "";
+    var cfg = try parse(std.testing.allocator, src, "/tmp/empty.toml");
+    defer deinit(&cfg, std.testing.allocator);
+
+    try std.testing.expectEqualStrings("particles", cfg.effect);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), cfg.transition_duration, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.15), cfg.cursor_smoothing, 0.001);
+}
+
+test "parse invalid toml returns error" {
+    const src = "this is = = not valid\n";
+    const result = parse(std.testing.allocator, src, "/tmp/bad.toml");
+    try std.testing.expectError(error.UnexpectedToken, result);
+}
+
+test "effectParams reads section values" {
+    const src =
+        \\effect = "particles"
+        \\[particles]
+        \\count = 100
+        \\speed = 0.5
+        \\
+    ;
+    var cfg = try parse(std.testing.allocator, src, "/tmp/e.toml");
+    defer deinit(&cfg, std.testing.allocator);
+
+    const params = effectParams(&cfg, "particles");
+    try std.testing.expectEqual(@as(i64, 100), params.getInt("count", 0));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), params.getFloat("speed", 0.0), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.23), params.getFloat("missing", 1.23), 0.001);
+}
+
+test "expandHome leaves absolute paths alone" {
+    const out = try expandHome(std.testing.allocator, "/etc/foo");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("/etc/foo", out);
 }

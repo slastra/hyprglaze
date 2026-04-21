@@ -36,4 +36,7 @@ package() {
     # Sprites
     install -dm755 "$pkgdir/usr/share/hyprglaze/sprites"
     install -Dm644 sprites/*.png "$pkgdir/usr/share/hyprglaze/sprites/"
+
+    # Systemd user unit
+    install -Dm644 contrib/hyprglaze.service "$pkgdir/usr/lib/systemd/user/hyprglaze.service"
 }

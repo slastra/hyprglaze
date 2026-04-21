@@ -1,4 +1,7 @@
 const std = @import("std");
+
+const log = std.log.scoped(.effects);
+
 const shader_mod = @import("core/shader.zig");
 const transition_mod = @import("core/transition.zig");
 const config_mod = @import("core/config.zig");
@@ -62,7 +65,7 @@ pub const Effect = union(enum) {
             return .{ .windowglow = windowglow.Context.init() };
         } else if (std.mem.eql(u8, name, "glitch")) {
             const params = config_mod.effectParams(cfg, "glitch");
-            return .{ .glitch = glitch.Context.init(allocator, params) };
+            return .{ .glitch = try glitch.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "buddy")) {
             const params = config_mod.effectParams(cfg, "buddy");
             return .{ .buddy = buddy.Context.init(allocator, width, height, params) };
@@ -79,15 +82,15 @@ pub const Effect = union(enum) {
             return .{ .aurora = aurora.Context.init() };
         } else if (std.mem.eql(u8, name, "starfield")) {
             const params = config_mod.effectParams(cfg, "visualizer");
-            return .{ .starfield = starfield.Context.init(allocator, params) };
+            return .{ .starfield = try starfield.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "visualizer")) {
             const params = config_mod.effectParams(cfg, "visualizer");
-            return .{ .visualizer = visualizer.Context.init(allocator, params) };
+            return .{ .visualizer = try visualizer.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "milkdrop")) {
             const params = config_mod.effectParams(cfg, "visualizer");
-            return .{ .milkdrop = milkdrop.Context.init(allocator, width, height, params) };
+            return .{ .milkdrop = try milkdrop.Context.init(allocator, width, height, params) };
         }
-        std.debug.print("Unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, starfield, visualizer, milkdrop, glitch, buddy, ai-buddy\n", .{name});
+        log.err("unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, starfield, visualizer, milkdrop, glitch, buddy, ai-buddy", .{name});
         return error.UnknownEffect;
     }
 

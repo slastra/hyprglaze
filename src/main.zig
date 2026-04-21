@@ -1,4 +1,5 @@
 const std = @import("std");
+const flags = @import("flags");
 const wayland = @import("core/wayland.zig");
 const egl_mod = @import("core/egl.zig");
 const shader_mod = @import("core/shader.zig");
@@ -14,12 +15,22 @@ const c = @cImport({
     @cInclude("wayland-client.h");
 });
 
+pub const std_options: std.Options = .{ .log_level = .info };
+const log = std.log.scoped(.hyprglaze);
+
+var should_exit = std.atomic.Value(bool).init(false);
+
+fn onSignal(_: c_int) callconv(.c) void {
+    should_exit.store(true, .release);
+}
+
 const CliArgs = struct {
     shader_path: ?[]const u8 = null,
     theme_name: ?[]const u8 = null,
     config_path: ?[]const u8 = null,
     effect_name: ?[]const u8 = null,
     list_themes: bool = false,
+    fps: bool = false,
 };
 
 pub fn main() !void {
@@ -27,10 +38,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const cli = parseCli(allocator) catch |err| {
-        printUsage();
-        return err;
+    const sig_act = std.posix.Sigaction{
+        .handler = .{ .handler = onSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
     };
+    std.posix.sigaction(std.posix.SIG.INT, &sig_act, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &sig_act, null);
+
+    const cli = try parseCli(allocator);
     defer {
         if (cli.shader_path) |p| allocator.free(p);
         if (cli.theme_name) |t| allocator.free(t);
@@ -44,30 +60,27 @@ pub fn main() !void {
     }
 
     // Load config
-    var cfg = loadConfig(allocator, &cli) catch |err| {
-        printUsage();
-        return err;
-    };
+    var cfg = try loadConfig(allocator, &cli);
     defer config_mod.deinit(&cfg, allocator);
 
     // Init effect
     var effect = effects.Effect.init(cfg.effect, allocator, 0, 0, &cfg) catch |err| {
-        std.debug.print("Effect init failed: {}\n", .{err});
+        log.err("effect init failed: {}", .{err});
         return err;
     };
     defer effect.deinit();
 
     // Resolve shader: explicit config > effect default
     const shader_path = if (cfg.shader.len > 0) cfg.shader else effect.defaultShader();
-    std.debug.print("Effect: {s}\n", .{cfg.effect});
-    std.debug.print("Shader: {s}\n", .{shader_path});
-    if (cfg.theme) |t| std.debug.print("Theme: {s}\n", .{t});
+    log.info("effect: {s}", .{cfg.effect});
+    log.info("shader: {s}", .{shader_path});
+    if (cfg.theme) |t| log.info("theme: {s}", .{t});
 
     var shader_path_expanded = try config_mod.expandHome(allocator, shader_path);
     defer allocator.free(shader_path_expanded);
 
     const frag_source = loadShaderFile(allocator, shader_path_expanded) catch |err| {
-        std.debug.print("Failed to load shader '{s}': {}\n", .{ shader_path_expanded, err });
+        log.err("failed to load shader '{s}': {}", .{ shader_path_expanded, err });
         return err;
     };
     defer allocator.free(frag_source);
@@ -76,53 +89,53 @@ pub fn main() !void {
     var pal: ?palette_mod.Palette = null;
     if (cfg.theme) |theme_name| {
         pal = palette_mod.loadTheme(allocator, theme_name) catch |err| {
-            std.debug.print("Failed to load theme '{s}': {}\n", .{ theme_name, err });
+            log.err("failed to load theme '{s}': {}", .{ theme_name, err });
             return err;
         };
-        std.debug.print("Palette: {s} ({d} colors)\n", .{ pal.?.themeName(), pal.?.color_count });
+        log.info("palette: {s} ({d} colors)", .{ pal.?.themeName(), pal.?.color_count });
     }
 
     // Hyprland IPC
     const ipc = hypr.HyprIpc.init() catch |err| {
-        std.debug.print("Hyprland IPC init failed: {}\n", .{err});
+        log.err("Hyprland IPC init failed: {}", .{err});
         return err;
     };
 
     const mon = ipc.primaryMonitor(allocator) catch |err| {
-        std.debug.print("Failed to query monitor: {}\n", .{err});
+        log.err("failed to query monitor: {}", .{err});
         return err;
     };
-    std.debug.print("Monitor: {d}x{d} scale={d:.2}\n", .{ mon.width, mon.height, mon.scale });
+    log.info("monitor: {d}x{d} scale={d:.2}", .{ mon.width, mon.height, mon.scale });
 
     // Wayland
     var wl = wayland.WaylandState.init() catch |err| {
-        std.debug.print("Wayland init failed: {}\n", .{err});
+        log.err("Wayland init failed: {}", .{err});
         return err;
     };
     defer wl.deinit();
 
     wl.createLayerSurface() catch |err| {
-        std.debug.print("Layer surface creation failed: {}\n", .{err});
+        log.err("layer surface creation failed: {}", .{err});
         return err;
     };
 
     if (!wl.configured) return error.NotConfigured;
-    std.debug.print("Surface configured: {d}x{d}\n", .{ wl.width, wl.height });
+    log.info("surface configured: {d}x{d}", .{ wl.width, wl.height });
 
     wl.createEglWindow() catch |err| {
-        std.debug.print("EGL window creation failed: {}\n", .{err});
+        log.err("EGL window creation failed: {}", .{err});
         return err;
     };
 
     var egl_state = egl_mod.EglState.init(wl.display, wl.egl_window.?) catch |err| {
-        std.debug.print("EGL init failed: {}\n", .{err});
+        log.err("EGL init failed: {}", .{err});
         return err;
     };
     defer egl_state.deinit();
 
     // Shader
     var shader_prog = shader_mod.ShaderProgram.init(frag_source) catch |err| {
-        std.debug.print("Shader compilation failed: {}\n", .{err});
+        log.err("shader compilation failed: {}", .{err});
         return err;
     };
     defer shader_prog.deinit();
@@ -130,12 +143,12 @@ pub fn main() !void {
     if (pal) |*p| shader_prog.setPalette(p);
 
     // Re-init effect with actual dimensions
-    const surf_w: f32 = @floatFromInt(wl.width);
-    const surf_h: f32 = @floatFromInt(wl.height);
+    var surf_w: f32 = @floatFromInt(wl.width);
+    var surf_h: f32 = @floatFromInt(wl.height);
     effect.deinit();
     effect = try effects.Effect.init(cfg.effect, allocator, surf_w, surf_h, &cfg);
 
-    std.debug.print("Entering render loop.\n", .{});
+    log.info("entering render loop", .{});
 
     // Transition
     var trans = transition.TransitionState.init();
@@ -150,7 +163,7 @@ pub fn main() !void {
             config_watcher = watcher_mod.FileWatcher.init(allocator, acp) catch null;
             allocator.free(acp);
             if (config_watcher != null)
-                std.debug.print("Watching config: {s}\n", .{cfg.config_path});
+                log.info("watching config: {s}", .{cfg.config_path});
         }
     }
     defer if (config_watcher) |*w| w.deinit();
@@ -193,17 +206,53 @@ pub fn main() !void {
     effect.upload(&shader_prog);
     try wl.requestFrame();
     drawFrame(&shader_prog, &egl_state, surf_w, surf_h, 0.0, &trans, &cached_windows, cached_window_count);
-    egl_state.swapBuffers();
+    egl_state.swapBuffers() catch |err| log.warn("initial swapBuffers error: {}", .{err});
 
     // Main loop
-    while (!wl.should_close) {
-        try wl.dispatch();
+    while (!wl.should_close and !should_exit.load(.acquire)) {
+        wl.dispatch() catch |err| {
+            if (should_exit.load(.acquire)) break;
+            log.warn("Wayland dispatch error: {} — reconnecting in 1s", .{err});
+            std.Thread.sleep(1 * std.time.ns_per_s);
+            wl.reconnect() catch |e2| {
+                log.err("Wayland reconnect failed: {} — exiting", .{e2});
+                return e2;
+            };
+            egl_state.deinit();
+            shader_prog.deinit();
+            egl_state = egl_mod.EglState.init(wl.display, wl.egl_window.?) catch |e2| {
+                log.err("EGL reinit failed: {} — exiting", .{e2});
+                return e2;
+            };
+            const new_frag = loadShaderFile(allocator, shader_path_expanded) catch |e2| {
+                log.err("shader reload failed: {} — exiting", .{e2});
+                return e2;
+            };
+            defer allocator.free(new_frag);
+            shader_prog = shader_mod.ShaderProgram.init(new_frag) catch |e2| {
+                log.err("shader recompile failed: {} — exiting", .{e2});
+                return e2;
+            };
+            if (pal) |*p| shader_prog.setPalette(p);
+            effect.upload(&shader_prog);
+            surf_w = @floatFromInt(wl.width);
+            surf_h = @floatFromInt(wl.height);
+            wl.resize_pending = false;
+            try wl.requestFrame();
+            continue;
+        };
+
+        if (wl.resize_pending) {
+            surf_w = @floatFromInt(wl.width);
+            surf_h = @floatFromInt(wl.height);
+            wl.resize_pending = false;
+        }
 
         if (config_watcher) |*cw| {
             if (cw.poll()) {
-                std.debug.print("Config changed, reloading...\n", .{});
+                log.info("config changed, reloading", .{});
                 reloadConfig(allocator, &cfg, &effect, &shader_prog, &pal, &trans, &shader_path_expanded, surf_w, surf_h) catch |err| {
-                    std.debug.print("Reload failed: {}\n", .{err});
+                    log.warn("reload failed: {}", .{err});
                 };
             }
         }
@@ -314,14 +363,30 @@ pub fn main() !void {
 
             drawFrame(&shader_prog, &egl_state, surf_w, surf_h, time, &trans, &cached_windows, cached_window_count);
             try wl.requestFrame();
-            egl_state.swapBuffers();
+            egl_state.swapBuffers() catch |err| {
+                if (err == error.EglContextLost) {
+                    log.warn("EGL context lost — reinitialising graphics", .{});
+                    egl_state.deinit();
+                    shader_prog.deinit();
+                    egl_state = try egl_mod.EglState.init(wl.display, wl.egl_window.?);
+                    const new_frag = try loadShaderFile(allocator, shader_path_expanded);
+                    defer allocator.free(new_frag);
+                    shader_prog = try shader_mod.ShaderProgram.init(new_frag);
+                    if (pal) |*p| shader_prog.setPalette(p);
+                    effect.upload(&shader_prog);
+                } else {
+                    log.warn("eglSwapBuffers error: {}", .{err});
+                }
+            };
 
             // FPS tracking
-            frame_count += 1;
-            if (fps_timer.read() >= std.time.ns_per_s) {
-                std.debug.print("FPS: {d}\n", .{frame_count});
-                frame_count = 0;
-                fps_timer.reset();
+            if (cli.fps) {
+                frame_count += 1;
+                if (fps_timer.read() >= std.time.ns_per_s) {
+                    log.info("FPS: {d}", .{frame_count});
+                    frame_count = 0;
+                    fps_timer.reset();
+                }
             }
         }
     }
@@ -504,22 +569,30 @@ fn reloadConfig(
                 config_mod.deinit(&new_cfg, allocator);
                 return err;
             };
-            std.debug.print("Theme reloaded: {s}\n", .{theme_name});
+            log.info("theme reloaded: {s}", .{theme_name});
         } else {
             pal.* = null;
         }
     }
 
-    // Effect change
-    if (!std.mem.eql(u8, cfg.effect, new_cfg.effect)) {
-        effect.deinit();
-        effect.* = effects.Effect.init(new_cfg.effect, allocator, surf_w, surf_h, &new_cfg) catch |err| {
-            std.debug.print("Effect '{s}' failed: {}, falling back to windowglow\n", .{ new_cfg.effect, err });
-            effect.* = effects.Effect.init("windowglow", allocator, 0, 0, &new_cfg) catch unreachable;
+    // Reinit effect every reload so per-effect params ([particles], [buddy], etc.)
+    // pick up config changes even when the effect name itself is unchanged.
+    const effect_name_changed = !std.mem.eql(u8, cfg.effect, new_cfg.effect);
+    effect.deinit();
+    effect.* = effects.Effect.init(new_cfg.effect, allocator, surf_w, surf_h, &new_cfg) catch |err| {
+        log.warn("effect '{s}' failed: {}, falling back to windowglow", .{ new_cfg.effect, err });
+        effect.* = effects.Effect.init("windowglow", allocator, 0, 0, &new_cfg) catch |fb_err| {
+            log.err("fallback effect init failed: {}", .{fb_err});
             config_mod.deinit(&new_cfg, allocator);
-            return err;
+            return fb_err;
         };
-        std.debug.print("Effect switched: {s}\n", .{new_cfg.effect});
+        config_mod.deinit(&new_cfg, allocator);
+        return err;
+    };
+    if (effect_name_changed) {
+        log.info("effect switched: {s}", .{new_cfg.effect});
+    } else {
+        log.info("effect reloaded: {s}", .{new_cfg.effect});
     }
 
     // Shader — resolve from explicit config or effect default
@@ -546,7 +619,7 @@ fn reloadConfig(
         if (pal.*) |*p| new_prog.setPalette(p);
         shader_prog.deinit();
         shader_prog.* = new_prog;
-        std.debug.print("Shader reloaded: {s}\n", .{new_shader_path});
+        log.info("shader reloaded: {s}", .{new_shader_path});
 
         allocator.free(current_shader_path.*);
         current_shader_path.* = new_shader_path;
@@ -565,41 +638,40 @@ fn strEql(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
+const CliFlags = struct {
+    pub const description = "Wayland shader wallpaper daemon for Hyprland with window-aware effects.";
+
+    pub const descriptions = .{
+        .config = "TOML config path (default: ~/.config/hypr/hyprglaze.toml)",
+        .effect = "Effect: particles, windowglow, glitch, starfield, visualizer, milkdrop, etc.",
+        .shader = "Fragment shader path (overrides effect default)",
+        .theme = "Gogh color scheme name",
+        .list_themes = "List available themes and exit",
+        .fps = "Log frames-per-second every second",
+    };
+
+    config: ?[]const u8 = null,
+    effect: ?[]const u8 = null,
+    shader: ?[]const u8 = null,
+    theme: ?[]const u8 = null,
+    list_themes: bool = false,
+    fps: bool = false,
+};
+
 fn parseCli(allocator: std.mem.Allocator) !CliArgs {
-    var args_iter = try std.process.argsWithAllocator(allocator);
-    defer args_iter.deinit();
-    _ = args_iter.next();
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
 
-    var result = CliArgs{};
-    while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--shader")) {
-            result.shader_path = try allocator.dupe(u8, args_iter.next() orelse return error.MissingArg);
-        } else if (std.mem.eql(u8, arg, "--theme")) {
-            result.theme_name = try allocator.dupe(u8, args_iter.next() orelse return error.MissingArg);
-        } else if (std.mem.eql(u8, arg, "--config")) {
-            result.config_path = try allocator.dupe(u8, args_iter.next() orelse return error.MissingArg);
-        } else if (std.mem.eql(u8, arg, "--effect")) {
-            result.effect_name = try allocator.dupe(u8, args_iter.next() orelse return error.MissingArg);
-        } else if (std.mem.eql(u8, arg, "--list-themes")) {
-            result.list_themes = true;
-        }
-    }
-    return result;
-}
+    const parsed = flags.parse(argv, "hyprglaze", CliFlags, .{});
 
-fn printUsage() void {
-    std.debug.print(
-        \\Usage: hyprglaze [options]
-        \\       hyprglaze --list-themes
-        \\
-        \\Options:
-        \\  --config <path>     TOML config (default: ~/.config/hypr/hyprglaze.toml)
-        \\  --effect <name>     Effect: particles, windowglow, glitch, starfield, etc.
-        \\  --shader <path>     Fragment shader (overrides effect default)
-        \\  --theme <name>      Gogh color scheme
-        \\  --list-themes       List available themes
-        \\
-    , .{});
+    return .{
+        .config_path = if (parsed.config) |v| try allocator.dupe(u8, v) else null,
+        .effect_name = if (parsed.effect) |v| try allocator.dupe(u8, v) else null,
+        .shader_path = if (parsed.shader) |v| try allocator.dupe(u8, v) else null,
+        .theme_name = if (parsed.theme) |v| try allocator.dupe(u8, v) else null,
+        .list_themes = parsed.list_themes,
+        .fps = parsed.fps,
+    };
 }
 
 const system_data_dir = "/usr/share/hyprglaze";

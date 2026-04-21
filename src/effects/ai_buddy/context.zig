@@ -8,6 +8,8 @@ const sprite = @import("../buddy/sprite.zig");
 const ai_mod = @import("ai.zig");
 const events_mod = @import("events.zig");
 
+const log = std.log.scoped(.ai_buddy);
+
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
     @cInclude("time.h");
@@ -442,7 +444,7 @@ pub const Context = struct {
 
         std.fs.deleteFileAbsolute("/tmp/hyprglaze-ai-done") catch {};
 
-        std.debug.print("AI > standing={s} focused={s} visited={d} mood={s} time={s}({d}:00)\n", .{
+        log.debug("AI > standing={s} focused={s} visited={d} mood={s} time={s}({d}:00)", .{
             if (self.current_window_len > 0) self.current_window[0..self.current_window_len] else "ground",
             if (self.cached_focused_class_len > 0) self.cached_focused_class[0..self.cached_focused_class_len] else "none",
             self.windows_visited,
@@ -453,7 +455,7 @@ pub const Context = struct {
 
         var child = std.process.Child.init(&argv, self.allocator);
         child.spawn() catch |err| {
-            std.debug.print("AI spawn failed: {}\n", .{err});
+            log.warn("AI spawn failed: {}", .{err});
             return;
         };
         self.ai_pending = true;
@@ -544,7 +546,7 @@ pub const Context = struct {
                 @memcpy(log_buf[lp..lp + name.len], name);
                 lp += name.len;
             }
-            std.debug.print("AI < actions={s} mood={s} say=\"{s}\" emote={s}\n", .{
+            log.debug("AI < actions={s} mood={s} say=\"{s}\" emote={s}", .{
                 log_buf[0..lp],
                 moodName(self.mood),
                 if (self.bubble_len > 0) self.bubble_text[0..self.bubble_len] else "",
@@ -710,7 +712,7 @@ pub const Context = struct {
         if (self.ai_pending) {
             self.ai_pending_timer += dt;
             if (self.ai_pending_timer > 10.0) {
-                std.debug.print("AI ! timeout after {d:.1}s, falling back to wander\n", .{self.ai_pending_timer});
+                log.warn("AI ! timeout after {d:.1}s, falling back to wander", .{self.ai_pending_timer});
                 self.ai_pending = false;
                 self.ai_pending_timer = 0;
                 self.setBehavior(.wander, 3.0);
@@ -733,7 +735,7 @@ pub const Context = struct {
                 self.vx += (state.cursor[0] - self.x) * 3.0;
                 self.setBehavior(.trip, 0.8);
                 self.event_log.log("got knocked by cursor", .{});
-                std.debug.print("AI ~ knocked by cursor! mood->anxious\n", .{});
+                log.debug("AI ~ knocked by cursor! mood->anxious", .{});
                 self.mood = .anxious;
                 self.mood_intensity = 0.9;
                 self.mood_timer = 0;
@@ -742,7 +744,7 @@ pub const Context = struct {
                 self.setBehavior(.flee, 1.5);
                 self.wander_dir = if (state.cursor[0] > self.x) -1.0 else 1.0;
                 self.event_log.log("fleeing from cursor", .{});
-                std.debug.print("AI ~ fleeing from cursor!\n", .{});
+                log.debug("AI ~ fleeing from cursor!", .{});
                 self.flee_cooldown = 2.0;
                 self.mood = .anxious;
                 self.mood_intensity = 0.7;
@@ -819,7 +821,7 @@ pub const Context = struct {
                 self.failed_jumps = 0;
                 self.setBehavior(.idle, 0.5);
                 self.event_log.log("climbed up", .{});
-                std.debug.print("AI ~ reached top\n", .{});
+                log.debug("AI ~ reached top", .{});
             }
         } else {
         self.vy -= gravity * dt;
@@ -863,7 +865,7 @@ pub const Context = struct {
                             self.climb_wall_x = wall_x;
                             self.climb_target_y = fw.y + fw.h;
                             self.setBehavior(.climb, 15.0);
-                            std.debug.print("AI ~ climbing wall\n", .{});
+                            log.debug("AI ~ climbing wall", .{});
                         } else {
                             // Run toward the wall
                             self.facing_right = wall_x > self.x;
@@ -880,7 +882,7 @@ pub const Context = struct {
                         // Target is below — drop through current platform
                         self.dropping = true;
                         self.drop_platform_y = self.y;
-                        std.debug.print("AI ~ dropping through platform\n", .{});
+                        log.debug("AI ~ dropping through platform", .{});
                         self.grounded = false;
                         self.vy = -50.0; // small downward kick
                         // Drift toward target horizontally while falling

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.palette);
+
 pub const max_palette_colors = 16;
 
 pub const Color = struct {
@@ -46,26 +48,26 @@ const color_keys = [16][]const u8{
 
 pub fn loadTheme(allocator: std.mem.Allocator, theme_name: []const u8) !Palette {
     const themes_path = getThemesPath(allocator) catch |err| {
-        std.debug.print("Failed to resolve themes path: {}\n", .{err});
+        log.err("failed to resolve themes path: {}", .{err});
         return err;
     };
     defer allocator.free(themes_path);
 
     const file = std.fs.openFileAbsolute(themes_path, .{}) catch |err| {
-        std.debug.print("Failed to open {s}: {}\n", .{ themes_path, err });
-        std.debug.print("Download Gogh themes: bgen --fetch, or manually place themes.json\n", .{});
+        log.err("failed to open {s}: {}", .{ themes_path, err });
+        log.err("download Gogh themes: bgen --fetch, or manually place themes.json", .{});
         return err;
     };
     defer file.close();
 
     const data = file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch |err| {
-        std.debug.print("Failed to read themes.json: {}\n", .{err});
+        log.err("failed to read themes.json: {}", .{err});
         return err;
     };
     defer allocator.free(data);
 
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |err| {
-        std.debug.print("Failed to parse themes.json: {}\n", .{err});
+        log.err("failed to parse themes.json: {}", .{err});
         return err;
     };
     defer parsed.deinit();
@@ -83,7 +85,7 @@ pub fn loadTheme(allocator: std.mem.Allocator, theme_name: []const u8) !Palette 
         }
     }
 
-    std.debug.print("Theme '{s}' not found in themes.json\n", .{theme_name});
+    log.err("theme '{s}' not found in themes.json", .{theme_name});
     return error.ThemeNotFound;
 }
 
@@ -172,4 +174,48 @@ fn eqlInsensitive(a: []const u8, b: []const u8) bool {
 
 fn toLower(ch: u8) u8 {
     return if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
+}
+
+test "Color.fromHex parses RRGGBB with and without #" {
+    const c1 = try Color.fromHex("#ff8040");
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), c1.r, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), c1.g, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 64.0 / 255.0), c1.b, 0.01);
+
+    const c2 = try Color.fromHex("000000");
+    try std.testing.expectEqual(@as(f32, 0.0), c2.r);
+}
+
+test "Color.fromHex rejects invalid input" {
+    try std.testing.expectError(error.InvalidHexColor, Color.fromHex("#xyz"));
+    try std.testing.expectError(error.InvalidHexColor, Color.fromHex("#abcd"));
+    try std.testing.expectError(error.InvalidHexColor, Color.fromHex(""));
+}
+
+test "parseTheme extracts colors and bg/fg from JSON object" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "name": "test-theme",
+        \\  "background": "#101010",
+        \\  "foreground": "#e0e0e0",
+        \\  "color_01": "#ff0000",
+        \\  "color_02": "#00ff00",
+        \\  "color_03": "#0000ff"
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const pal = parseTheme(parsed.value.object, "test-theme");
+    try std.testing.expectEqual(@as(u8, 3), pal.color_count);
+    try std.testing.expectEqualStrings("test-theme", pal.themeName());
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), pal.colors[0].r, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 16.0 / 255.0), pal.background.r, 0.01);
+}
+
+test "eqlInsensitive matches case-insensitively" {
+    try std.testing.expect(eqlInsensitive("Rose-Pine", "rose-pine"));
+    try std.testing.expect(eqlInsensitive("DRACULA", "dracula"));
+    try std.testing.expect(!eqlInsensitive("rose", "roses"));
 }

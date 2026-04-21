@@ -67,8 +67,13 @@ pub const EglState = struct {
         };
     }
 
-    pub fn swapBuffers(self: *const EglState) void {
-        _ = c.eglSwapBuffers(self.display, self.surface);
+    pub fn swapBuffers(self: *const EglState) !void {
+        if (c.eglSwapBuffers(self.display, self.surface) == c.EGL_TRUE) return;
+        const err = c.eglGetError();
+        return switch (err) {
+            0x300E => error.EglContextLost, // EGL_CONTEXT_LOST
+            else => error.EglSwapFailed,
+        };
     }
 
     pub fn deinit(self: *EglState) void {

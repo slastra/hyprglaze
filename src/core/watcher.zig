@@ -5,17 +5,21 @@ const linux = std.os.linux;
 pub const FileWatcher = struct {
     inotify_fd: i32,
     watch_fd: i32,
-    dir_path: []const u8,
+    dir_path: [:0]const u8,
     filename: []const u8,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !FileWatcher {
-        const inotify_fd = try posix.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
-
-        // Split into directory and filename
         const sep = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.InvalidPath;
+
+        const inotify_fd = try posix.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        errdefer posix.close(inotify_fd);
+
         const dir_path = try allocator.dupeZ(u8, path[0..sep]);
+        errdefer allocator.free(dir_path);
+
         const filename = try allocator.dupe(u8, path[sep + 1 ..]);
+        errdefer allocator.free(filename);
 
         // Watch the directory — survives editor atomic renames
         const watch_fd = try posix.inotify_add_watch(
@@ -74,3 +78,28 @@ pub const FileWatcher = struct {
         self.allocator.free(self.filename);
     }
 };
+
+test "FileWatcher init/deinit frees all allocations" {
+    var w = try FileWatcher.init(std.testing.allocator, "/tmp/hyprglaze-test.toml");
+    defer w.deinit();
+}
+
+test "FileWatcher init rejects path without separator" {
+    try std.testing.expectError(error.InvalidPath, FileWatcher.init(std.testing.allocator, "nosep.toml"));
+}
+
+test "FileWatcher init splits directory and filename" {
+    var w = try FileWatcher.init(std.testing.allocator, "/tmp/foo.conf");
+    defer w.deinit();
+    try std.testing.expectEqualStrings("/tmp", w.dir_path);
+    try std.testing.expectEqualStrings("foo.conf", w.filename);
+}
+
+test "FileWatcher init cleans up on missing directory (no leak)" {
+    // /this/does/not/exist fails in inotify_add_watch after allocations —
+    // errdefer must free them.
+    try std.testing.expectError(
+        error.FileNotFound,
+        FileWatcher.init(std.testing.allocator, "/this/does/not/exist/cfg.toml"),
+    );
+}

@@ -4,6 +4,8 @@ const config_mod = @import("../../core/config.zig");
 const effects = @import("../../effects.zig");
 const audio_mod = @import("../visualizer/audio.zig");
 
+const log = std.log.scoped(.milkdrop);
+
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
 });
@@ -201,9 +203,9 @@ pub const Context = struct {
     palette_bg: [3]f32 = .{ 0.02, 0.02, 0.02 },
     palette_fg: [3]f32 = .{ 0.9, 0.9, 0.9 },
 
-    pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) Context {
+    pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
-        const audio = allocator.create(audio_mod.AudioCapture) catch @panic("alloc failed");
+        const audio = try allocator.create(audio_mod.AudioCapture);
         audio.* = audio_mod.AudioCapture.init(sink);
         audio.start();
 
@@ -229,7 +231,7 @@ pub const Context = struct {
         const warp_prog = compileProgram(vert_src, warp_frag_src);
         const reactive_prog = compileProgram(vert_src, reactive_frag_src);
         if (warp_prog == 0 or reactive_prog == 0)
-            std.debug.print("Milkdrop: internal shader compile failed\n", .{});
+            log.err("internal shader compile failed", .{});
 
         return .{
             .audio = audio,
@@ -392,7 +394,7 @@ fn compileShader(src: [*:0]const u8, shader_type: c.GLenum) c.GLuint {
         var buf: [2048]u8 = undefined;
         var len: c.GLsizei = 0;
         c.glGetShaderInfoLog(shader, 2048, &len, &buf);
-        std.debug.print("Milkdrop shader error:\n{s}\n", .{buf[0..@intCast(len)]});
+        log.err("shader error:\n{s}", .{buf[0..@intCast(len)]});
         c.glDeleteShader(shader);
         return 0;
     }
@@ -416,7 +418,7 @@ fn compileProgram(vert: [*:0]const u8, frag: [*:0]const u8) c.GLuint {
         var buf: [2048]u8 = undefined;
         var len: c.GLsizei = 0;
         c.glGetProgramInfoLog(prog, 2048, &len, &buf);
-        std.debug.print("Milkdrop link error:\n{s}\n", .{buf[0..@intCast(len)]});
+        log.err("link error:\n{s}", .{buf[0..@intCast(len)]});
         c.glDeleteProgram(prog);
         return 0;
     }

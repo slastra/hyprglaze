@@ -6,6 +6,10 @@
             .url = "git+https://github.com/sam701/zig-toml#a73c9423d88ed413204b39638fab7e9bccdb83fd",
             .hash = "toml-0.3.0-bV14Be6EAQDr0fkyURz4jYFyTAMPcwlNN0FEPVjDnXTR",
         },
+        .flags = .{
+            .url = "git+https://github.com/n0s4/flags#2d62be30ff33661a2a3c6743ac922a78302d78a0",
+            .hash = "flags-0.10.0-a_9h3pxvAAA6wPndlO7ktfrpZUmhQu1y8aDm0lTi5ATR",
+        },
     },
     .fingerprint = 0xe3d08712c8aa10dc,
     .minimum_zig_version = "0.14.0",

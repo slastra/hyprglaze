@@ -28,9 +28,9 @@ pub const Context = struct {
     wobble: f32 = 0,         // velocity offset from beat
     flight_time: f32 = 0,    // accumulated time scaled by velocity (only increases)
 
-    pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) Context {
+    pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
-        const audio = allocator.create(audio_mod.AudioCapture) catch @panic("alloc failed");
+        const audio = try allocator.create(audio_mod.AudioCapture);
         audio.* = audio_mod.AudioCapture.init(sink);
         audio.start();
         return .{ .audio = audio, .allocator = allocator };

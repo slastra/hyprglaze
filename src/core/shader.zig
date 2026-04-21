@@ -2,6 +2,8 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
 });
+
+const shader_log = std.log.scoped(.shader);
 const palette_mod = @import("palette.zig");
 const hypr = @import("hypr.zig");
 const particles_mod = @import("../effects/particles/system.zig");
@@ -197,8 +199,8 @@ fn checkShaderCompile(shader: c.GLuint, label: []const u8) !void {
         var log_buf: [2048]u8 = undefined;
         var log_len: c.GLsizei = 0;
         c.glGetShaderInfoLog(shader, 2048, &log_len, &log_buf);
-        const log: []const u8 = log_buf[0..@intCast(log_len)];
-        std.debug.print("{s} shader compile error:\n{s}\n", .{ label, log });
+        const msg: []const u8 = log_buf[0..@intCast(log_len)];
+        shader_log.err("{s} shader compile error:\n{s}", .{ label, msg });
         return error.ShaderCompileFailed;
     }
 }
@@ -210,8 +212,8 @@ fn checkProgramLink(program: c.GLuint) !void {
         var log_buf: [2048]u8 = undefined;
         var log_len: c.GLsizei = 0;
         c.glGetProgramInfoLog(program, 2048, &log_len, &log_buf);
-        const log: []const u8 = log_buf[0..@intCast(log_len)];
-        std.debug.print("program link error:\n{s}\n", .{log});
+        const msg: []const u8 = log_buf[0..@intCast(log_len)];
+        shader_log.err("program link error:\n{s}", .{msg});
         return error.ProgramLinkFailed;
     }
 }

@@ -5,6 +5,8 @@ const c = @cImport({
     @cInclude("pulse/error.h");
 });
 
+const log = std.log.scoped(.audio);
+
 pub const samples_per_channel = 128;
 
 const sample_rate = 44100;
@@ -37,7 +39,7 @@ pub const AudioCapture = struct {
     pub fn start(self: *AudioCapture) void {
         self.running.store(true, .release);
         self.thread = std.Thread.spawn(.{}, captureLoop, .{self}) catch |err| {
-            std.debug.print("Audio thread failed: {}\n", .{err});
+            log.err("audio thread failed: {}", .{err});
             return;
         };
     }
@@ -73,45 +75,53 @@ pub const AudioCapture = struct {
         };
 
         const source_z = self.getSourceZ();
-        var err: c_int = 0;
-        const pa = c.pa_simple_new(
-            null, "hyprglaze", c.PA_STREAM_RECORD,
-            source_z, "visualizer", &ss, null, &ba, &err,
-        ) orelse {
-            std.debug.print("PulseAudio connect failed: {s}\n", .{c.pa_strerror(err)});
-            return;
-        };
-        defer c.pa_simple_free(pa);
-
-        std.debug.print("Audio capture started: {s}\n", .{
-            if (source_z) |sz| std.mem.sliceTo(sz, 0) else "default",
-        });
-
-        var raw: [read_floats]f32 = undefined;
         const step = frames_per_read / samples_per_channel;
+        var raw: [read_floats]f32 = undefined;
 
-        while (self.running.load(.acquire)) {
-            if (c.pa_simple_read(pa, @ptrCast(&raw), read_floats * @sizeOf(f32), &err) < 0) continue;
+        outer: while (self.running.load(.acquire)) {
+            var err: c_int = 0;
+            const pa = c.pa_simple_new(
+                null, "hyprglaze", c.PA_STREAM_RECORD,
+                source_z, "visualizer", &ss, null, &ba, &err,
+            ) orelse {
+                log.warn("PulseAudio connect failed: {s} — retry in 2s", .{c.pa_strerror(err)});
+                std.Thread.sleep(2 * std.time.ns_per_s);
+                continue :outer;
+            };
 
-            // Downsample to 128 samples per channel, averaging each step
-            const wi = self.write_idx.load(.acquire);
-            for (0..samples_per_channel) |i| {
-                var left: f32 = 0;
-                var right: f32 = 0;
-                for (0..step) |j| {
-                    const src = (i * step + j) * channels;
-                    left += raw[src];
-                    right += raw[src + 1];
+            log.info("audio capture started: {s}", .{
+                if (source_z) |sz| std.mem.sliceTo(sz, 0) else "default",
+            });
+
+            while (self.running.load(.acquire)) {
+                if (c.pa_simple_read(pa, @ptrCast(&raw), read_floats * @sizeOf(f32), &err) < 0) {
+                    log.warn("PulseAudio read failed: {s} — reconnecting", .{c.pa_strerror(err)});
+                    c.pa_simple_free(pa);
+                    continue :outer;
                 }
-                const inv = 1.0 / @as(f32, @floatFromInt(step));
-                self.waveform[wi][i] = left * inv;
-                self.waveform[wi][128 + i] = right * inv;
+
+                // Downsample to 128 samples per channel, averaging each step
+                const wi = self.write_idx.load(.acquire);
+                for (0..samples_per_channel) |i| {
+                    var left: f32 = 0;
+                    var right: f32 = 0;
+                    for (0..step) |j| {
+                        const src = (i * step + j) * channels;
+                        left += raw[src];
+                        right += raw[src + 1];
+                    }
+                    const inv = 1.0 / @as(f32, @floatFromInt(step));
+                    self.waveform[wi][i] = left * inv;
+                    self.waveform[wi][128 + i] = right * inv;
+                }
+
+                // Publish
+                const old_read = self.read_idx.load(.acquire);
+                self.read_idx.store(wi, .release);
+                self.write_idx.store(old_read, .release);
             }
 
-            // Publish
-            const old_read = self.read_idx.load(.acquire);
-            self.read_idx.store(wi, .release);
-            self.write_idx.store(old_read, .release);
+            c.pa_simple_free(pa);
         }
     }
 };
@@ -144,6 +154,6 @@ fn autoDetectMonitor(buf: *[256]u8) u16 {
     @memcpy(buf[0..len], read_buf[0..len]);
     @memcpy(buf[len .. len + suffix.len], suffix);
     const total: u16 = @intCast(len + suffix.len);
-    std.debug.print("Auto-detected monitor: {s}\n", .{buf[0..total]});
+    log.info("auto-detected monitor: {s}", .{buf[0..total]});
     return total;
 }

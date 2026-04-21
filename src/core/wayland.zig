@@ -20,6 +20,7 @@ pub const WaylandState = struct {
     height: u31 = 0,
     should_close: bool = false,
     frame_done: bool = true,
+    resize_pending: bool = false,
 
     pub fn init() !WaylandState {
         const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
@@ -98,6 +99,36 @@ pub const WaylandState = struct {
         if (c.wl_display_dispatch(self.display) == -1) return error.DispatchFailed;
     }
 
+    /// Tear down Wayland-side resources and reconnect to the compositor.
+    /// On success, a fresh display/registry/compositor/layer_shell/surface/egl_window
+    /// is live. Caller must recreate EGL state and re-upload GL resources since the
+    /// EGL display was bound to the previous wl_display pointer.
+    pub fn reconnect(self: *WaylandState) !void {
+        if (self.egl_window) |win| c.wl_egl_window_destroy(win);
+        if (self.layer_surface) |ls| c.zwlr_layer_surface_v1_destroy(ls);
+        if (self.surface) |s| c.wl_surface_destroy(s);
+        c.wl_registry_destroy(self.registry);
+        c.wl_display_disconnect(self.display);
+
+        const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
+        const registry = c.wl_display_get_registry(display) orelse return error.RegistryFailed;
+
+        self.* = .{
+            .display = display,
+            .registry = registry,
+        };
+
+        if (c.wl_registry_add_listener(registry, &registry_listener, self) != 0)
+            return error.RegistryListenerFailed;
+        if (c.wl_display_roundtrip(display) == -1) return error.RoundtripFailed;
+        if (self.compositor == null) return error.NoCompositor;
+        if (self.layer_shell == null) return error.NoLayerShell;
+
+        try self.createLayerSurface();
+        if (!self.configured) return error.NotConfigured;
+        try self.createEglWindow();
+    }
+
     pub fn deinit(self: *WaylandState) void {
         if (self.egl_window) |win| c.wl_egl_window_destroy(win);
         if (self.layer_surface) |ls| c.zwlr_layer_surface_v1_destroy(ls);
@@ -149,8 +180,14 @@ fn layerSurfaceConfigure(
 ) callconv(.c) void {
     const state: *WaylandState = @ptrCast(@alignCast(data));
 
-    state.width = @intCast(width);
-    state.height = @intCast(height);
+    const new_w: u31 = @intCast(width);
+    const new_h: u31 = @intCast(height);
+    if (state.configured and (new_w != state.width or new_h != state.height)) {
+        if (state.egl_window) |win| c.wl_egl_window_resize(win, new_w, new_h, 0, 0);
+        state.resize_pending = true;
+    }
+    state.width = new_w;
+    state.height = new_h;
     state.configured = true;
 
     c.zwlr_layer_surface_v1_ack_configure(surface, serial);
