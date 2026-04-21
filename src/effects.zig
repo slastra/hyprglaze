@@ -20,6 +20,7 @@ const visualizer = @import("effects/visualizer/context.zig");
 const milkdrop = @import("effects/milkdrop/context.zig");
 const buddy = @import("effects/buddy/context.zig");
 const ai_buddy = @import("effects/ai_buddy/context.zig");
+const tide = @import("effects/tide.zig");
 
 pub const WindowInfo = struct {
     class: [64]u8 = undefined,
@@ -56,6 +57,7 @@ pub const Effect = union(enum) {
     starfield: starfield.Context,
     visualizer: visualizer.Context,
     milkdrop: milkdrop.Context,
+    tide: tide.Context,
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
         if (std.mem.eql(u8, name, "particles")) {
@@ -89,8 +91,11 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "milkdrop")) {
             const params = config_mod.effectParams(cfg, "visualizer");
             return .{ .milkdrop = try milkdrop.Context.init(allocator, width, height, params) };
+        } else if (std.mem.eql(u8, name, "tide")) {
+            const params = config_mod.effectParams(cfg, "tide");
+            return .{ .tide = tide.Context.init(params) };
         }
-        log.err("unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, starfield, visualizer, milkdrop, glitch, buddy, ai-buddy", .{name});
+        log.err("unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide", .{name});
         return error.UnknownEffect;
     }
 
@@ -126,6 +131,7 @@ pub const Effect = union(enum) {
             .starfield => "shaders/starfield.frag",
             .visualizer => "shaders/visualizer.frag",
             .milkdrop => "shaders/milkdrop.frag",
+            .tide => "shaders/tide.frag",
         };
     }
 };

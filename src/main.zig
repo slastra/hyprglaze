@@ -643,7 +643,7 @@ const CliFlags = struct {
 
     pub const descriptions = .{
         .config = "TOML config path (default: ~/.config/hypr/hyprglaze.toml)",
-        .effect = "Effect: particles, windowglow, glitch, starfield, visualizer, milkdrop, etc.",
+        .effect = "Effect: particles, windowglow, glitch, starfield, visualizer, milkdrop, tide, etc.",
         .shader = "Fragment shader path (overrides effect default)",
         .theme = "Gogh color scheme name",
         .list_themes = "List available themes and exit",

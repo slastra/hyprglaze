@@ -33,6 +33,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `glitch` | Audio-reactive glitch art with RGB split, block displacement, VHS wobble, scanlines |
+| `tide` | Time-aware rising water line tied to wall-clock time, with falling teardrops, crater splashes, and Worthington jets |
 
 ## Install (Arch Linux)
 
@@ -56,7 +57,7 @@ zig build run
 
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
-#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy
+#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide
 effect = "fluid"
 theme = "Rosé Pine"
 
@@ -79,6 +80,10 @@ scale = 2.0
 sprite = "sprites/buddy.png"
 ai_cooldown = 5.0
 max_calls_per_minute = 6
+
+[tide]
+start_hour = 6.0      # hour at which the tide is empty
+end_hour   = 24.0     # hour at which the tide is full
 ```
 
 CLI overrides: `zig build run -- --effect particles --theme Nord`
