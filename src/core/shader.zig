@@ -34,9 +34,13 @@ pub const ShaderProgram = struct {
     i_time: c.GLint,
     i_mouse: c.GLint,
     i_window: c.GLint,
+    i_prev_window: c.GLint,
     i_windows: [max_windows]c.GLint,
     i_window_count: c.GLint,
     i_transition: c.GLint,
+    i_prev_alpha: c.GLint,
+    i_focused_index: c.GLint,
+    i_prev_index: c.GLint,
     i_particles: [max_particles]c.GLint,
     i_particle_count: c.GLint,
     i_palette: [palette_mod.max_palette_colors]c.GLint,
@@ -94,6 +98,7 @@ pub const ShaderProgram = struct {
             .i_time = c.glGetUniformLocation(program, "iTime"),
             .i_mouse = c.glGetUniformLocation(program, "iMouse"),
             .i_window = c.glGetUniformLocation(program, "iWindow"),
+            .i_prev_window = c.glGetUniformLocation(program, "iPrevWindow"),
             .i_windows = blk: {
                 var locs: [max_windows]c.GLint = undefined;
                 var win_name_buf: [32]u8 = undefined;
@@ -105,6 +110,9 @@ pub const ShaderProgram = struct {
             },
             .i_window_count = c.glGetUniformLocation(program, "iWindowCount"),
             .i_transition = c.glGetUniformLocation(program, "iTransition"),
+            .i_prev_alpha = c.glGetUniformLocation(program, "iPrevAlpha"),
+            .i_focused_index = c.glGetUniformLocation(program, "iFocusedIndex"),
+            .i_prev_index = c.glGetUniformLocation(program, "iPrevIndex"),
             .i_particles = blk2: {
                 var locs2: [max_particles]c.GLint = undefined;
                 var p_name_buf: [32]u8 = undefined;
@@ -151,9 +159,16 @@ pub const ShaderProgram = struct {
         win_y: f32 = 0,
         win_w: f32 = 0,
         win_h: f32 = 0,
+        prev_win_x: f32 = 0,
+        prev_win_y: f32 = 0,
+        prev_win_w: f32 = 0,
+        prev_win_h: f32 = 0,
         transition: f32 = 1.0,
+        prev_alpha: f32 = 0.0,
         windows: [max_windows]WindowRect = undefined,
         window_count: u8 = 0,
+        focused_index: i32 = -1,
+        prev_index: i32 = -1,
     };
 
     pub fn draw(self: *const ShaderProgram, u: FrameUniforms) void {
@@ -171,8 +186,16 @@ pub const ShaderProgram = struct {
             c.glUniform4f(self.i_mouse, u.mouse_x, u.mouse_y, 0.0, 0.0);
         if (self.i_window >= 0)
             c.glUniform4f(self.i_window, u.win_x, u.win_y, u.win_w, u.win_h);
+        if (self.i_prev_window >= 0)
+            c.glUniform4f(self.i_prev_window, u.prev_win_x, u.prev_win_y, u.prev_win_w, u.prev_win_h);
         if (self.i_transition >= 0)
             c.glUniform1f(self.i_transition, u.transition);
+        if (self.i_prev_alpha >= 0)
+            c.glUniform1f(self.i_prev_alpha, u.prev_alpha);
+        if (self.i_focused_index >= 0)
+            c.glUniform1i(self.i_focused_index, u.focused_index);
+        if (self.i_prev_index >= 0)
+            c.glUniform1i(self.i_prev_index, u.prev_index);
 
         // Upload all visible windows
         for (0..u.window_count) |i| {

@@ -8,6 +8,9 @@ uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform float iTransition;
+uniform float iPrevAlpha;
+uniform int iFocusedIndex;
+uniform int iPrevIndex;
 
 uniform vec3 iPalette[16];
 uniform int iPaletteSize;
@@ -43,22 +46,32 @@ void main() {
         if (win.z < 1.0 || win.w < 1.0) continue;
 
         float dist = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, corner);
-        bool is_focused = abs(win.x - iWindow.x) < 1.0 && abs(win.y - iWindow.y) < 1.0;
 
-        if (is_focused) {
-            // Focused: accent glow fades in with transition
-            if (dist <= 0.0) {
-                col = mix(col, accent, 0.25 * t);
-            } else {
-                float glow_radius = 30.0 + t * 30.0; // glow expands during transition
-                float glow = exp(-dist / glow_radius);
-                col = mix(col, accent, glow * 0.3 * t);
-            }
+        // Focus amount animates in on new focus (via iTransition) and animates
+        // out on the previously-focused window (via iPrevAlpha). The two glow
+        // styles cross-fade so there's no snap when focus leaves.
+        float focus_amt = 0.0;
+        if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+
+        // Focused glow: accent, wider radius, stronger at focus_amt=1.
+        vec3 focused_col = col;
+        if (dist <= 0.0) {
+            focused_col = mix(col, accent, 0.25);
         } else {
-            if (dist < 0.0) continue;
-            float glow = exp(-dist / 40.0);
-            col = mix(col, surface, glow * 0.5);
+            float glow_radius = 30.0 + focus_amt * 30.0;
+            float glow = exp(-dist / glow_radius);
+            focused_col = mix(col, accent, glow * 0.3);
         }
+
+        // Unfocused glow: surface tint, tight edge halo only.
+        vec3 unfocused_col = col;
+        if (dist >= 0.0) {
+            float glow = exp(-dist / 40.0);
+            unfocused_col = mix(col, surface, glow * 0.5);
+        }
+
+        col = mix(unfocused_col, focused_col, focus_amt);
     }
 
     fragColor = vec4(col, 1.0);

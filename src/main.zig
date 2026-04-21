@@ -173,6 +173,7 @@ pub fn main() !void {
     var frame_count: u32 = 0;
     var ipc_skip: u32 = 0;
     var cached_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
+    var cached_window_addresses: [hypr.max_visible_windows]u64 = [_]u64{0} ** hypr.max_visible_windows;
     var cached_collision_rects: [hypr.max_visible_windows]particles.Rect = undefined;
     var cached_window_count: u8 = 0;
     var cached_window_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
@@ -187,6 +188,7 @@ pub fn main() !void {
     const raw0 = queryRawState(&ipc, allocator, surf_h);
     trans.seed(raw0.win, raw0.cursor, raw0.win_address);
     cacheWindows(&cached_windows, &cached_collision_rects, &cached_window_count, &raw0);
+    for (0..raw0.window_count) |i| cached_window_addresses[i] = raw0.window_addresses[i];
     for (0..raw0.window_count) |i| cached_window_info[i] = raw0.window_info[i];
     cached_focused_class = raw0.focused_class;
     cached_focused_class_len = raw0.focused_class_len;
@@ -197,15 +199,17 @@ pub fn main() !void {
 
     // Raw window targets for smoothing
     var target_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
+    var target_window_addresses: [hypr.max_visible_windows]u64 = [_]u64{0} ** hypr.max_visible_windows;
     var target_window_count: u8 = raw0.window_count;
     for (0..raw0.window_count) |i| {
         target_windows[i] = raw0.windows[i];
+        target_window_addresses[i] = raw0.window_addresses[i];
     }
 
     // Initial render
     effect.upload(&shader_prog);
     try wl.requestFrame();
-    drawFrame(&shader_prog, &egl_state, surf_w, surf_h, 0.0, &trans, &cached_windows, cached_window_count);
+    drawFrame(&shader_prog, &egl_state, surf_w, surf_h, 0.0, &trans, &cached_windows, cached_window_count, -1, -1);
     egl_state.swapBuffers() catch |err| log.warn("initial swapBuffers error: {}", .{err});
 
     // Main loop
@@ -281,6 +285,7 @@ pub fn main() !void {
                 target_window_count = raw.window_count;
                 for (0..raw.window_count) |i| {
                     target_windows[i] = raw.windows[i];
+                    target_window_addresses[i] = raw.window_addresses[i];
                     cached_window_info[i] = raw.window_info[i];
                 }
                 cached_focused_class = raw.focused_class;
@@ -301,12 +306,14 @@ pub fn main() !void {
                 // Window count changed — snap all
                 for (0..target_window_count) |i| {
                     cached_windows[i] = target_windows[i];
+                    cached_window_addresses[i] = target_window_addresses[i];
                 }
                 cached_window_count = target_window_count;
             } else {
                 // Same count — match each target to nearest cached window
                 var used: [hypr.max_visible_windows]bool = [_]bool{false} ** hypr.max_visible_windows;
                 var matched_targets: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
+                var matched_addresses: [hypr.max_visible_windows]u64 = [_]u64{0} ** hypr.max_visible_windows;
 
                 for (0..target_window_count) |ti| {
                     var best: u8 = 0;
@@ -325,6 +332,7 @@ pub fn main() !void {
                     }
                     used[best] = true;
                     matched_targets[best] = target_windows[ti];
+                    matched_addresses[best] = target_window_addresses[ti];
                 }
 
                 for (0..cached_window_count) |i| {
@@ -332,6 +340,7 @@ pub fn main() !void {
                     cached_windows[i].y += (matched_targets[i].y - cached_windows[i].y) * win_alpha;
                     cached_windows[i].w += (matched_targets[i].w - cached_windows[i].w) * win_alpha;
                     cached_windows[i].h += (matched_targets[i].h - cached_windows[i].h) * win_alpha;
+                    cached_window_addresses[i] = matched_addresses[i];
                 }
             }
 
@@ -361,7 +370,17 @@ pub fn main() !void {
             });
             effect.upload(&shader_prog);
 
-            drawFrame(&shader_prog, &egl_state, surf_w, surf_h, time, &trans, &cached_windows, cached_window_count);
+            // Locate focused + prev focused windows by address — reliable during
+            // motion where smoothed iWindow.xy lags behind raw positions.
+            var focused_index: i32 = -1;
+            var prev_index: i32 = -1;
+            for (0..cached_window_count) |i| {
+                if (cached_window_addresses[i] == 0) continue;
+                if (cached_window_addresses[i] == trans.focused_address) focused_index = @intCast(i);
+                if (cached_window_addresses[i] == trans.prev_focused_address) prev_index = @intCast(i);
+            }
+
+            drawFrame(&shader_prog, &egl_state, surf_w, surf_h, time, &trans, &cached_windows, cached_window_count, focused_index, prev_index);
             try wl.requestFrame();
             egl_state.swapBuffers() catch |err| {
                 if (err == error.EglContextLost) {
@@ -401,6 +420,8 @@ fn drawFrame(
     trans: *transition.TransitionState,
     windows: *const [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect,
     window_count: u8,
+    focused_index: i32,
+    prev_index: i32,
 ) void {
     prog.draw(.{
         .width = w,
@@ -412,9 +433,16 @@ fn drawFrame(
         .win_y = trans.current_win.y,
         .win_w = trans.current_win.w,
         .win_h = trans.current_win.h,
+        .prev_win_x = trans.prev_win.x,
+        .prev_win_y = trans.prev_win.y,
+        .prev_win_w = trans.prev_win.w,
+        .prev_win_h = trans.prev_win.h,
         .transition = trans.transition_progress,
+        .prev_alpha = 1.0 - trans.transition_progress,
         .windows = windows.*,
         .window_count = window_count,
+        .focused_index = focused_index,
+        .prev_index = prev_index,
     });
 }
 
@@ -441,6 +469,7 @@ const RawState = struct {
     win_address: u64,
     cursor: [2]f32,
     windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect,
+    window_addresses: [hypr.max_visible_windows]u64,
     window_count: u8,
     window_info: [hypr.max_visible_windows]effects.WindowInfo,
     focused_class: [64]u8,
@@ -461,6 +490,7 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
 
     const visible = ipc.visibleWindows(allocator) catch hypr.VisibleWindows{};
     var windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
+    var window_addresses: [hypr.max_visible_windows]u64 = [_]u64{0} ** hypr.max_visible_windows;
     var win_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
     for (0..visible.count) |i| {
         const vw = visible.windows[i];
@@ -470,6 +500,7 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
             .w = @floatFromInt(vw.w),
             .h = @floatFromInt(vw.h),
         };
+        window_addresses[i] = vw.address;
         // Copy class/title metadata
         var info = effects.WindowInfo{};
         const clen: u8 = @intCast(@min(vw.class_len, 64));
@@ -498,6 +529,7 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
         .win_address = win.address,
         .cursor = .{ @floatFromInt(cur.x), surf_h - @as(f32, @floatFromInt(cur.y)) },
         .windows = windows,
+        .window_addresses = window_addresses,
         .window_count = visible.count,
         .window_info = win_info,
         .focused_class = fc,
@@ -643,7 +675,7 @@ const CliFlags = struct {
 
     pub const descriptions = .{
         .config = "TOML config path (default: ~/.config/hypr/hyprglaze.toml)",
-        .effect = "Effect: particles, windowglow, glitch, starfield, visualizer, milkdrop, tide, etc.",
+        .effect = "Effect: particles, windowglow, glitch, starfield, visualizer, milkdrop, tide, fire, etc.",
         .shader = "Fragment shader path (overrides effect default)",
         .theme = "Gogh color scheme name",
         .list_themes = "List available themes and exit",

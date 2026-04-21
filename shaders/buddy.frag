@@ -7,6 +7,9 @@ uniform vec4 iMouse;
 uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
+uniform int iFocusedIndex;
+uniform int iPrevIndex;
+uniform float iPrevAlpha;
 uniform float iTransition;
 
 // [0] = x, y, scale, facing  [1] = u0, v0, u1, v1
@@ -82,8 +85,10 @@ void main() {
         if (win.z < 1.0) continue;
         float dist = sdBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5);
         float edge = 1.0 - smoothstep(0.0, 2.0, abs(dist));
-        bool focused = abs(win.x - iWindow.x) < 1.0 && abs(win.y - iWindow.y) < 1.0;
-        col += (iPaletteSize > 0 ? iPaletteFg : vec3(0.5)) * edge * (focused ? 0.15 : 0.05);
+        float focus_amt = 0.0;
+        if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+        col += (iPaletteSize > 0 ? iPaletteFg : vec3(0.5)) * edge * mix(0.05, 0.15, focus_amt);
     }
 
     // Buddy sprite

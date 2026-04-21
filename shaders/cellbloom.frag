@@ -8,6 +8,9 @@ uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform float iTransition;
+uniform float iPrevAlpha;
+uniform int iFocusedIndex;
+uniform int iPrevIndex;
 
 uniform vec3 iPalette[16];
 uniform int iPaletteSize;
@@ -43,7 +46,7 @@ void main() {
     // --- Voronoi with focus interaction ---
     float d1 = 1e9, d2 = 1e9;
     vec3 c1 = bg, c2 = bg;
-    bool nearest_focused = false;
+    float nearest_focus_amt = 0.0;
 
     for (int i = 0; i < iWindowCount && i < 32; i++) {
         vec4 win = iWindows[i];
@@ -51,21 +54,21 @@ void main() {
 
         float d = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, 12.0);
 
-        // Check if focused
-        bool focused = (iWindow.z > 1.0 &&
-            abs(win.x - iWindow.x) < 1.0 && abs(win.y - iWindow.y) < 1.0 &&
-            abs(win.z - iWindow.z) < 1.0 && abs(win.w - iWindow.w) < 1.0);
+        // Focus amount — animates in on new focus, out on prior focus.
+        float focus_amt = 0.0;
+        if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
 
-        // Focused window pulls cells toward it
-        if (focused) d -= focus_expand;
+        // Focused window pulls cells toward it, scaled by focus strength.
+        d -= focus_expand * focus_amt;
 
         int ci = int(mod(float(i), 6.0));
-        vec3 tint = focused ? accent : pal[ci];
+        vec3 tint = mix(pal[ci], accent, focus_amt);
 
         if (d < d1) {
             d2 = d1; c2 = c1;
             d1 = d;  c1 = tint;
-            nearest_focused = focused;
+            nearest_focus_amt = focus_amt;
         } else if (d < d2) {
             d2 = d;  c2 = tint;
         }
@@ -76,7 +79,7 @@ void main() {
     if (cursor_d < d1) {
         d2 = d1; c2 = c1;
         d1 = cursor_d; c1 = accent * 0.4;
-        nearest_focused = false;
+        nearest_focus_amt = 0.0;
     } else if (cursor_d < d2) {
         d2 = cursor_d; c2 = accent * 0.4;
     }
@@ -94,7 +97,7 @@ void main() {
         if (d < d1) {
             d2 = d1; c2 = c1;
             d1 = d;  c1 = tint;
-            nearest_focused = false;
+            nearest_focus_amt = 0.0;
         } else if (d < d2) {
             d2 = d;  c2 = tint;
         }
@@ -102,7 +105,7 @@ void main() {
 
     // --- Cell fill ---
     float fill = exp(-max(d1, 0.0) / 120.0);
-    col = mix(col, c1, fill * (nearest_focused ? 0.06 : 0.03));
+    col = mix(col, c1, fill * mix(0.03, 0.06, nearest_focus_amt));
 
     // --- Sharp cell edge lines ---
     float edge_dist = d2 - d1;

@@ -8,6 +8,9 @@ uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform float iTransition;
+uniform float iPrevAlpha;
+uniform int iFocusedIndex;
+uniform int iPrevIndex;
 
 uniform vec3 iPalette[16];
 uniform int iPaletteSize;
@@ -50,12 +53,15 @@ void main() {
         float d = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, 12.0);
         if (d < 0.0) continue; // skip inside windows
 
-        bool focused = (iWindow.z > 1.0 &&
-            abs(win.x - iWindow.x) < 1.0 && abs(win.y - iWindow.y) < 1.0 &&
-            abs(win.z - iWindow.z) < 1.0 && abs(win.w - iWindow.w) < 1.0);
+        // Focus amount — animates in via iTransition on newly-focused window,
+        // out via iPrevAlpha on the prior one. Continuous value so phase speed,
+        // tint, and intensity all interpolate rather than snap.
+        float focus_amt = 0.0;
+        if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
 
-        // Rings expand outward over time
-        float phase = focused ? t * 1.5 : t;
+        // Rings expand outward over time (focused rings run faster)
+        float phase = t * mix(1.0, 1.5, focus_amt);
         float rings = abs(fract((d - phase * spacing) / spacing) - 0.5) * 2.0;
         float line = 1.0 - smoothstep(0.0, 0.04, rings);
 
@@ -63,9 +69,9 @@ void main() {
         float fade = exp(-d / 400.0);
 
         int ci = int(mod(float(i), 6.0));
-        vec3 tint = focused ? accent : pal[ci];
+        vec3 tint = mix(pal[ci], accent, focus_amt);
 
-        col = mix(col, tint, line * fade * (focused ? 0.5 : 0.25));
+        col = mix(col, tint, line * fade * mix(0.25, 0.5, focus_amt));
     }
 
     // --- Cursor rings ---

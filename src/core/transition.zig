@@ -11,13 +11,28 @@ pub const Rect = struct {
     }
 };
 
+/// Debounce window for committing a focus change (seconds). Filters the
+/// brief focus flicks Hyprland reports when the cursor passes over other
+/// windows during a drag, so the wallpaper's focus state stays on the
+/// window the user is actually interacting with.
+const focus_debounce_secs: f64 = 0.12;
+
 pub const TransitionState = struct {
     // Smoothed outputs
     current_win: Rect = .{},
     current_cursor: [2]f32 = .{ 0, 0 },
 
+    // Previously focused window — snapshotted at focus change so effects can
+    // animate the outgoing state (e.g. fade out its crown glow).
+    prev_win: Rect = .{},
+    prev_focused_address: u64 = 0,
+
     // Focus tracking (by window address, not geometry)
     focused_address: u64 = 0,
+
+    // Pending focus change — only commits after it's stable for focus_debounce_secs.
+    pending_address: u64 = 0,
+    pending_start: f64 = 0,
 
     // Focus transition timing
     transition_start: f64 = 0,
@@ -43,15 +58,27 @@ pub const TransitionState = struct {
             1.0 / 30.0;
         self.last_time = time;
 
-        // --- Focus change detection (by identity, not geometry) ---
+        // --- Focus change detection, debounced ---
         if (win_address != 0 and win_address != self.focused_address) {
-            self.focused_address = win_address;
-            self.transition_start = time;
-            self.transition_progress = 0;
-            // Snap geometry to new window — don't lerp between unrelated windows
-            if (raw_win.hasArea()) {
-                self.current_win = raw_win;
+            if (win_address != self.pending_address) {
+                // New candidate — start the debounce timer.
+                self.pending_address = win_address;
+                self.pending_start = time;
+            } else if (time - self.pending_start >= focus_debounce_secs) {
+                // Candidate has been stable long enough — commit.
+                if (self.focused_address != 0 and self.current_win.hasArea()) {
+                    self.prev_win = self.current_win;
+                    self.prev_focused_address = self.focused_address;
+                }
+                self.focused_address = win_address;
+                self.transition_start = time;
+                self.transition_progress = 0;
+                if (raw_win.hasArea()) self.current_win = raw_win;
+                self.pending_address = 0;
             }
+        } else if (win_address == self.focused_address) {
+            // Reverted back to the currently-focused window — cancel pending.
+            self.pending_address = 0;
         }
 
         // Advance transition timer
@@ -62,7 +89,10 @@ pub const TransitionState = struct {
         }
 
         // --- Frame-rate independent exponential smoothing ---
-        if (raw_win.hasArea()) {
+        // Only smooth geometry when raw_win actually represents the focused
+        // window. Skipping during a pending (non-committed) focus flicker
+        // keeps current_win on the window the user is actively engaged with.
+        if (raw_win.hasArea() and win_address == self.focused_address) {
             const ag = smoothAlpha(self.geometry_smoothing, dt);
             self.current_win.x += (raw_win.x - self.current_win.x) * ag;
             self.current_win.y += (raw_win.y - self.current_win.y) * ag;

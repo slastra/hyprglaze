@@ -34,6 +34,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `glitch` | Audio-reactive glitch art with RGB split, block displacement, VHS wobble, scanlines |
 | `tide` | Time-aware rising water line tied to wall-clock time, with falling teardrops, crater splashes, and Worthington jets |
+| `fire` | Windows on fire — FBM-driven flames rise from every window's top edge, cursor stokes the flames, embers rim the window |
 
 ## Install (Arch Linux)
 
@@ -57,7 +58,7 @@ zig build run
 
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
-#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide
+#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire
 effect = "fluid"
 theme = "Rosé Pine"
 

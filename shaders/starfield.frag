@@ -7,7 +7,10 @@ uniform vec4 iMouse;
 uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
+uniform int iFocusedIndex;
+uniform int iPrevIndex;
 uniform float iTransition;
+uniform float iPrevAlpha;
 
 // [0] = (band0, band1, band2, band3)  — sub-bass, bass, low-mid, mid
 // [1] = (band4, band5, beat, flight_time) — high-mid, high, beat, accumulated time
@@ -186,8 +189,10 @@ void main() {
         vec2 q = abs(fc - center) - half_size;
         float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
         float edge = 1.0 - smoothstep(0.0, 2.0, abs(d));
-        bool focused = abs(win.x - iWindow.x) < 1.0 && abs(win.y - iWindow.y) < 1.0;
-        col += (iPaletteSize > 0 ? iPaletteFg : vec3(0.5)) * edge * (focused ? 0.12 : 0.04);
+        float focus_amt = 0.0;
+        if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+        col += (iPaletteSize > 0 ? iPaletteFg : vec3(0.5)) * edge * mix(0.04, 0.12, focus_amt);
     }
 
     col *= 1.0 - 0.12 * length(uv - 0.5);

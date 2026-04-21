@@ -219,6 +219,19 @@ pub const HyprIpc = struct {
                 .h = @intCast(size.array.items[1].integer),
             };
 
+            // Parse address so callers can match the focused window by identity
+            // rather than by position (which is smoothed / lags during motion).
+            if (obj.get("address")) |addr_val| {
+                if (addr_val == .string) {
+                    const addr_str = addr_val.string;
+                    const hex = if (addr_str.len > 2 and addr_str[0] == '0' and addr_str[1] == 'x')
+                        addr_str[2..]
+                    else
+                        addr_str;
+                    win.address = std.fmt.parseUnsigned(u64, hex, 16) catch 0;
+                }
+            }
+
             if (obj.get("class")) |class_val| {
                 if (class_val == .string) {
                     const class = class_val.string;
