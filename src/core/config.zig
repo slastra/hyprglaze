@@ -167,6 +167,86 @@ pub fn expandHome(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return allocator.dupe(u8, path);
 }
 
+/// Surgically replace (or insert) the top-level `theme = "..."` line in the
+/// config file, preserving everything else verbatim. If the config doesn't
+/// exist, it's created with just the theme line. Written atomically via
+/// temp-file + rename so a running daemon either sees the old or new content.
+pub fn setTheme(allocator: std.mem.Allocator, config_path: []const u8, new_theme: []const u8) !void {
+    const existed = fileExists(config_path);
+    const contents: []u8 = if (existed) try readFileMut(allocator, config_path) else try allocator.alloc(u8, 0);
+    defer allocator.free(contents);
+
+    // Locate existing top-level `theme = ...` (skip lines inside [section]s).
+    var theme_start: ?usize = null;
+    var theme_end: usize = 0;
+    {
+        var pos: usize = 0;
+        var in_section = false;
+        while (pos <= contents.len) {
+            const end = std.mem.indexOfScalarPos(u8, contents, pos, '\n') orelse contents.len;
+            const trimmed = std.mem.trim(u8, contents[pos..end], " \t\r");
+            if (trimmed.len > 0 and trimmed[0] == '[') in_section = true;
+            if (!in_section and isThemeLine(trimmed)) {
+                theme_start = pos;
+                theme_end = end;
+                break;
+            }
+            if (end == contents.len) break;
+            pos = end + 1;
+        }
+    }
+
+    const line = try std.fmt.allocPrint(allocator, "theme = \"{s}\"", .{new_theme});
+    defer allocator.free(line);
+
+    const out = if (theme_start) |s| blk: {
+        const total = s + line.len + (contents.len - theme_end);
+        const buf = try allocator.alloc(u8, total);
+        @memcpy(buf[0..s], contents[0..s]);
+        @memcpy(buf[s .. s + line.len], line);
+        @memcpy(buf[s + line.len ..], contents[theme_end..]);
+        break :blk buf;
+    } else blk: {
+        const total = line.len + 1 + contents.len;
+        const buf = try allocator.alloc(u8, total);
+        @memcpy(buf[0..line.len], line);
+        buf[line.len] = '\n';
+        @memcpy(buf[line.len + 1 ..], contents);
+        break :blk buf;
+    };
+    defer allocator.free(out);
+
+    // Ensure parent directory exists (mkdir -p)
+    if (std.fs.path.dirname(config_path)) |dir| {
+        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+
+    // Atomic write
+    const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{config_path});
+    defer allocator.free(tmp);
+    {
+        const file = try std.fs.createFileAbsolute(tmp, .{});
+        defer file.close();
+        try file.writeAll(out);
+    }
+    try std.fs.renameAbsolute(tmp, config_path);
+}
+
+fn isThemeLine(trimmed: []const u8) bool {
+    if (trimmed.len < 6 or !std.mem.startsWith(u8, trimmed, "theme")) return false;
+    const rest = std.mem.trimLeft(u8, trimmed[5..], " \t");
+    return rest.len > 0 and rest[0] == '=';
+}
+
+fn readFileMut(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+    return try file.readToEndAlloc(allocator, 1024 * 1024);
+}
+
 pub fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
     if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
         const path = try std.fmt.allocPrint(allocator, "{s}/hypr/hyprglaze.toml", .{config_home});

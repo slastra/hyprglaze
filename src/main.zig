@@ -29,7 +29,9 @@ const CliArgs = struct {
     theme_name: ?[]const u8 = null,
     config_path: ?[]const u8 = null,
     effect_name: ?[]const u8 = null,
+    set_theme: ?[]const u8 = null,
     list_themes: bool = false,
+    list_effects: bool = false,
     fps: bool = false,
 };
 
@@ -52,10 +54,28 @@ pub fn main() !void {
         if (cli.theme_name) |t| allocator.free(t);
         if (cli.config_path) |p| allocator.free(p);
         if (cli.effect_name) |e| allocator.free(e);
+        if (cli.set_theme) |t| allocator.free(t);
     }
 
     if (cli.list_themes) {
         try palette_mod.listThemes(allocator);
+        return;
+    }
+    if (cli.list_effects) {
+        try effects.listEffects();
+        return;
+    }
+    if (cli.set_theme) |name| {
+        const path = config_mod.resolveConfigPath(allocator) catch |err| switch (err) {
+            error.ConfigNotFound => blk: {
+                const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+                break :blk try std.fmt.allocPrint(allocator, "{s}/.config/hypr/hyprglaze.toml", .{home});
+            },
+            else => return err,
+        };
+        defer allocator.free(path);
+        try config_mod.setTheme(allocator, path, name);
+        log.info("theme set to '{s}' in {s}", .{ name, path });
         return;
     }
 
@@ -678,7 +698,9 @@ const CliFlags = struct {
         .effect = "Effect: particles, windowglow, glitch, starfield, visualizer, milkdrop, tide, fire, etc.",
         .shader = "Fragment shader path (overrides effect default)",
         .theme = "Gogh color scheme name",
+        .set_theme = "Persist a theme to the config file and exit (hot-reloads in a running daemon)",
         .list_themes = "List available themes and exit",
+        .list_effects = "List available effects and exit",
         .fps = "Log frames-per-second every second",
     };
 
@@ -686,7 +708,9 @@ const CliFlags = struct {
     effect: ?[]const u8 = null,
     shader: ?[]const u8 = null,
     theme: ?[]const u8 = null,
+    set_theme: ?[]const u8 = null,
     list_themes: bool = false,
+    list_effects: bool = false,
     fps: bool = false,
 };
 
@@ -701,7 +725,9 @@ fn parseCli(allocator: std.mem.Allocator) !CliArgs {
         .effect_name = if (parsed.effect) |v| try allocator.dupe(u8, v) else null,
         .shader_path = if (parsed.shader) |v| try allocator.dupe(u8, v) else null,
         .theme_name = if (parsed.theme) |v| try allocator.dupe(u8, v) else null,
+        .set_theme = if (parsed.set_theme) |v| try allocator.dupe(u8, v) else null,
         .list_themes = parsed.list_themes,
+        .list_effects = parsed.list_effects,
         .fps = parsed.fps,
     };
 }

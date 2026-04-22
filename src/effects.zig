@@ -140,3 +140,22 @@ pub const Effect = union(enum) {
         };
     }
 };
+
+/// Print the list of effect names (one per line) to stdout. Derived at
+/// comptime from the Effect union so new effects show up automatically —
+/// underscores in field names are converted to hyphens for CLI style
+/// (e.g. `ai_buddy` → `ai-buddy`).
+pub fn listEffects() !void {
+    var stdout_buf: [64]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const w = &stdout_writer.interface;
+
+    inline for (@typeInfo(Effect).@"union".fields) |f| {
+        var name_buf: [64]u8 = undefined;
+        for (f.name, 0..) |ch, i| {
+            name_buf[i] = if (ch == '_') '-' else ch;
+        }
+        try w.print("{s}\n", .{name_buf[0..f.name.len]});
+    }
+    try w.flush();
+}
