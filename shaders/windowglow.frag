@@ -8,7 +8,6 @@ uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform float iTransition;
-uniform float iPrevAlpha;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
 
@@ -47,12 +46,9 @@ void main() {
 
         float dist = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, corner);
 
-        // Focus amount animates in on new focus (via iTransition) and animates
-        // out on the previously-focused window (via iPrevAlpha). The two glow
-        // styles cross-fade so there's no snap when focus leaves.
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
-        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
 
         // Focused glow: accent, wider radius, stronger at focus_amt=1.
         vec3 focused_col = col;

@@ -9,7 +9,6 @@ uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
-uniform float iPrevAlpha;
 uniform float iTransition;
 
 // [0] = x, y, scale, facing  [1] = u0, v0, u1, v1
@@ -87,7 +86,7 @@ void main() {
         float edge = 1.0 - smoothstep(0.0, 2.0, abs(dist));
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
-        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
         col += (iPaletteSize > 0 ? iPaletteFg : vec3(0.5)) * edge * mix(0.05, 0.15, focus_amt);
     }
 

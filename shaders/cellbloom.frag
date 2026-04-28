@@ -8,7 +8,6 @@ uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform float iTransition;
-uniform float iPrevAlpha;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
 
@@ -54,10 +53,9 @@ void main() {
 
         float d = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, 12.0);
 
-        // Focus amount — animates in on new focus, out on prior focus.
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
-        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
 
         // Focused window pulls cells toward it, scaled by focus strength.
         d -= focus_expand * focus_amt;

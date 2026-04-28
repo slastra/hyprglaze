@@ -22,9 +22,8 @@ pub const TransitionState = struct {
     current_win: Rect = .{},
     current_cursor: [2]f32 = .{ 0, 0 },
 
-    // Previously focused window — snapshotted at focus change so effects can
-    // animate the outgoing state (e.g. fade out its crown glow).
-    prev_win: Rect = .{},
+    // Previously focused window's address — effects look it up against the
+    // visible-windows array to drive a fade-out on the prior focus.
     prev_focused_address: u64 = 0,
 
     // Focus tracking (by window address, not geometry)
@@ -67,7 +66,6 @@ pub const TransitionState = struct {
             } else if (time - self.pending_start >= focus_debounce_secs) {
                 // Candidate has been stable long enough — commit.
                 if (self.focused_address != 0 and self.current_win.hasArea()) {
-                    self.prev_win = self.current_win;
                     self.prev_focused_address = self.focused_address;
                 }
                 self.focused_address = win_address;

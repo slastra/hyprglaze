@@ -2,11 +2,10 @@
 precision highp float;
 
 uniform vec3 iResolution;
-uniform float iTime;
+uniform float iFireTime;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform float iTransition;
-uniform float iPrevAlpha;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
 
@@ -109,23 +108,12 @@ float wakeStrength(float sd) {
     return exp(-max(sd, 0.0) * 0.0035);
 }
 
-// Ambient wind: each moving window drags a pocket of air with it.
-vec2 windAt(vec2 p) {
-    vec2 w = vec2(0.0);
-    for (int i = 0; i < iWindowCount && i < 32; i++) {
-        vec4 win = iWindows[i];
-        if (win.z < 1.0) continue;
-        w += iWindowVel[i] * (wakeStrength(windowSdf(p, win)) * 0.8);
-    }
-    return w;
-}
-
 // ---------- main ----------
 
 void main() {
     vec2 fc = gl_FragCoord.xy;
     vec2 uv = fc / iResolution.xy;
-    float t = iTime;
+    float t = iFireTime;
 
     // Background from theme, with a faint warm floor glow.
     vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.02, 0.012, 0.008);
@@ -133,7 +121,17 @@ void main() {
     float floor_glow = smoothstep(0.0, 0.25, 1.0 - uv.y) * 0.08;
     vec3 col = bg + floor_tint * floor_glow;
 
-    vec2 wind = windAt(fc);
+    // Per-window wake strength, computed once and reused below for the
+    // self-attenuation step (avoids a second windowSdf/exp per window per pixel).
+    float win_wakes[32];
+    vec2 wind = vec2(0.0);
+    for (int i = 0; i < iWindowCount && i < 32; i++) {
+        vec4 win = iWindows[i];
+        if (win.z < 1.0) { win_wakes[i] = 0.0; continue; }
+        float w = wakeStrength(windowSdf(fc, win));
+        win_wakes[i] = w;
+        wind += iWindowVel[i] * (w * 0.8);
+    }
 
     float heat = 0.0;
     for (int i = 0; i < iWindowCount && i < 32; i++) {
@@ -150,19 +148,16 @@ void main() {
         float above = fc.y - y_top;
         if (above < -30.0) continue; // small bleed below so embers sit on edge
 
-        // Focus amount — matched by index so rapid motion doesn't flip focus
-        // (smoothed iWindow.xy lags raw positions mid-drag).
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
-        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
 
         // Focused windows burn taller.
         float flame_height = mix(160.0, 320.0, focus_amt);
 
         // Attenuate this window's own wake so its own flame warps only as
         // subtly as a distant neighbor does (~400px-wake strength ≈ 0.25× self).
-        float f_self = wakeStrength(windowSdf(fc, win));
-        vec2 flame_wind = wind - iWindowVel[i] * (f_self * 0.6); // 0.8 * (1 - 0.25)
+        vec2 flame_wind = wind - iWindowVel[i] * (win_wakes[i] * 0.6); // 0.8 * (1 - 0.25)
 
         // Normalized vertical position and whip curve (tip sways more).
         float yn = clamp(above / flame_height, 0.0, 1.2);

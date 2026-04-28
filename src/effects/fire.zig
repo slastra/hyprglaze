@@ -94,6 +94,13 @@ pub const Context = struct {
     /// so the axis stays stable across the long fade-in after motion stops.
     win_dir: [max_windows][2]f32 = [_][2]f32{.{ 1.0, 0.0 }} ** max_windows,
 
+    /// Cached uniform locations — resolved on first upload, then reused.
+    cached_program: c.GLuint = 0,
+    loc_vel: c.GLint = -1,
+    loc_dir: c.GLint = -1,
+    loc_fade: c.GLint = -1,
+    loc_time: c.GLint = -1,
+
     pub fn init() Context {
         return .{};
     }
@@ -154,6 +161,16 @@ pub const Context = struct {
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
         c.glUseProgram(prog.program);
 
+        // Resolve uniform locations once per program — re-resolve if the shader
+        // was reloaded (program ID changes on hot-reload).
+        if (self.cached_program != prog.program) {
+            self.cached_program = prog.program;
+            self.loc_vel = c.glGetUniformLocation(prog.program, "iWindowVel[0]");
+            self.loc_dir = c.glGetUniformLocation(prog.program, "iWindowDir[0]");
+            self.loc_fade = c.glGetUniformLocation(prog.program, "iWindowFade[0]");
+            self.loc_time = c.glGetUniformLocation(prog.program, "iFireTime");
+        }
+
         // Flatten the vec2 arrays into [x0,y0, x1,y1, ...] for glUniform2fv.
         var vel_flat: [max_windows * 2]f32 = undefined;
         var dir_flat: [max_windows * 2]f32 = undefined;
@@ -164,20 +181,15 @@ pub const Context = struct {
             dir_flat[i * 2 + 1] = self.win_dir[i][1];
         }
 
-        setVec2Array(prog.program, "iWindowVel[0]", &vel_flat);
-        setVec2Array(prog.program, "iWindowDir[0]", &dir_flat);
-        setFloatArray(prog.program, "iWindowFade[0]", &self.win_fade);
+        if (self.loc_vel >= 0) c.glUniform2fv(self.loc_vel, max_windows, &vel_flat[0]);
+        if (self.loc_dir >= 0) c.glUniform2fv(self.loc_dir, max_windows, &dir_flat[0]);
+        if (self.loc_fade >= 0) c.glUniform1fv(self.loc_fade, max_windows, &self.win_fade[0]);
+        // Fire-local time, resets each activation. Keeps noise-coordinate
+        // magnitudes small so the inner fbm hash retains f32 precision —
+        // global iTime grows unbounded and stalls the noise pattern after
+        // a couple of minutes of uptime.
+        if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
     }
 
     pub fn deinit(_: *Context) void {}
 };
-
-fn setVec2Array(program: c.GLuint, name: [*:0]const u8, flat: *const [max_windows * 2]f32) void {
-    const loc = c.glGetUniformLocation(program, name);
-    if (loc >= 0) c.glUniform2fv(loc, max_windows, &flat[0]);
-}
-
-fn setFloatArray(program: c.GLuint, name: [*:0]const u8, arr: *const [max_windows]f32) void {
-    const loc = c.glGetUniformLocation(program, name);
-    if (loc >= 0) c.glUniform1fv(loc, max_windows, &arr[0]);
-}

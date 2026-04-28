@@ -41,6 +41,13 @@ pub const MonitorInfo = struct {
     scale: f32,
 };
 
+fn parseAddress(val: std.json.Value) u64 {
+    if (val != .string) return 0;
+    const s = val.string;
+    const hex = if (s.len > 2 and s[0] == '0' and s[1] == 'x') s[2..] else s;
+    return std.fmt.parseUnsigned(u64, hex, 16) catch 0;
+}
+
 pub const HyprIpc = struct {
     socket_path: [256]u8,
     socket_path_len: usize,
@@ -139,17 +146,7 @@ pub const HyprIpc = struct {
             .h = @intCast(size.array.items[1].integer),
         };
 
-        // Parse address "0x..." as unique window identity
-        if (root.get("address")) |addr_val| {
-            if (addr_val == .string) {
-                const addr_str = addr_val.string;
-                const hex = if (addr_str.len > 2 and addr_str[0] == '0' and addr_str[1] == 'x')
-                    addr_str[2..]
-                else
-                    addr_str;
-                result.address = std.fmt.parseUnsigned(u64, hex, 16) catch 0;
-            }
-        }
+        if (root.get("address")) |addr_val| result.address = parseAddress(addr_val);
 
         if (root.get("class")) |class_val| {
             if (class_val == .string) {
@@ -219,18 +216,7 @@ pub const HyprIpc = struct {
                 .h = @intCast(size.array.items[1].integer),
             };
 
-            // Parse address so callers can match the focused window by identity
-            // rather than by position (which is smoothed / lags during motion).
-            if (obj.get("address")) |addr_val| {
-                if (addr_val == .string) {
-                    const addr_str = addr_val.string;
-                    const hex = if (addr_str.len > 2 and addr_str[0] == '0' and addr_str[1] == 'x')
-                        addr_str[2..]
-                    else
-                        addr_str;
-                    win.address = std.fmt.parseUnsigned(u64, hex, 16) catch 0;
-                }
-            }
+            if (obj.get("address")) |addr_val| win.address = parseAddress(addr_val);
 
             if (obj.get("class")) |class_val| {
                 if (class_val == .string) {

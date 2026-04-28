@@ -172,8 +172,10 @@ pub fn expandHome(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 /// exist, it's created with just the theme line. Written atomically via
 /// temp-file + rename so a running daemon either sees the old or new content.
 pub fn setTheme(allocator: std.mem.Allocator, config_path: []const u8, new_theme: []const u8) !void {
-    const existed = fileExists(config_path);
-    const contents: []u8 = if (existed) try readFileMut(allocator, config_path) else try allocator.alloc(u8, 0);
+    const contents: []u8 = readFileMut(allocator, config_path) catch |err| switch (err) {
+        error.FileNotFound => try allocator.alloc(u8, 0),
+        else => return err,
+    };
     defer allocator.free(contents);
 
     // Locate existing top-level `theme = ...` (skip lines inside [section]s).

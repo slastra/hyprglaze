@@ -8,7 +8,6 @@ uniform vec4 iWindow;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
 uniform float iTransition;
-uniform float iPrevAlpha;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
 
@@ -53,12 +52,9 @@ void main() {
         float d = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, 12.0);
         if (d < 0.0) continue; // skip inside windows
 
-        // Focus amount — animates in via iTransition on newly-focused window,
-        // out via iPrevAlpha on the prior one. Continuous value so phase speed,
-        // tint, and intensity all interpolate rather than snap.
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
-        if (i == iPrevIndex)    focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iPrevAlpha));
+        if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
 
         // Rings expand outward over time (focused rings run faster)
         float phase = t * mix(1.0, 1.5, focus_amt);
