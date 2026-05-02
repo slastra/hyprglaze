@@ -99,7 +99,7 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "fire")) {
             return .{ .fire = fire.Context.init() };
         }
-        log.err("unknown effect: '{s}'. Available: particles, windowglow, cellbloom, concentric, fluid, aurora, starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire", .{name});
+        log.err("unknown effect: '{s}'. Available: {s}", .{ name, effect_names_csv });
         return error.UnknownEffect;
     }
 
@@ -139,6 +139,21 @@ pub const Effect = union(enum) {
             .fire => "shaders/fire.frag",
         };
     }
+};
+
+/// Comma-joined list of all effect names with `_` rewritten to `-`.
+/// Derived at comptime from the `Effect` union so error messages and CLI
+/// help can't drift from the actual variant set.
+pub const effect_names_csv: []const u8 = blk: {
+    var out: []const u8 = "";
+    for (@typeInfo(Effect).@"union".fields, 0..) |f, i| {
+        if (i > 0) out = out ++ ", ";
+        var name: [f.name.len]u8 = undefined;
+        for (f.name, 0..) |ch, j| name[j] = if (ch == '_') '-' else ch;
+        const final = name;
+        out = out ++ final[0..];
+    }
+    break :blk out;
 };
 
 /// Print the list of effect names (one per line) to stdout. Derived at

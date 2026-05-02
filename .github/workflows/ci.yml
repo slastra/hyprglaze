@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    name: build & test (archlinux)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install system packages
+        # Arch container is the canonical build environment (PKGBUILD path).
+        # nodejs is needed by actions/checkout; git for fetching deps.
+        run: |
+          pacman -Syu --noconfirm --needed \
+            zig wayland wayland-protocols mesa libglvnd stb libpulse \
+            base-devel git nodejs
+
+      - uses: actions/checkout@v4
+
+      - name: zig build test
+        run: zig build test
+
+      - name: zig build (Debug)
+        run: zig build
+
+      - name: zig build (ReleaseSafe)
+        # Matches the PKGBUILD optimize flag.
+        run: zig build -Doptimize=ReleaseSafe

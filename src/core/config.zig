@@ -33,6 +33,14 @@ pub const EffectParams = struct {
         return default;
     }
 
+    /// Returns a string value from the section, or `default` if missing.
+    ///
+    /// LIFETIME: the returned slice points into `Config.raw_arena` (the
+    /// arena owned by the parent Config). It is invalidated by the next
+    /// `reloadConfig` in the main loop. **Consume immediately** — pass it
+    /// to a function that copies it (e.g. `Texture.loadFromFile`,
+    /// `bufPrint`). Do NOT store it on a Context struct that survives
+    /// across frames; that's a use-after-free waiting to happen.
     pub fn getString(self: EffectParams, key: []const u8, default: ?[]const u8) ?[]const u8 {
         if (self.table) |t| {
             if (t.get(key)) |val| {
@@ -69,8 +77,15 @@ pub const Config = struct {
     geometry_smoothing: f32,
     config_path: []const u8,
 
-    // Raw TOML data retained for effect params
+    /// Arena that owns every string slice inside `raw_table` (and hence
+    /// every slice returned by `EffectParams.getString`). Freed in
+    /// `Config.deinit`, which means a `reloadConfig` swap invalidates all
+    /// outstanding string slices borrowed from this Config.
     raw_arena: ?std.heap.ArenaAllocator = null,
+    /// Top-level TOML table. Effect params are read out of it lazily via
+    /// `effectParams(cfg, "<section>")`. Slices into nested string values
+    /// live in `raw_arena` — see the lifetime warning on
+    /// `EffectParams.getString`.
     raw_table: ?toml.Table = null,
 };
 

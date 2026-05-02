@@ -19,6 +19,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Force LLVM backend + LLD even in Debug. Zig 0.15's self-hosted
+    // x86_64 backend produces objects whose link path can't combine with
+    // `crt1.o` from gcc 15+ (the `.sframe` section uses a 64-bit PC-relative
+    // relocation the self-hosted linker doesn't handle). Routing every
+    // optimize mode through LLVM matches the working ReleaseSafe path.
+    const llvm_backend = true;
+
     // --- main executable ---
     const exe = b.addExecutable(.{
         .name = "hyprglaze",
@@ -31,6 +38,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "flags", .module = flags_dep.module("flags") },
             },
         }),
+        .use_llvm = llvm_backend,
+        .use_lld = llvm_backend,
     });
 
     // Generated protocol headers
@@ -77,6 +86,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        .use_llvm = llvm_backend,
+        .use_lld = llvm_backend,
     });
     ipc_test.root_module.link_libc = true;
     b.installArtifact(ipc_test);

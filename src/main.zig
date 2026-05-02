@@ -8,6 +8,7 @@ const palette_mod = @import("core/palette.zig");
 const transition = @import("core/transition.zig");
 const config_mod = @import("core/config.zig");
 const watcher_mod = @import("core/watcher.zig");
+const hypr_events = @import("core/hypr_events.zig");
 const effects = @import("effects.zig");
 const particles = @import("effects/particles/system.zig");
 
@@ -127,6 +128,14 @@ pub fn main() !void {
     };
     log.info("monitor: {d}x{d} scale={d:.2}", .{ mon.width, mon.height, mon.scale });
 
+    // Subscribe to Hyprland's event stream so focus / lifecycle / workspace
+    // changes are instant rather than detected via the every-100ms poll.
+    var events = hypr_events.HyprEvents.init() catch |err| {
+        log.err("Hyprland events init failed: {}", .{err});
+        return err;
+    };
+    defer events.deinit();
+
     // Wayland
     var wl = wayland.WaylandState.init() catch |err| {
         log.err("Wayland init failed: {}", .{err});
@@ -203,9 +212,22 @@ pub fn main() !void {
     var fps_timer = try std.time.Timer.start();
     var timer = try std.time.Timer.start();
 
-    // Seed
-    const raw0 = queryRawState(&ipc, allocator, surf_h);
-    trans.seed(raw0.win, raw0.cursor, raw0.win_address);
+    // Seed: bootstrap the focused-window address once via `j/activewindow`
+    // because the event stream only carries future changes, never the
+    // current state. From here on, `activewindowv2` events keep
+    // `events.focused_address` in sync.
+    const initial_focus = ipc.activeWindow(allocator) catch null;
+    const initial_addr: u64 = if (initial_focus) |w| w.address else 0;
+    events.focused_address.store(initial_addr, .release);
+
+    const initial_cursor = ipc.cursorPos() catch hypr.CursorPos{ .x = 0, .y = 0 };
+    const seed_cursor = [2]f32{
+        @floatFromInt(initial_cursor.x),
+        surf_h - @as(f32, @floatFromInt(initial_cursor.y)),
+    };
+
+    const raw0 = queryRawState(&ipc, allocator, surf_h, initial_addr);
+    trans.seed(raw0.win, seed_cursor, raw0.win_address);
     cacheWindows(&cached_windows, &cached_collision_rects, &cached_window_count, &raw0);
     for (0..raw0.window_count) |i| cached_window_info[i] = raw0.window_info[i];
     cached_focused_class = raw0.focused_class;
@@ -215,10 +237,25 @@ pub fn main() !void {
     var cached_raw_win = raw0.win;
     var cached_win_address: u64 = raw0.win_address;
 
+    // Start the event reader after bootstrap so the initial dirty flag
+    // doesn't trigger a redundant first-iteration re-poll.
+    _ = events.takeDirty();
+    events.start() catch |err| {
+        log.warn("Hyprland events thread failed to start: {} — falling back to polling only", .{err});
+    };
+
     // Raw window targets for smoothing
     var target_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var target_window_count: u8 = raw0.window_count;
     for (0..raw0.window_count) |i| target_windows[i] = raw0.windows[i];
+
+    // Cursor target — refreshed at most once per `cursor_query_period`. The
+    // smoothing in transition.zig is frame-rate independent and effects don't
+    // visibly react faster than the display, so polling above 60 Hz is pure
+    // IPC waste on high-refresh monitors.
+    var cached_cursor: [2]f32 = seed_cursor;
+    var last_cursor_query_time: f64 = 0;
+    const cursor_query_period: f64 = 1.0 / 60.0;
 
     // Initial render
     effect.upload(&shader_prog);
@@ -236,23 +273,10 @@ pub fn main() !void {
                 log.err("Wayland reconnect failed: {} — exiting", .{e2});
                 return e2;
             };
-            egl_state.deinit();
-            shader_prog.deinit();
-            egl_state = egl_mod.EglState.init(wl.display, wl.egl_window.?) catch |e2| {
-                log.err("EGL reinit failed: {} — exiting", .{e2});
+            recreateGraphics(allocator, &egl_state, &shader_prog, &effect, &pal, &wl, shader_path_expanded) catch |e2| {
+                log.err("graphics reinit failed after Wayland reconnect: {} — exiting", .{e2});
                 return e2;
             };
-            const new_frag = loadShaderFile(allocator, shader_path_expanded) catch |e2| {
-                log.err("shader reload failed: {} — exiting", .{e2});
-                return e2;
-            };
-            defer allocator.free(new_frag);
-            shader_prog = shader_mod.ShaderProgram.init(new_frag) catch |e2| {
-                log.err("shader recompile failed: {} — exiting", .{e2});
-                return e2;
-            };
-            if (pal) |*p| shader_prog.setPalette(p);
-            effect.upload(&shader_prog);
             surf_w = @floatFromInt(wl.width);
             surf_h = @floatFromInt(wl.height);
             wl.resize_pending = false;
@@ -282,29 +306,57 @@ pub fn main() !void {
             const dt = time - prev_time;
             prev_time = time;
 
-            // Cursor every frame, windows every 6
-            const cursor = ipc.cursorPos() catch hypr.CursorPos{ .x = 0, .y = 0 };
-            const raw_cursor = [2]f32{
-                @floatFromInt(cursor.x),
-                surf_h - @as(f32, @floatFromInt(cursor.y)),
-            };
+            // Cursor: Hyprland emits no cursor events on socket2, so we poll.
+            // Capped at 60 Hz — finer sampling buys nothing visible because
+            // the smoothing in transition.zig is frame-rate independent.
+            if (time_f64 - last_cursor_query_time >= cursor_query_period) {
+                const cursor = ipc.cursorPos() catch hypr.CursorPos{ .x = 0, .y = 0 };
+                cached_cursor[0] = @floatFromInt(cursor.x);
+                cached_cursor[1] = surf_h - @as(f32, @floatFromInt(cursor.y));
+                last_cursor_query_time = time_f64;
+            }
+            const raw_cursor = cached_cursor;
 
+            // Pull focus from the event stream. A change forces an
+            // immediate re-poll so geometry/metadata for the new focus
+            // arrive on the same frame as the address change.
+            const focused_addr = events.focusedAddress();
+            const focus_changed = focused_addr != 0 and focused_addr != cached_win_address;
+            if (focused_addr != 0) cached_win_address = focused_addr;
+
+            const dirty = events.takeDirty();
+            if (dirty.monitor) {
+                log.info("monitor topology changed — restart hyprglaze if displays are reconfigured", .{});
+            }
+            if (dirty.config) {
+                log.info("Hyprland reloaded its config", .{});
+            }
+
+            // Re-query `j/clients` when an event signals the visible-windows
+            // list may have changed, OR every 6 frames as a backstop —
+            // Hyprland is silent during interactive drag/resize, so polling
+            // is the only way to track in-progress geometry changes.
             ipc_skip += 1;
-            if (ipc_skip >= 6) {
+            if (focus_changed or dirty.windows or dirty.workspace or ipc_skip >= 6) {
                 ipc_skip = 0;
-                const raw = queryRawState(&ipc, allocator, surf_h);
-                cached_raw_win = raw.win;
-                cached_win_address = raw.win_address;
-                // Update targets
+                const raw = queryRawState(&ipc, allocator, surf_h, cached_win_address);
                 target_window_count = raw.window_count;
                 for (0..raw.window_count) |i| {
                     target_windows[i] = raw.windows[i];
                     cached_window_info[i] = raw.window_info[i];
                 }
-                cached_focused_class = raw.focused_class;
-                cached_focused_class_len = raw.focused_class_len;
-                cached_focused_title = raw.focused_title;
-                cached_focused_title_len = raw.focused_title_len;
+                // raw.win_address is non-zero only when the focused window
+                // was found in the visible list. When 0 (focus on a
+                // different monitor's workspace, or no focus), keep the
+                // previous geometry so the wallpaper doesn't snap to the
+                // origin.
+                if (raw.win_address != 0) {
+                    cached_raw_win = raw.win;
+                    cached_focused_class = raw.focused_class;
+                    cached_focused_class_len = raw.focused_class_len;
+                    cached_focused_title = raw.focused_title;
+                    cached_focused_title_len = raw.focused_title_len;
+                }
             }
             trans.update(time_f64, cached_raw_win, raw_cursor, cached_win_address);
 
@@ -383,14 +435,7 @@ pub fn main() !void {
             egl_state.swapBuffers() catch |err| {
                 if (err == error.EglContextLost) {
                     log.warn("EGL context lost — reinitialising graphics", .{});
-                    egl_state.deinit();
-                    shader_prog.deinit();
-                    egl_state = try egl_mod.EglState.init(wl.display, wl.egl_window.?);
-                    const new_frag = try loadShaderFile(allocator, shader_path_expanded);
-                    defer allocator.free(new_frag);
-                    shader_prog = try shader_mod.ShaderProgram.init(new_frag);
-                    if (pal) |*p| shader_prog.setPalette(p);
-                    effect.upload(&shader_prog);
+                    try recreateGraphics(allocator, &egl_state, &shader_prog, &effect, &pal, &wl, shader_path_expanded);
                 } else {
                     log.warn("eglSwapBuffers error: {}", .{err});
                 }
@@ -407,6 +452,29 @@ pub fn main() !void {
             }
         }
     }
+}
+
+/// Tear down and rebuild the GL pipeline: EGL state, shader program, and
+/// re-upload the effect's uniforms. Used after a Wayland reconnect or an
+/// `EglContextLost`. The palette pointer is re-bound if present. Caller is
+/// responsible for any post-reinit work (surface dimensions, requestFrame).
+fn recreateGraphics(
+    allocator: std.mem.Allocator,
+    egl_state: *egl_mod.EglState,
+    shader_prog: *shader_mod.ShaderProgram,
+    effect: *effects.Effect,
+    pal: *?palette_mod.Palette,
+    wl: *const wayland.WaylandState,
+    shader_path_expanded: []const u8,
+) !void {
+    egl_state.deinit();
+    shader_prog.deinit();
+    egl_state.* = try egl_mod.EglState.init(wl.display, wl.egl_window.?);
+    const new_frag = try loadShaderFile(allocator, shader_path_expanded);
+    defer allocator.free(new_frag);
+    shader_prog.* = try shader_mod.ShaderProgram.init(new_frag);
+    if (pal.*) |*p| shader_prog.setPalette(p);
+    effect.upload(shader_prog);
 }
 
 fn drawFrame(
@@ -469,7 +537,6 @@ fn cacheWindows(
 const RawState = struct {
     win: transition.Rect,
     win_address: u64,
-    cursor: [2]f32,
     windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect,
     window_count: u8,
     window_info: [hypr.max_visible_windows]effects.WindowInfo,
@@ -479,19 +546,20 @@ const RawState = struct {
     focused_title_len: u8,
 };
 
-fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h: f32) RawState {
-    const cur = ipc.cursorPos() catch hypr.CursorPos{ .x = 0, .y = 0 };
-    const win = (ipc.activeWindow(allocator) catch null) orelse
-        hypr.WindowGeometry{ .x = 0, .y = 0, .w = 0, .h = 0 };
-
-    const wx: f32 = @floatFromInt(win.x);
-    const wy: f32 = @floatFromInt(win.y);
-    const ww: f32 = @floatFromInt(win.w);
-    const wh: f32 = @floatFromInt(win.h);
-
+/// Query the visible-windows list and derive the focused window's geometry
+/// + metadata by looking up `focused_address` in the result. The address
+/// comes from the event stream (or a one-time bootstrap query at startup),
+/// so we no longer need separate `j/activewindow` and `j/cursorpos` calls
+/// here — caller handles those.
+///
+/// `win_address` in the result is 0 when the focused window is not present
+/// in the visible list (e.g. focus is on another monitor's workspace).
+fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h: f32, focused_address: u64) RawState {
     const visible = ipc.visibleWindows(allocator) catch hypr.VisibleWindows{};
     var windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var win_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
+    var focused_idx: ?usize = null;
+
     for (0..visible.count) |i| {
         const vw = visible.windows[i];
         windows[i] = .{
@@ -501,7 +569,6 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
             .h = @floatFromInt(vw.h),
             .address = vw.address,
         };
-        // Copy class/title metadata
         var info = effects.WindowInfo{};
         const clen: u8 = @intCast(@min(vw.class_len, 64));
         if (clen > 0) @memcpy(info.class[0..clen], vw.class[0..clen]);
@@ -510,24 +577,31 @@ fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h:
         if (tlen > 0) @memcpy(info.title[0..tlen], vw.title[0..tlen]);
         info.title_len = tlen;
         win_info[i] = info;
+
+        if (focused_address != 0 and vw.address == focused_address) {
+            focused_idx = i;
+        }
     }
 
-    // Focused window metadata
     var fc: [64]u8 = [_]u8{0} ** 64;
     var fc_len: u8 = 0;
     var ft: [64]u8 = [_]u8{0} ** 64;
     var ft_len: u8 = 0;
-    const fcl: u8 = @intCast(@min(win.class_len, 64));
-    if (fcl > 0) @memcpy(fc[0..fcl], win.class[0..fcl]);
-    fc_len = fcl;
-    const ftl: u8 = @intCast(@min(win.title_len, 64));
-    if (ftl > 0) @memcpy(ft[0..ftl], win.title[0..ftl]);
-    ft_len = ftl;
+    var win_rect = transition.Rect{};
+    var win_addr: u64 = 0;
+    if (focused_idx) |fi| {
+        const wf = windows[fi];
+        win_rect = .{ .x = wf.x, .y = wf.y, .w = wf.w, .h = wf.h };
+        win_addr = wf.address;
+        fc = win_info[fi].class;
+        fc_len = win_info[fi].class_len;
+        ft = win_info[fi].title;
+        ft_len = win_info[fi].title_len;
+    }
 
     return .{
-        .win = .{ .x = wx, .y = surf_h - (wy + wh), .w = ww, .h = wh },
-        .win_address = win.address,
-        .cursor = .{ @floatFromInt(cur.x), surf_h - @as(f32, @floatFromInt(cur.y)) },
+        .win = win_rect,
+        .win_address = win_addr,
         .windows = windows,
         .window_count = visible.count,
         .window_info = win_info,

@@ -7,6 +7,9 @@ const effects = @import("../../effects.zig");
 const sprite = @import("../buddy/sprite.zig");
 const ai_mod = @import("ai.zig");
 const events_mod = @import("events.zig");
+const physics = @import("physics.zig");
+const behaviors = @import("behaviors.zig");
+const ai_brain = @import("ai_brain.zig");
 
 const log = std.log.scoped(.ai_buddy);
 
@@ -17,17 +20,9 @@ const c = @cImport({
 
 const Anim = sprite.Anim;
 const Behavior = sprite.Behavior;
-const IDLE = sprite.IDLE;
-const WALK = sprite.WALK;
-const RUN = sprite.RUN;
+// Only the JUMP row is referenced here (advanceFrame freezes on jump while
+// airborne). The rest of the sprite anim aliases live in behaviors.zig.
 const JUMP = sprite.JUMP;
-const ATTACK1 = sprite.ATTACK1;
-const ATTACK2 = sprite.ATTACK2;
-const PUSH = sprite.PUSH;
-const THROW = sprite.THROW;
-const CLIMB = sprite.CLIMB;
-const HURT = sprite.HURT;
-const DEATH = sprite.DEATH;
 
 pub const Mood = enum(u8) {
     neutral = 0,
@@ -63,7 +58,7 @@ pub const EmoteParticle = struct {
 
 const max_emotes = 6;
 
-fn getLocalHour() u8 {
+pub fn getLocalHour() u8 {
     var t = c.time(null);
     const tm = c.localtime(&t);
     if (tm) |local| {
@@ -72,14 +67,14 @@ fn getLocalHour() u8 {
     return 12;
 }
 
-fn timePeriod(hour: u8) TimePeriod {
+pub fn timePeriod(hour: u8) TimePeriod {
     if (hour >= 6 and hour < 12) return .morning;
     if (hour >= 12 and hour < 18) return .afternoon;
     if (hour >= 18 and hour < 23) return .evening;
     return .night;
 }
 
-fn timePeriodName(p: TimePeriod) []const u8 {
+pub fn timePeriodName(p: TimePeriod) []const u8 {
     return switch (p) {
         .morning => "morning",
         .afternoon => "afternoon",
@@ -88,7 +83,7 @@ fn timePeriodName(p: TimePeriod) []const u8 {
     };
 }
 
-fn moodName(m: Mood) []const u8 {
+pub fn moodName(m: Mood) []const u8 {
     return switch (m) {
         .neutral => "neutral",
         .happy => "happy",
@@ -100,7 +95,7 @@ fn moodName(m: Mood) []const u8 {
     };
 }
 
-fn mapMood(name: []const u8) Mood {
+pub fn mapMood(name: []const u8) Mood {
     const moods = [_]struct { n: []const u8, m: Mood }{
         .{ .n = "happy", .m = .happy },
         .{ .n = "curious", .m = .curious },
@@ -116,7 +111,7 @@ fn mapMood(name: []const u8) Mood {
     return .neutral;
 }
 
-fn mapEmote(name: []const u8) EmoteType {
+pub fn mapEmote(name: []const u8) EmoteType {
     const emotes = [_]struct { n: []const u8, e: EmoteType }{
         .{ .n = "heart", .e = .heart },
         .{ .n = "star", .e = .star },
@@ -141,7 +136,7 @@ pub const Context = struct {
     screen_h: f32,
     scale: f32 = 2.0,
 
-    anim: Anim = IDLE,
+    anim: Anim = sprite.IDLE,
     frame: u8 = 0,
     frame_timer: f32 = 0,
     anim_done: bool = false,
@@ -276,7 +271,7 @@ pub const Context = struct {
         }
     }
 
-    fn spawnEmote(self: *Context, etype: EmoteType) void {
+    pub fn spawnEmote(self: *Context, etype: EmoteType) void {
         const rand = self.rng.random();
         for (&self.emotes) |*e| {
             if (e.life <= 0) {
@@ -305,284 +300,8 @@ pub const Context = struct {
         }
     }
 
-    fn callHaiku(self: *Context) void {
-        // Build event context
-        var context_buf: [512]u8 = undefined;
-        var pos: usize = 0;
 
-        const header = "Recent: ";
-        @memcpy(context_buf[pos..pos + header.len], header);
-        pos += header.len;
-
-        for (0..self.event_log.count) |i| {
-            const ev = self.event_log.events[i].slice();
-            if (pos + ev.len + 2 >= context_buf.len) break;
-            @memcpy(context_buf[pos..pos + ev.len], ev);
-            pos += ev.len;
-            context_buf[pos] = '.';
-            context_buf[pos + 1] = ' ';
-            pos += 2;
-        }
-
-        const context = context_buf[0..pos];
-
-        // Build spatial layout description (with window classes)
-        var layout_buf: [512]u8 = undefined;
-        const layout = events_mod.describeLayout(
-            self.x, self.y,
-            self.cached_windows[0..self.cached_window_count],
-            self.cached_focused,
-            &self.cached_window_classes,
-            &self.cached_window_class_lens,
-            self.cached_window_count,
-            &layout_buf,
-        );
-
-        const period = timePeriodName(timePeriod(self.current_hour));
-        const mood_str = moodName(self.mood);
-
-        // Focused window label
-        var focused_label_buf: [80]u8 = undefined;
-        const focused_label = if (self.cached_focused_class_len > 0)
-            std.fmt.bufPrint(&focused_label_buf, "{s}", .{self.cached_focused_class[0..self.cached_focused_class_len]}) catch "focused window"
-        else
-            "unknown";
-
-        var prompt_buf: [2560]u8 = undefined;
-        const prompt = std.fmt.bufPrint(&prompt_buf,
-            \\You are a tiny cute monster living on a desktop. It's {s} ({d}:00).
-            \\Your current mood: {s}
-            \\
-            \\Personality: Curious, adventurous, emotionally expressive.
-            \\- Explore windows you haven't visited. Jump and chase to reach them.
-            \\- Once you've explored 3+ windows, gravitate toward the focused window.
-            \\- On the focused window: relax, wave, push, celebrate, or be playful.
-            \\- React to your environment: get sleepy at night, excited by new windows, anxious near fast cursor.
-            \\- Express emotions through mood and emotes.
-            \\- NEVER repeat the same "say" text. Check "Recent" for what you already said and say something new each time.
-            \\- Vary your actions too — don't chain the same behavior repeatedly.
-            \\
-            \\{s}
-            \\{s}
-            \\
-            \\Standing on: {s}
-            \\Focused window: {s}
-            \\Explored: {d} windows
-            \\On focused window: {s}
-            \\
-            \\Respond JSON only: {{"actions":[{{"action":"<act>","direction":"left"|"right"}}],"say":"WORDS","mood":"<mood>","emote":"<emote>"}}
-            \\Actions (1-4): idle, wander, chase, jump, wave, push, throw, trip, death, climb, celebrate
-            \\"say": 1-3 word uppercase speech bubble (max 16 chars)
-            \\"mood": neutral, happy, curious, sleepy, bored, excited, anxious
-            \\"emote" (optional): heart, star, zzz, exclaim, music, question
-        , .{
-            period,
-            self.current_hour,
-            mood_str,
-            layout,
-            context,
-            if (self.current_window_len > 0) self.current_window[0..self.current_window_len] else "ground",
-            focused_label,
-            self.windows_visited,
-            blk: {
-                const on_focused = self.grounded and self.cached_focused.w > 0 and
-                    self.x > self.cached_focused.x and
-                    self.x < self.cached_focused.x + self.cached_focused.w and
-                    @abs(self.y - (self.cached_focused.y + self.cached_focused.h)) < 5;
-                break :blk if (on_focused) "yes" else "no";
-            },
-        }) catch return;
-
-        // Escape prompt for JSON embedding
-        var escaped_prompt: [2048]u8 = undefined;
-        var ep: usize = 0;
-        for (prompt) |ch| {
-            if (ep + 2 >= escaped_prompt.len) break;
-            if (ch == '"') {
-                escaped_prompt[ep] = '\\';
-                ep += 1;
-                escaped_prompt[ep] = '"';
-                ep += 1;
-            } else if (ch == '\n') {
-                escaped_prompt[ep] = '\\';
-                ep += 1;
-                escaped_prompt[ep] = 'n';
-                ep += 1;
-            } else if (ch == '\\') {
-                escaped_prompt[ep] = '\\';
-                ep += 1;
-                escaped_prompt[ep] = '\\';
-                ep += 1;
-            } else {
-                escaped_prompt[ep] = ch;
-                ep += 1;
-            }
-        }
-
-        var body_buf: [4096]u8 = undefined;
-        const body = std.fmt.bufPrint(&body_buf,
-            \\{{"anthropic_version":"bedrock-2023-05-31","max_tokens":100,"messages":[{{"role":"user","content":"{s}"}}]}}
-        , .{escaped_prompt[0..ep]}) catch return;
-
-        // Write body to temp file
-        const tmp_path = "/tmp/hyprglaze-ai-request.json";
-        const tmp_file = std.fs.createFileAbsolute(tmp_path, .{}) catch return;
-        tmp_file.writeAll(body) catch { tmp_file.close(); return; };
-        tmp_file.close();
-
-        // Shell out to AWS CLI (non-blocking via fork)
-        const argv = [_][]const u8{
-            "/bin/sh", "-c",
-            "export $(cat ~/.config/hypr/hyprglaze-aws.env | xargs) && " ++
-            "aws bedrock-runtime invoke-model --region us-east-1 " ++
-            "--model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 " ++
-            "--content-type application/json " ++
-            "--body file:///tmp/hyprglaze-ai-request.json " ++
-            "/tmp/hyprglaze-ai-response.json 2>/tmp/hyprglaze-ai-err 1>/dev/null && " ++
-            "touch /tmp/hyprglaze-ai-done",
-        };
-
-        std.fs.deleteFileAbsolute("/tmp/hyprglaze-ai-done") catch {};
-
-        log.debug("AI > standing={s} focused={s} visited={d} mood={s} time={s}({d}:00)", .{
-            if (self.current_window_len > 0) self.current_window[0..self.current_window_len] else "ground",
-            if (self.cached_focused_class_len > 0) self.cached_focused_class[0..self.cached_focused_class_len] else "none",
-            self.windows_visited,
-            moodName(self.mood),
-            timePeriodName(timePeriod(self.current_hour)),
-            self.current_hour,
-        });
-
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.spawn() catch |err| {
-            log.warn("AI spawn failed: {}", .{err});
-            return;
-        };
-        self.ai_pending = true;
-        self.ai_pending_timer = 0;
-    }
-
-    fn checkAiResponse(self: *Context) void {
-        std.fs.accessAbsolute("/tmp/hyprglaze-ai-done", .{}) catch return;
-
-        const file = std.fs.openFileAbsolute("/tmp/hyprglaze-ai-response.json", .{}) catch return;
-        defer file.close();
-
-        var resp_buf: [4096]u8 = undefined;
-        const resp_len = file.readAll(&resp_buf) catch return;
-        const resp = resp_buf[0..resp_len];
-
-        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp, .{}) catch return;
-        defer parsed.deinit();
-
-        const content = parsed.value.object.get("content") orelse return;
-        const text = content.array.items[0].object.get("text") orelse return;
-        if (text != .string) return;
-
-        // Strip markdown code blocks
-        var ai_text = text.string;
-        if (std.mem.indexOf(u8, ai_text, "{")) |start| {
-            if (std.mem.lastIndexOf(u8, ai_text, "}")) |end| {
-                ai_text = ai_text[start .. end + 1];
-            }
-        }
-
-        const ai_resp = std.json.parseFromSlice(std.json.Value, self.allocator, ai_text, .{}) catch return;
-        defer ai_resp.deinit();
-
-        // Parse action chain or single action
-        self.queue_len = 0;
-        self.queue_pos = 0;
-
-        if (ai_resp.value.object.get("actions")) |av| {
-            if (av == .array) {
-                for (av.array.items) |item| {
-                    if (self.queue_len >= 8) break;
-                    if (item != .object) continue;
-                    self.parseOneAction(item.object);
-                }
-            }
-        } else {
-            self.parseOneAction(ai_resp.value.object);
-        }
-
-        // Extract speech bubble text
-        if (ai_resp.value.object.get("say")) |say_val| {
-            if (say_val == .string) {
-                const say = say_val.string;
-                const slen: u8 = @intCast(@min(say.len, 20));
-                @memcpy(self.bubble_text[0..slen], say[0..slen]);
-                self.bubble_len = slen;
-                self.bubble_timer = self.bubble_duration;
-            }
-        }
-
-        // Extract mood
-        if (ai_resp.value.object.get("mood")) |mood_val| {
-            if (mood_val == .string) {
-                self.mood = mapMood(mood_val.string);
-                self.mood_intensity = 0.9;
-                self.mood_timer = 0;
-            }
-        }
-
-        // Extract emote
-        if (ai_resp.value.object.get("emote")) |emote_val| {
-            if (emote_val == .string) {
-                const etype = mapEmote(emote_val.string);
-                if (etype != .none) self.spawnEmote(etype);
-            }
-        }
-
-        // Start first action and log the chain
-        if (self.queue_len > 0) {
-            self.popNextAction();
-            var log_buf: [128]u8 = undefined;
-            var lp: usize = 0;
-            for (0..self.queue_len) |qi| {
-                const name = ai_mod.actionName(self.action_queue[qi].behavior);
-                if (lp + name.len + 2 >= log_buf.len) break;
-                if (qi > 0) { log_buf[lp] = '>'; lp += 1; }
-                @memcpy(log_buf[lp..lp + name.len], name);
-                lp += name.len;
-            }
-            log.debug("AI < actions={s} mood={s} say=\"{s}\" emote={s}", .{
-                log_buf[0..lp],
-                moodName(self.mood),
-                if (self.bubble_len > 0) self.bubble_text[0..self.bubble_len] else "",
-                if (ai_resp.value.object.get("emote")) |ev| (if (ev == .string) ev.string else "none") else "none",
-            });
-            self.event_log.log("plan: {s}", .{log_buf[0..lp]});
-            if (self.bubble_len > 0) {
-                self.event_log.log("said \"{s}\"", .{self.bubble_text[0..self.bubble_len]});
-            }
-        }
-
-        self.ai_pending = false;
-        std.fs.deleteFileAbsolute("/tmp/hyprglaze-ai-done") catch {};
-        std.fs.deleteFileAbsolute("/tmp/hyprglaze-ai-request.json") catch {};
-    }
-
-    fn parseOneAction(self: *Context, obj: std.json.ObjectMap) void {
-        const act_val = obj.get("action") orelse return;
-        if (act_val != .string) return;
-        const mapped = ai_mod.mapAction(act_val.string) orelse return;
-
-        const dir_val = obj.get("direction");
-        const dir: f32 = if (dir_val) |d|
-            (if (d == .string and std.mem.eql(u8, d.string, "left")) @as(f32, -1.0) else 1.0)
-        else
-            1.0;
-
-        self.action_queue[self.queue_len] = .{
-            .behavior = mapped.behavior,
-            .duration = mapped.duration,
-            .dir = dir,
-        };
-        self.queue_len += 1;
-    }
-
-    fn popNextAction(self: *Context) void {
+    pub fn popNextAction(self: *Context) void {
         if (self.queue_pos < self.queue_len) {
             const qa = self.action_queue[self.queue_pos];
             self.setBehavior(qa.behavior, qa.duration);
@@ -591,7 +310,7 @@ pub const Context = struct {
         }
     }
 
-    fn setBehavior(self: *Context, b: Behavior, duration: f32) void {
+    pub fn setBehavior(self: *Context, b: Behavior, duration: f32) void {
         self.behavior = b;
         self.behavior_timer = 0;
         self.behavior_duration = duration;
@@ -602,7 +321,6 @@ pub const Context = struct {
 
     pub fn update(self: *Context, state: effects.FrameState) void {
         const dt = @min(state.dt, 0.05);
-        const gravity: f32 = 900.0;
         const rand = self.rng.random();
 
         // --- Cursor tracking ---
@@ -699,33 +417,11 @@ pub const Context = struct {
             }
         }
 
-        // --- Rate limiting ---
-        self.ai_timer += dt;
+        // Speech bubble timer (UI, not AI rate-limit).
         if (self.bubble_timer > 0) self.bubble_timer -= dt;
-        self.minute_timer += dt;
-        if (self.minute_timer >= 60.0) {
-            self.minute_timer = 0;
-            self.calls_this_minute = 0;
-        }
 
-        // --- AI decision making ---
-        if (self.ai_pending) {
-            self.ai_pending_timer += dt;
-            if (self.ai_pending_timer > 10.0) {
-                log.warn("AI ! timeout after {d:.1}s, falling back to wander", .{self.ai_pending_timer});
-                self.ai_pending = false;
-                self.ai_pending_timer = 0;
-                self.setBehavior(.wander, 3.0);
-            }
-            self.checkAiResponse();
-        } else if (self.ai_timer >= self.ai_cooldown and
-            self.behavior_timer >= self.behavior_duration * 0.8 and
-            self.calls_this_minute < self.max_calls_per_minute)
-        {
-            self.ai_timer = 0;
-            self.calls_this_minute += 1;
-            self.callHaiku();
-        }
+        // AI rate-limit + decision driver.
+        ai_brain.tick(self, dt);
 
         // --- Immediate cursor reactions (override AI) ---
         if (self.grounded and !self.climbing and cursor_dist < 120 and
@@ -801,267 +497,15 @@ pub const Context = struct {
             }
         }
 
-        // --- Execute behavior ---
-
-        // Wall climb overrides everything
-        if (self.climbing) {
-            self.setAnim(CLIMB);
-            self.vy = self.climb_speed;
-            self.vx = 0;
-            self.x = self.climb_wall_x;
-            self.grounded = false;
-            self.facing_right = self.climb_wall_x > self.x - 1;
-            // Reached the top?
-            if (self.y >= self.climb_target_y) {
-                self.y = self.climb_target_y;
-                self.vy = 0;
-                self.grounded = true;
-                self.climbing = false;
-                self.landed_on_new = true;
-                self.failed_jumps = 0;
-                self.setBehavior(.idle, 0.5);
-                self.event_log.log("climbed up", .{});
-                log.debug("AI ~ reached top", .{});
-            }
-        } else {
-        self.vy -= gravity * dt;
-
-        switch (self.behavior) {
-            .idle => {
-                self.vx *= 0.9;
-                self.idle_time += dt;
-                self.setAnim(IDLE);
-            },
-            .wander => {
-                if (self.grounded) {
-                    const target_vx = self.wander_dir * self.walk_speed;
-                    self.vx += (target_vx - self.vx) * 5.0 * dt;
-                }
-                self.facing_right = self.wander_dir > 0;
-                self.setAnim(WALK);
-                if (self.x < 50 or self.x > self.screen_w - 50) self.wander_dir = -self.wander_dir;
-            },
-            .chase => {
-                if (has_target and self.grounded) {
-                    const target_x = fw.x + fw.w * 0.5;
-                    const target_top = fw.y + fw.h;
-                    const dx = target_x - self.x;
-                    const dy = target_top - self.y;
-
-                    // Arrived: horizontally close AND on the same vertical level
-                    if (@abs(dx) < 30 and @abs(dy) < 10) {
-                        self.failed_jumps = 0;
-                        self.setBehavior(.idle, 1.0);
-                    } else if (dy > 200 or (dy > 30 and self.failed_jumps >= 2)) {
-                        // Target is too high to jump (or jump failed twice) — climb
-                        const dist_left = @abs(self.x - fw.x);
-                        const dist_right = @abs(self.x - (fw.x + fw.w));
-                        const wall_x = if (dist_left < dist_right) fw.x else fw.x + fw.w;
-                        const wall_dist = @abs(self.x - wall_x);
-
-                        if (wall_dist < 10) {
-                            // At the wall — latch and climb
-                            self.climbing = true;
-                            self.climb_wall_x = wall_x;
-                            self.climb_target_y = fw.y + fw.h;
-                            self.setBehavior(.climb, 15.0);
-                            log.debug("AI ~ climbing wall", .{});
-                        } else {
-                            // Run toward the wall
-                            self.facing_right = wall_x > self.x;
-                            const dir: f32 = if (wall_x > self.x) 1.0 else -1.0;
-                            const target_vx = dir * self.run_speed;
-                            self.vx += (target_vx - self.vx) * 5.0 * dt;
-                            self.setAnim(RUN);
-                        }
-                    } else if (dy > 30 and self.jump_cooldown <= 0) {
-                        // Target is above — jump
-                        self.failed_jumps +|= 1;
-                        self.setBehavior(.jump_to, 2.0);
-                    } else if (dy < -30) {
-                        // Target is below — drop through current platform
-                        self.dropping = true;
-                        self.drop_platform_y = self.y;
-                        log.debug("AI ~ dropping through platform", .{});
-                        self.grounded = false;
-                        self.vy = -50.0; // small downward kick
-                        // Drift toward target horizontally while falling
-                        self.vx = std.math.clamp(dx * 0.3, -100, 100);
-                        self.setAnim(JUMP);
-                    } else {
-                        // Same height — run toward target
-                        self.facing_right = dx > 0;
-                        const dir: f32 = if (dx > 0) 1.0 else -1.0;
-                        const use_run = @abs(dx) > 200;
-                        const target_vx = dir * (if (use_run) self.run_speed else self.walk_speed);
-                        self.vx += (target_vx - self.vx) * 5.0 * dt;
-                        self.setAnim(if (use_run) RUN else WALK);
-                    }
-                }
-            },
-            .jump_to => {
-                if (self.grounded and self.jump_cooldown <= 0 and has_target) {
-                    const target_top = fw.y + fw.h;
-                    const height_diff = target_top - self.y;
-                    // Only jump if target is above or roughly level
-                    if (height_diff > -20) {
-                        const jump_h = @max(height_diff + 80.0, 120.0);
-                        self.vy = @sqrt(2.0 * gravity * @min(jump_h, 600.0));
-                        self.grounded = false;
-                        self.jump_cooldown = 0.8;
-                        // Strong horizontal push toward target
-                        const dx = (fw.x + fw.w * 0.5) - self.x;
-                        self.vx = std.math.clamp(dx * 0.8, -250, 250);
-                    } else {
-                        // Target is below — don't jump up, switch to chase (will drop)
-                        self.setBehavior(.chase, 3.0);
-                    }
-                }
-                if (!self.grounded) {
-                    self.setAnim(JUMP);
-                    self.setJumpFrame();
-                } else {
-                    self.setBehavior(.idle, 0.5);
-                }
-            },
-            .wave => { self.vx *= 0.9; self.setAnim(ATTACK1); },
-            .celebrate => { self.vx *= 0.9; self.setAnim(ATTACK2); },
-            .push => {
-                self.setAnim(PUSH);
-                if (has_target) {
-                    const dl = @abs(self.x - fw.x);
-                    const dr = @abs(self.x - (fw.x + fw.w));
-                    if (dl < dr) { self.vx -= 30.0 * dt; self.facing_right = false; }
-                    else { self.vx += 30.0 * dt; self.facing_right = true; }
-                }
-            },
-            .throw_rock => {
-                self.vx *= 0.9;
-                self.facing_right = state.cursor[0] > self.x;
-                self.setAnim(THROW);
-            },
-            .trip => { self.vx *= 0.95; self.setAnim(HURT); },
-            .dramatic_death => {
-                self.vx *= 0.95;
-                self.setAnim(DEATH);
-                if (self.anim_done) {
-                    self.x = self.screen_w * 0.5;
-                    self.y = self.screen_h;
-                    self.vx = 0;
-                    self.vy = 0;
-                    self.setBehavior(.idle, 1.0);
-                    self.event_log.log("respawned", .{});
-                }
-            },
-            .climb => {
-                // Wall climb handled above the switch; this is a fallback
-                if (!self.climbing) self.setBehavior(.idle, 0.5);
-            },
-            .curious => {
-                self.facing_right = state.cursor[0] > self.x;
-                const cdx = state.cursor[0] - self.x;
-                if (@abs(cdx) > 40) {
-                    const dir: f32 = if (cdx > 0) 1.0 else -1.0;
-                    self.vx += (dir * self.walk_speed - self.vx) * 5.0 * dt;
-                    self.setAnim(WALK);
-                } else { self.vx *= 0.85; self.setAnim(ATTACK1); }
-            },
-            .flee => {
-                self.facing_right = self.wander_dir > 0;
-                const target_vx = self.wander_dir * self.run_speed;
-                self.vx += (target_vx - self.vx) * 8.0 * dt;
-                self.setAnim(RUN);
-            },
-        }
-        } // end else (not climbing)
-
-        // Air control — gentle steering toward target while airborne
-        if (!self.grounded and !self.climbing and has_target) {
-            const target_x = fw.x + fw.w * 0.5;
-            const air_dx = target_x - self.x;
-            self.vx += std.math.clamp(air_dx * 0.5, -80, 80) * dt;
-        }
-
-        // Face direction of movement (not while climbing)
-        if (!self.climbing and @abs(self.vx) > 5.0) {
-            self.facing_right = self.vx > 0;
-        }
-
-        // Friction + clamp
-        if (self.grounded) self.vx *= 0.92;
-        self.vx = std.math.clamp(self.vx, -self.run_speed * 1.5, self.run_speed * 1.5);
-
-        // Integrate
-        self.x += self.vx * dt;
-        self.y += self.vy * dt;
-
-        // --- Collisions ---
-        const was_grounded = self.grounded;
-        self.grounded = false;
-        if (!was_grounded) self.airborne_time += dt;
-
-        if (self.y <= 0) {
-            self.y = 0;
-            self.vy = 0;
-            self.grounded = true;
-            if (!was_grounded and self.airborne_time > 0.15) {
-                self.landed_on_new = true;
-                self.current_window_len = 0;
-            }
-            self.airborne_time = 0;
-        }
-
-        // Clear drop state once we've fallen well below the platform
-        if (self.dropping and self.y < self.drop_platform_y - 30) {
-            self.dropping = false;
-        }
-
-        // Track which window we're on (skip collisions while climbing)
-        if (!self.climbing) {
-        for (state.windows, 0..) |win, wi| {
-            if (win.w < 1) continue;
-            const wt = win.y + win.h;
-            if (self.x < win.x - 5 or self.x > win.x + win.w + 5) continue;
-
-            // Skip platform we're dropping through
-            if (self.dropping and @abs(wt - self.drop_platform_y) < 10) continue;
-
-            if (self.vy <= 0 and self.y <= wt and self.y > wt - 20) {
-                self.y = wt;
-                self.vy = 0;
-                self.dropping = false;
-                if (!self.grounded and self.airborne_time > 0.15) {
-                    self.landed_on_new = true;
-                    self.airborne_time = 0;
-                    // Identify window by class name from cached metadata
-                    if (wi < self.cached_window_count) {
-                        const clen = self.cached_window_class_lens[wi];
-                        if (clen > 0) {
-                            const copy_len = @min(clen, 64);
-                            @memcpy(self.current_window[0..copy_len], self.cached_window_classes[wi][0..copy_len]);
-                            self.current_window_len = copy_len;
-                        } else {
-                            const label = "window";
-                            @memcpy(self.current_window[0..label.len], label);
-                            self.current_window_len = label.len;
-                        }
-                    }
-                }
-                self.grounded = true;
-            }
-        }
-        } // end if (!self.climbing)
-
-        // Screen edges
-        if (self.x < 20) { self.x = 20; self.vx = 0; }
-        if (self.x > self.screen_w - 20) { self.x = self.screen_w - 20; self.vx = 0; }
-        if (self.y > self.screen_h) { self.y = self.screen_h; self.vy = 0; }
+        // --- Execute behavior + physics ---
+        behaviors.execute(self, state, dt);
+        physics.step(self, state, dt);
 
         // --- Animate ---
         self.advanceFrame(dt);
     }
 
-    fn setAnim(self: *Context, anim: Anim) void {
+    pub fn setAnim(self: *Context, anim: Anim) void {
         if (self.anim.row != anim.row) {
             self.anim = anim;
             self.frame = 0;
@@ -1070,7 +514,7 @@ pub const Context = struct {
         }
     }
 
-    fn setJumpFrame(self: *Context) void {
+    pub fn setJumpFrame(self: *Context) void {
         if (self.vy > 100) { self.frame = 0; }
         else if (self.vy > 50) { self.frame = 1; }
         else if (self.vy > 0) { self.frame = 2; }
