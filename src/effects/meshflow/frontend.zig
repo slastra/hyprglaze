@@ -213,6 +213,16 @@ pub inline fn logCompress(buf: []f32) void {
     for (buf) |*x| x.* = @log(1.0 + x.*);
 }
 
+/// Build a Hann window in `buf`. Shared by every STFT consumer in the codebase.
+pub fn fillHann(buf: []f32) void {
+    if (buf.len <= 1) return;
+    const inv_nm1: f32 = 1.0 / @as(f32, @floatFromInt(buf.len - 1));
+    for (buf, 0..) |*x, i| {
+        const phase: f32 = 2.0 * std.math.pi * @as(f32, @floatFromInt(i)) * inv_nm1;
+        x.* = 0.5 - 0.5 * @cos(phase);
+    }
+}
+
 /// First-order positive difference: out[i] = max(0, cur[i] - prev[i]).
 pub fn positiveDiff(cur: []const f32, prev: []const f32, out: []f32) void {
     std.debug.assert(cur.len == prev.len and prev.len == out.len);

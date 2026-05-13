@@ -1,12 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
-
-// Zig 0.16 removed std.posix.{socket,connect,close} (Io rework). The libc
-// symbols are still linked; declare slim externs here rather than wrestle
-// raw syscall return values.
-extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
-extern "c" fn connect(fd: c_int, addr: *const anyopaque, addrlen: u32) c_int;
-extern "c" fn close(fd: c_int) c_int;
+const libc = @import("io_helper.zig").libc;
 
 pub const CursorPos = struct {
     x: i32,
@@ -81,12 +75,12 @@ pub const HyprIpc = struct {
         @memset(&addr.path, 0);
         @memcpy(addr.path[0..self.socket_path_len], self.socket_path[0..self.socket_path_len]);
 
-        const sock_rc = socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+        const sock_rc = libc.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
         if (sock_rc < 0) return error.SocketCreateFailed;
         const sock: i32 = sock_rc;
-        defer _ = close(sock);
+        defer _ = libc.close(sock);
 
-        if (connect(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) < 0) {
+        if (libc.connect(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) < 0) {
             return error.SocketConnectFailed;
         }
         if (std.c.write(sock, command.ptr, command.len) < 0) return error.SocketWriteFailed;

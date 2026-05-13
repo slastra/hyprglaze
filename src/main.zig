@@ -768,9 +768,8 @@ const CliFlags = struct {
     fps: bool = false,
 };
 
-/// Minimal in-tree CLI parser. Replaces the upstream `flags` package which
-/// broke on Zig 0.16 (uses removed std.Io.tty / std.fs.File APIs). Supports
-/// `--key value`, `--key=value`, and bool flags. Unknown args → error.
+/// Minimal in-tree CLI parser. Supports `--key value`, `--key=value`, and
+/// bool flags. Unknown args → error.
 fn parseCli(allocator: std.mem.Allocator, raw_argv: []const [*:0]const u8) !CliArgs {
     var out = CliArgs{};
 

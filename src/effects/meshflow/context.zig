@@ -24,23 +24,30 @@ const c = @cImport({
 pub const Context = struct {
     audio: *audio_mod.AudioCapture,
     rhythm: rhythm_mod.RhythmEngine,
-    beatnet: *beatnet_mod.BeatNet,
+    beatnet: ?*beatnet_mod.BeatNet,
     state: rhythm_mod.RhythmState = .{},
     intensity: f32 = 1.0,
-    use_beatnet: bool = true,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
+        const use_beatnet = params.getBool("use_beatnet", true);
+
         const audio = try allocator.create(audio_mod.AudioCapture);
         errdefer allocator.destroy(audio);
         audio.* = audio_mod.AudioCapture.init(sink);
         audio.start();
 
-        const beatnet = try allocator.create(beatnet_mod.BeatNet);
-        errdefer allocator.destroy(beatnet);
-        beatnet.* = beatnet_mod.BeatNet.init(sink);
-        beatnet.start();
+        // Only spawn the BeatNet audio thread + 22 kHz PulseAudio stream when
+        // the locked beat clock is actually wanted.
+        var beatnet: ?*beatnet_mod.BeatNet = null;
+        if (use_beatnet) {
+            const bn = try allocator.create(beatnet_mod.BeatNet);
+            errdefer allocator.destroy(bn);
+            bn.* = beatnet_mod.BeatNet.init(sink);
+            bn.start();
+            beatnet = bn;
+        }
 
         const rhythm = try rhythm_mod.RhythmEngine.init(allocator);
         return .{
@@ -48,7 +55,6 @@ pub const Context = struct {
             .beatnet = beatnet,
             .rhythm = rhythm,
             .intensity = params.getFloat("intensity", 1.0),
-            .use_beatnet = params.getBool("use_beatnet", true),
             .allocator = allocator,
         };
     }
@@ -59,8 +65,8 @@ pub const Context = struct {
         // When BeatNet is locked, override the cheap layer's free-running
         // beat clock with its tempo-locked phase. Bands & onsets keep coming
         // from the cheap layer (lower latency, frame-accurate reactivity).
-        if (self.use_beatnet) {
-            const bn = self.beatnet.getState();
+        if (self.beatnet) |bn_ptr| {
+            const bn = bn_ptr.getState();
             if (bn.locked) {
                 self.state.beat_phase = bn.beat_phase;
                 self.state.down_phase = bn.down_phase;
@@ -100,9 +106,11 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         self.audio.stop();
-        self.beatnet.stop();
-        self.rhythm.deinit();
         self.allocator.destroy(self.audio);
-        self.allocator.destroy(self.beatnet);
+        if (self.beatnet) |bn| {
+            bn.stop();
+            self.allocator.destroy(bn);
+        }
+        self.rhythm.deinit();
     }
 };

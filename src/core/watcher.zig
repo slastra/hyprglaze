@@ -1,10 +1,10 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const libc = @import("io_helper.zig").libc;
 
-extern "c" fn close(fd: c_int) c_int;
 fn closeFd(fd: i32) void {
-    _ = close(fd);
+    _ = libc.close(fd);
 }
 
 fn inotifyInit1(flags: u32) !i32 {

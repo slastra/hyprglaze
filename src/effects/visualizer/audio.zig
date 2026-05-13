@@ -1,4 +1,5 @@
 const std = @import("std");
+const iohelp = @import("../../core/io_helper.zig");
 
 const c = @cImport({
     @cInclude("pulse/simple.h");
@@ -31,7 +32,10 @@ pub const AudioCapture = struct {
             const monitor = std.fmt.bufPrint(&self.source, "{s}.monitor", .{name}) catch "";
             self.source_len = @intCast(monitor.len);
         } else {
-            self.source_len = autoDetectMonitor(&self.source);
+            self.source_len = iohelp.autoDetectPulseMonitor(&self.source);
+            if (self.source_len > 0) {
+                log.info("auto-detected monitor: {s}", .{self.source[0..self.source_len]});
+            }
         }
         return self;
     }
@@ -85,7 +89,7 @@ pub const AudioCapture = struct {
                 source_z, "visualizer", &ss, null, &ba, &err,
             ) orelse {
                 log.warn("PulseAudio connect failed: {s} — retry in 2s", .{c.pa_strerror(err)});
-                _ = nanosleep(&.{ .sec = 2, .nsec = 0 }, null);
+                iohelp.sleepNs(2 * std.time.ns_per_s);
                 continue :outer;
             };
 
@@ -126,33 +130,3 @@ pub const AudioCapture = struct {
     }
 };
 
-// libc popen/pclose — std.process.Child.init was removed in Zig 0.16 and the
-// replacement async-Io spawn() is overkill for one-shot synchronous capture.
-extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
-extern "c" fn pclose(stream: *anyopaque) c_int;
-extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
-const Timespec = extern struct { sec: i64, nsec: i64 };
-extern "c" fn nanosleep(req: *const Timespec, rem: ?*Timespec) c_int;
-
-fn autoDetectMonitor(buf: *[256]u8) u16 {
-    const stream = popen("pactl get-default-sink 2>/dev/null", "r") orelse return 0;
-    defer _ = pclose(stream);
-
-    var read_buf: [200]u8 = undefined;
-    const n = fread(@ptrCast(&read_buf), 1, read_buf.len, stream);
-    if (n == 0) return 0;
-
-    // Strip trailing whitespace
-    var len = n;
-    while (len > 0 and (read_buf[len - 1] == '\n' or read_buf[len - 1] == '\r')) len -= 1;
-    if (len == 0) return 0;
-
-    const suffix = ".monitor";
-    if (len + suffix.len >= buf.len) return 0;
-
-    @memcpy(buf[0..len], read_buf[0..len]);
-    @memcpy(buf[len .. len + suffix.len], suffix);
-    const total: u16 = @intCast(len + suffix.len);
-    log.info("auto-detected monitor: {s}", .{buf[0..total]});
-    return total;
-}

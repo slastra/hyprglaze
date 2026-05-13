@@ -44,13 +44,13 @@ int anchorBand(int cls) {
     return 5;               // air
 }
 
-// Rotate an RGB color around the gray axis by `angle` radians.
-// Lifted from the well-known "hue rotation matrix" identity.
-vec3 rotateHue(vec3 c, float angle) {
+// Rotate an RGB color around the gray axis. `ca` = cos(angle), `sa` = sin(angle).
+// Caller is expected to hoist cos/sin out of inner loops (the angle is uniform-
+// constant across all anchors of a frame, so we'd waste 50 transcendentals per
+// fragment otherwise).
+vec3 rotateHue(vec3 c, float ca, float sa) {
     const float k = 0.57735026; // 1/sqrt(3)
     const vec3 axis = vec3(k, k, k);
-    float ca = cos(angle);
-    float sa = sin(angle);
     return c * ca + cross(axis, c) * sa + axis * dot(axis, c) * (1.0 - ca);
 }
 
@@ -68,6 +68,9 @@ void main() {
 
     // Downbeat hue offset, ±15° (≈0.26 rad) so the palette feels alive but recognizable.
     float hue_offset = 0.26 * sin(6.2831853 * iDownPhase);
+    // Precompute the rotation cos/sin once per fragment instead of 25× inside the anchor loop.
+    float hue_ca = cos(hue_offset);
+    float hue_sa = sin(hue_offset);
 
     // Center anchor gets sub-bass + bass piled on for the "kick bloom" feel.
     float center_kick = iBands[0] + iBands[1] + 0.5 * (iOnsets[0] + iOnsets[1]);
@@ -137,7 +140,7 @@ void main() {
             float w = exp(-d * d / (sigma * sigma));
 
             vec3 anchor_col = paletteColor(idx);
-            anchor_col = rotateHue(anchor_col, hue_offset);
+            anchor_col = rotateHue(anchor_col, hue_ca, hue_sa);
 
             // Strength is purely activity-driven: silent → 0 contribution.
             float strength = 0.35 * env + 0.9 * onset;

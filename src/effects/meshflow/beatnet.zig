@@ -1,6 +1,8 @@
 const std = @import("std");
 const fft_mod = @import("fft.zig");
 const crnn_mod = @import("crnn.zig");
+const frontend_mod = @import("frontend.zig");
+const iohelp = @import("../../core/io_helper.zig");
 
 const c = @cImport({
     @cInclude("pulse/simple.h");
@@ -27,93 +29,30 @@ const frames_per_read: usize = hop_length;
 ///   i32 start_bin, i32 stop_bin, f32 weights[stop-start].
 const filterbank_blob = @embedFile("weights/filterbank.bin");
 
-const FilterBank = struct {
-    n_filters: usize,
-    n_bins: usize,
-    starts: [n_filters]u32,
-    stops: [n_filters]u32,
-    weight_offsets: [n_filters + 1]u32,
-    weights: []const f32, // points into the embedded blob
-
-    fn parse() FilterBank {
-        const aligned: [*]align(@alignOf(i32)) const u8 = @alignCast(@ptrCast(filterbank_blob.ptr));
-        const i32_view = std.mem.bytesAsSlice(i32, aligned[0..filterbank_blob.len]);
-        const nf: usize = @intCast(i32_view[0]);
-        const nb: usize = @intCast(i32_view[1]);
-        std.debug.assert(nf == n_filters);
-
-        var fb: FilterBank = .{
-            .n_filters = nf,
-            .n_bins = nb,
-            .starts = undefined,
-            .stops = undefined,
-            .weight_offsets = undefined,
-            .weights = &.{},
-        };
-
-        // Walk through, accumulating weight offsets.
-        var byte_off: usize = @sizeOf(i32) * 2;
-        var weight_total: u32 = 0;
-        for (0..nf) |i| {
-            const start_i32 = @as(*align(1) const i32, @ptrCast(filterbank_blob.ptr + byte_off));
-            const stop_i32 = @as(*align(1) const i32, @ptrCast(filterbank_blob.ptr + byte_off + @sizeOf(i32)));
-            fb.starts[i] = @intCast(start_i32.*);
-            fb.stops[i] = @intCast(stop_i32.*);
-            fb.weight_offsets[i] = weight_total;
-            const w_count: u32 = @intCast(stop_i32.* - start_i32.*);
-            weight_total += w_count;
-            byte_off += @sizeOf(i32) * 2 + w_count * @sizeOf(f32);
-        }
-        fb.weight_offsets[nf] = weight_total;
-
-        // Collect filter weights into a contiguous slice for fast access.
-        // They were stored interleaved with the per-filter headers; we rebuild
-        // a flat view by walking again.
-        const flat = collectFlatWeights(weight_total) catch unreachable;
-        fb.weights = flat;
-        return fb;
-    }
-
-    fn collectFlatWeights(comptime total: u32) ![]const f32 {
-        // Static-allocated flat array; populated once at comptime evaluation.
-        // We can't actually do this at comptime because the file content is
-        // runtime data, so do it at first call instead via a lazy initializer
-        // pattern using a static buffer.
-        _ = total;
-        return error.Unused; // see runtime path below
-    }
-};
-
-// Runtime-built flat weight buffer (alternative to comptime).
+// Flat copy of filter weights, indexed by [starts[i] .. stops[i]] ranges via
+// weight_offsets. Lives in BSS because the embedded blob has unaligned f32s
+// mixed with i32 headers — building a contiguous f32 view avoids alignment
+// hazards in the inner loop.
+var fb_starts: [n_filters]u32 = undefined;
+var fb_stops: [n_filters]u32 = undefined;
+var fb_weight_offsets: [n_filters + 1]u32 = undefined;
 var fb_weights_storage: [16384]f32 = undefined;
-var fb_runtime: FilterBank = undefined;
-var fb_initialized = false;
+var fb_weights_len: usize = 0;
 
-fn ensureFilterbankReady() void {
-    if (fb_initialized) return;
-
-    const aligned: [*]align(@alignOf(i32)) const u8 = @alignCast(@ptrCast(filterbank_blob.ptr));
-    const i32_view = std.mem.bytesAsSlice(i32, aligned[0..filterbank_blob.len]);
-    const nf: usize = @intCast(i32_view[0]);
-    const nb: usize = @intCast(i32_view[1]);
-    std.debug.assert(nf == n_filters);
-
-    fb_runtime.n_filters = nf;
-    fb_runtime.n_bins = nb;
-
-    var byte_off: usize = @sizeOf(i32) * 2;
+fn parseFilterbank() void {
+    var byte_off: usize = @sizeOf(i32) * 2; // skip n_filters + n_bins header
     var weight_total: u32 = 0;
-    for (0..nf) |i| {
+    for (0..n_filters) |i| {
         const start_ptr: *align(1) const i32 = @ptrCast(filterbank_blob.ptr + byte_off);
         const stop_ptr: *align(1) const i32 = @ptrCast(filterbank_blob.ptr + byte_off + @sizeOf(i32));
         const start_v: u32 = @intCast(start_ptr.*);
         const stop_v: u32 = @intCast(stop_ptr.*);
-        fb_runtime.starts[i] = start_v;
-        fb_runtime.stops[i] = stop_v;
-        fb_runtime.weight_offsets[i] = weight_total;
+        fb_starts[i] = start_v;
+        fb_stops[i] = stop_v;
+        fb_weight_offsets[i] = weight_total;
         const w_count: u32 = stop_v - start_v;
+        // Embedded blob has f32 weights at unaligned offsets; copy into aligned BSS.
         const weights_byte_off = byte_off + @sizeOf(i32) * 2;
-        // Copy weights (may be unaligned in the blob) into our aligned buffer.
         for (0..w_count) |k| {
             const w_ptr: *align(1) const f32 = @ptrCast(filterbank_blob.ptr + weights_byte_off + k * @sizeOf(f32));
             fb_weights_storage[weight_total + k] = w_ptr.*;
@@ -121,25 +60,23 @@ fn ensureFilterbankReady() void {
         weight_total += w_count;
         byte_off += @sizeOf(i32) * 2 + w_count * @sizeOf(f32);
     }
-    fb_runtime.weight_offsets[nf] = weight_total;
-    fb_runtime.weights = fb_weights_storage[0..weight_total];
-    fb_initialized = true;
+    fb_weight_offsets[n_filters] = weight_total;
+    fb_weights_len = weight_total;
 }
 
 fn applyFilterBank(mag_spec: []const f32, out: []f32) void {
     std.debug.assert(out.len == n_filters);
     for (0..n_filters) |fi| {
-        const start = fb_runtime.starts[fi];
-        const stop = fb_runtime.stops[fi];
-        const w_off = fb_runtime.weight_offsets[fi];
+        const start = fb_starts[fi];
+        const stop = fb_stops[fi];
         var acc: f32 = 0;
         var k: usize = start;
-        var w_idx: usize = w_off;
+        var w_idx: usize = fb_weight_offsets[fi];
         while (k < stop) : ({
             k += 1;
             w_idx += 1;
         }) {
-            acc += mag_spec[k] * fb_runtime.weights[w_idx];
+            acc += mag_spec[k] * fb_weights_storage[w_idx];
         }
         out[fi] = acc;
     }
@@ -185,14 +122,10 @@ const Plo = struct {
     phase: f32 = 0,
     down_phase: f32 = 0,
 
-    fn sigmoid(x: f32) f32 {
-        return 1.0 / (1.0 + @exp(-x));
-    }
-
     /// Process one CRNN frame; returns updated BeatNet state.
     fn step(self: *Plo, beat_logit: f32, down_logit: f32) BeatNetState {
-        const p_beat = sigmoid(beat_logit);
-        const p_down = sigmoid(down_logit);
+        const p_beat = crnn_mod.sigmoid(beat_logit);
+        const p_down = crnn_mod.sigmoid(down_logit);
 
         // Update activation history and compute adaptive threshold (median + MAD-ish).
         self.p_hist[self.p_hist_idx] = p_beat;
@@ -300,12 +233,16 @@ pub const BeatNet = struct {
     source_len: u16 = 0,
 
     pub fn init(sink_name: ?[]const u8) BeatNet {
+        // Build the filterbank lookup tables once on the calling thread so the
+        // capture worker can start producing features without a lazy-init race.
+        parseFilterbank();
+
         var self = BeatNet{};
         if (sink_name) |name| {
             const monitor = std.fmt.bufPrint(&self.source, "{s}.monitor", .{name}) catch "";
             self.source_len = @intCast(monitor.len);
         } else {
-            self.source_len = autoDetectMonitor(&self.source);
+            self.source_len = iohelp.autoDetectPulseMonitor(&self.source);
         }
         return self;
     }
@@ -335,25 +272,19 @@ pub const BeatNet = struct {
     }
 
     fn captureLoop(self: *BeatNet) void {
-        ensureFilterbankReady();
-
-        // Bluestein for non-pow2 1411-point DFT.
         var bl = fft_mod.Bluestein.init(std.heap.page_allocator, win_length) catch |err| {
             log.err("bluestein init failed: {}", .{err});
             return;
         };
         defer bl.deinit();
 
-        // Hann window (over the 1411 active samples).
         var hann: [win_length]f32 = undefined;
-        const inv_nm1: f32 = 1.0 / @as(f32, @floatFromInt(win_length - 1));
-        for (0..win_length) |i| {
-            const phase: f32 = 2.0 * std.math.pi * @as(f32, @floatFromInt(i)) * inv_nm1;
-            hann[i] = 0.5 - 0.5 * @cos(phase);
-        }
+        frontend_mod.fillHann(&hann);
 
-        // Working buffers.
-        const scratch = std.heap.page_allocator.alloc(Complex, bl.m) catch return;
+        const scratch = std.heap.page_allocator.alloc(Complex, bl.m) catch |err| {
+            log.err("scratch alloc failed: {}", .{err});
+            return;
+        };
         defer std.heap.page_allocator.free(scratch);
         var mag_spec: [win_length / 2 + 1]f32 = undefined; // = 706
         var bands: [n_filters]f32 = undefined;
@@ -398,8 +329,7 @@ pub const BeatNet = struct {
                 &err,
             ) orelse {
                 log.warn("BeatNet PulseAudio connect failed: {s} — retry in 2s", .{c.pa_strerror(err)});
-                const ts: Timespec = .{ .sec = 2, .nsec = 0 };
-                _ = nanosleep(&ts, null);
+                iohelp.sleepNs(2 * std.time.ns_per_s);
                 continue :outer;
             };
             log.info("BeatNet audio @ 22050Hz mono started: {s}", .{
@@ -465,31 +395,3 @@ pub const BeatNet = struct {
         }
     }
 };
-
-// libc nanosleep (Zig 0.16 removed std.Thread.sleep).
-const Timespec = extern struct { sec: i64, nsec: i64 };
-extern "c" fn nanosleep(req: *const Timespec, rem: ?*Timespec) c_int;
-
-fn autoDetectMonitor(buf: *[256]u8) u16 {
-    // Reuse the same helper pattern as visualizer/audio.zig.
-    const stream = popen("pactl get-default-sink 2>/dev/null", "r") orelse return 0;
-    defer _ = pclose(stream);
-
-    var read_buf: [200]u8 = undefined;
-    const n = fread(@ptrCast(&read_buf), 1, read_buf.len, stream);
-    if (n == 0) return 0;
-
-    var len = n;
-    while (len > 0 and (read_buf[len - 1] == '\n' or read_buf[len - 1] == '\r')) len -= 1;
-    if (len == 0) return 0;
-
-    const suffix = ".monitor";
-    if (len + suffix.len >= buf.len) return 0;
-    @memcpy(buf[0..len], read_buf[0..len]);
-    @memcpy(buf[len .. len + suffix.len], suffix);
-    return @intCast(len + suffix.len);
-}
-
-extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
-extern "c" fn pclose(stream: *anyopaque) c_int;
-extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
