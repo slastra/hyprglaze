@@ -1,4 +1,5 @@
 const std = @import("std");
+const iohelp = @import("../../core/io_helper.zig");
 const shader_mod = @import("../../core/shader.zig");
 const texture_mod = @import("../../core/texture.zig");
 const config_mod = @import("../../core/config.zig");
@@ -238,7 +239,7 @@ pub const Context = struct {
             .screen_h = height,
             .scale = scale,
             .sprite_tex = tex,
-            .rng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp())),
+            .rng = std.Random.DefaultPrng.init(iohelp.nowNs()),
             .walk_speed = walk_spd,
             .run_speed = run_spd,
             .allocator = allocator,

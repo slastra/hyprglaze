@@ -85,7 +85,7 @@ pub const AudioCapture = struct {
                 source_z, "visualizer", &ss, null, &ba, &err,
             ) orelse {
                 log.warn("PulseAudio connect failed: {s} — retry in 2s", .{c.pa_strerror(err)});
-                std.Thread.sleep(2 * std.time.ns_per_s);
+                _ = nanosleep(&.{ .sec = 2, .nsec = 0 }, null);
                 continue :outer;
             };
 
@@ -126,21 +126,20 @@ pub const AudioCapture = struct {
     }
 };
 
+// libc popen/pclose — std.process.Child.init was removed in Zig 0.16 and the
+// replacement async-Io spawn() is overkill for one-shot synchronous capture.
+extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn pclose(stream: *anyopaque) c_int;
+extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
+const Timespec = extern struct { sec: i64, nsec: i64 };
+extern "c" fn nanosleep(req: *const Timespec, rem: ?*Timespec) c_int;
+
 fn autoDetectMonitor(buf: *[256]u8) u16 {
-    var child = std.process.Child.init(
-        &[_][]const u8{ "pactl", "get-default-sink" },
-        std.heap.page_allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return 0;
+    const stream = popen("pactl get-default-sink 2>/dev/null", "r") orelse return 0;
+    defer _ = pclose(stream);
 
     var read_buf: [200]u8 = undefined;
-    const n = child.stdout.?.read(&read_buf) catch {
-        _ = child.wait() catch {};
-        return 0;
-    };
-    _ = child.wait() catch {};
+    const n = fread(@ptrCast(&read_buf), 1, read_buf.len, stream);
     if (n == 0) return 0;
 
     // Strip trailing whitespace

@@ -162,7 +162,8 @@ pub const effect_names_csv: []const u8 = blk: {
 /// (e.g. `ai_buddy` → `ai-buddy`).
 pub fn listEffects() !void {
     var stdout_buf: [64]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const w = &stdout_writer.interface;
 
     inline for (@typeInfo(Effect).@"union".fields) |f| {

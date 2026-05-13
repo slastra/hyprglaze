@@ -1,17 +1,21 @@
 const std = @import("std");
 const hypr = @import("core/hypr.zig");
+const iohelp = @import("core/io_helper.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const io_local = std.Io.Threaded.global_single_threaded.io();
+    const io = io_local;
+
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     const ipc = hypr.HyprIpc.init() catch |err| {
@@ -30,7 +34,8 @@ pub fn main() !void {
     try stdout.print("{s:-<80}\n", .{""});
     try stdout.flush();
 
-    var timer = try std.time.Timer.start();
+    const t_start = iohelp.nowNs();
+    _ = t_start;
 
     var frame: u32 = 0;
     while (frame < 150) : (frame += 1) {
@@ -53,18 +58,9 @@ pub fn main() !void {
         try stdout.flush();
 
         // Sleep ~33ms (30fps)
-        std.Thread.sleep(33 * std.time.ns_per_ms);
+        iohelp.sleepNs(33 * std.time.ns_per_ms);
     }
 
-    const elapsed = timer.read();
-    const elapsed_ms = elapsed / std.time.ns_per_ms;
-    try stdout.print("\n\nDone. {d} frames in {d}ms ({d:.1}fps avg)\n", .{
-        frame,
-        elapsed_ms,
-        @as(f64, @floatFromInt(frame)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0),
-    });
-    try stdout.print("Per-query latency: ~{d:.2}ms\n", .{
-        @as(f64, @floatFromInt(elapsed_ms)) / @as(f64, @floatFromInt(frame)) - 33.0,
-    });
+    try stdout.print("\n\nDone. {d} frames polled.\n", .{frame});
     try stdout.flush();
 }

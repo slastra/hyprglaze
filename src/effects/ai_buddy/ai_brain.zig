@@ -2,6 +2,14 @@ const std = @import("std");
 const ai_mod = @import("ai.zig");
 const events_mod = @import("events.zig");
 const context_mod = @import("context.zig");
+const iohelp = @import("../../core/io_helper.zig");
+
+const c_shim = struct {
+    extern "c" fn system(command: [*:0]const u8) c_int;
+};
+fn csystem(cmd: [*:0]const u8) c_int {
+    return c_shim.system(cmd);
+}
 
 const log = std.log.scoped(.ai_buddy);
 
@@ -162,26 +170,9 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
         \\{{"anthropic_version":"bedrock-2023-05-31","max_tokens":100,"messages":[{{"role":"user","content":"{s}"}}]}}
     , .{escaped_prompt[0..ep]}) catch return;
 
-    const tmp_file = std.fs.createFileAbsolute(tmp_request, .{}) catch return;
-    tmp_file.writeAll(body) catch {
-        tmp_file.close();
-        return;
-    };
-    tmp_file.close();
+    iohelp.writeFileAbsolute(tmp_request, body) catch return;
 
-    const argv = [_][]const u8{
-        "/bin/sh",
-        "-c",
-        "export $(cat ~/.config/hypr/hyprglaze-aws.env | xargs) && " ++
-            "aws bedrock-runtime invoke-model --region us-east-1 " ++
-            "--model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 " ++
-            "--content-type application/json " ++
-            "--body file://" ++ tmp_request ++ " " ++
-            tmp_response ++ " 2>" ++ tmp_err ++ " 1>/dev/null && " ++
-            "touch " ++ tmp_done,
-    };
-
-    std.fs.deleteFileAbsolute(tmp_done) catch {};
+    iohelp.deleteFileAbsolute(tmp_done) catch {};
 
     log.debug("AI > standing={s} focused={s} visited={d} mood={s} time={s}({d}:00)", .{
         if (ctx.current_window_len > 0) ctx.current_window[0..ctx.current_window_len] else "ground",
@@ -192,11 +183,21 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
         ctx.current_hour,
     });
 
-    var child = std.process.Child.init(&argv, ctx.allocator);
-    child.spawn() catch |err| {
-        log.warn("AI spawn failed: {}", .{err});
+    // Background-spawn the AWS CLI via libc `system`. Async-detach with
+    // trailing `&` so the call returns before AWS completes; the marker file
+    // (`tmp_done`) signals completion to `checkAiResponse`.
+    const cmd =
+        "export $(cat ~/.config/hypr/hyprglaze-aws.env | xargs) && " ++
+        "(aws bedrock-runtime invoke-model --region us-east-1 " ++
+        "--model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 " ++
+        "--content-type application/json " ++
+        "--body file://" ++ tmp_request ++ " " ++
+        tmp_response ++ " 2>" ++ tmp_err ++ " 1>/dev/null && " ++
+        "touch " ++ tmp_done ++ ") &";
+    if (csystem(cmd) != 0) {
+        log.warn("AI shell launch failed", .{});
         return;
-    };
+    }
     ctx.ai_pending = true;
     ctx.ai_pending_timer = 0;
 }
@@ -204,14 +205,10 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
 /// Poll for the marker file; if present, parse the Bedrock response and
 /// populate the action queue, speech bubble, mood, and emote on `ctx`.
 pub fn checkAiResponse(ctx: *context_mod.Context) void {
-    std.fs.accessAbsolute(tmp_done, .{}) catch return;
+    if (!iohelp.accessAbsolute(tmp_done)) return;
 
-    const file = std.fs.openFileAbsolute(tmp_response, .{}) catch return;
-    defer file.close();
-
-    var resp_buf: [4096]u8 = undefined;
-    const resp_len = file.readAll(&resp_buf) catch return;
-    const resp = resp_buf[0..resp_len];
+    const resp = iohelp.readFileAlloc(ctx.allocator, tmp_response, 64 * 1024) catch return;
+    defer ctx.allocator.free(resp);
 
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, resp, .{}) catch return;
     defer parsed.deinit();
@@ -298,8 +295,8 @@ pub fn checkAiResponse(ctx: *context_mod.Context) void {
     }
 
     ctx.ai_pending = false;
-    std.fs.deleteFileAbsolute(tmp_done) catch {};
-    std.fs.deleteFileAbsolute(tmp_request) catch {};
+    iohelp.deleteFileAbsolute(tmp_done) catch {};
+    iohelp.deleteFileAbsolute(tmp_request) catch {};
 }
 
 fn parseOneAction(ctx: *context_mod.Context, obj: std.json.ObjectMap) void {

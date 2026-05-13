@@ -2,6 +2,26 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 
+extern "c" fn close(fd: c_int) c_int;
+fn closeFd(fd: i32) void {
+    _ = close(fd);
+}
+
+fn inotifyInit1(flags: u32) !i32 {
+    const r = std.c.inotify_init1(@intCast(flags));
+    if (r < 0) return error.InotifyInitFailed;
+    return @intCast(r);
+}
+
+fn inotifyAddWatch(fd: i32, path: [*:0]const u8, mask: u32) !i32 {
+    const r = std.c.inotify_add_watch(fd, path, mask);
+    if (r < 0) return switch (std.c._errno().*) {
+        @intFromEnum(std.c.E.NOENT), @intFromEnum(std.c.E.ACCES) => error.FileNotFound,
+        else => error.InotifyAddWatchFailed,
+    };
+    return @intCast(r);
+}
+
 pub const FileWatcher = struct {
     inotify_fd: i32,
     watch_fd: i32,
@@ -12,8 +32,8 @@ pub const FileWatcher = struct {
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !FileWatcher {
         const sep = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.InvalidPath;
 
-        const inotify_fd = try posix.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
-        errdefer posix.close(inotify_fd);
+        const inotify_fd = try inotifyInit1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
+        errdefer closeFd(inotify_fd);
 
         const dir_path = try allocator.dupeZ(u8, path[0..sep]);
         errdefer allocator.free(dir_path);
@@ -22,7 +42,7 @@ pub const FileWatcher = struct {
         errdefer allocator.free(filename);
 
         // Watch the directory — survives editor atomic renames
-        const watch_fd = try posix.inotify_add_watch(
+        const watch_fd = try inotifyAddWatch(
             inotify_fd,
             dir_path,
             linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO | linux.IN.CREATE,
@@ -73,7 +93,7 @@ pub const FileWatcher = struct {
 
     pub fn deinit(self: *FileWatcher) void {
         _ = linux.inotify_rm_watch(self.inotify_fd, self.watch_fd);
-        posix.close(self.inotify_fd);
+        closeFd(self.inotify_fd);
         self.allocator.free(self.dir_path);
         self.allocator.free(self.filename);
     }

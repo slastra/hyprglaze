@@ -1,6 +1,15 @@
 const std = @import("std");
 const posix = std.posix;
 
+// Zig 0.16 moved socket APIs out of std.posix. libc symbols are linked.
+extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
+extern "c" fn connect(fd: c_int, addr: *const anyopaque, addrlen: u32) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn shutdown(fd: c_int, how: c_int) c_int;
+const Timespec = extern struct { sec: i64, nsec: i64 };
+extern "c" fn nanosleep(req: *const Timespec, rem: ?*Timespec) c_int;
+const SHUT_RDWR: c_int = 2;
+
 const log = std.log.scoped(.hypr_events);
 
 /// Subscribes to Hyprland's `.socket2.sock` event stream in a background
@@ -45,8 +54,10 @@ pub const HyprEvents = struct {
     config_dirty: std.atomic.Value(bool) = .init(false),
 
     pub fn init() !HyprEvents {
-        const xdg = posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
-        const sig = posix.getenv("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.NoHyprlandInstance;
+        const xdg_z = std.c.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
+        const xdg = std.mem.span(xdg_z);
+        const sig_z = std.c.getenv("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.NoHyprlandInstance;
+        const sig = std.mem.span(sig_z);
 
         var self = HyprEvents{
             .socket_path = undefined,
@@ -67,7 +78,7 @@ pub const HyprEvents = struct {
         // Wake any blocked read() so the thread can observe `running=false`.
         const fd = self.sock_fd.load(.acquire);
         if (fd >= 0) {
-            posix.shutdown(fd, .both) catch {};
+            _ = shutdown(fd, SHUT_RDWR);
         }
         if (self.thread) |t| t.join();
         self.thread = null;
@@ -108,7 +119,8 @@ fn readerLoop(self: *HyprEvents) void {
     while (self.running.load(.acquire)) {
         const fd = connectSocket(self) catch |err| {
             log.warn("socket2 connect failed: {} — retrying in 1s", .{err});
-            std.Thread.sleep(1 * std.time.ns_per_s);
+            const ts: Timespec = .{ .sec = 1, .nsec = 0 };
+            _ = nanosleep(&ts, null);
             continue;
         };
 
@@ -125,7 +137,7 @@ fn readerLoop(self: *HyprEvents) void {
         readSocket(self, fd, &read_buf, &line_buf, &line_len);
 
         _ = self.sock_fd.swap(-1, .acq_rel);
-        posix.close(fd);
+        _ = close(fd);
     }
 }
 
@@ -165,9 +177,11 @@ fn connectSocket(self: *HyprEvents) !i32 {
     @memset(&addr.path, 0);
     @memcpy(addr.path[0..self.socket_path_len], self.socket_path[0..self.socket_path_len]);
 
-    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
-    errdefer posix.close(fd);
-    try posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+    const fd_rc = socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    if (fd_rc < 0) return error.SocketCreateFailed;
+    const fd: i32 = fd_rc;
+    errdefer _ = close(fd);
+    if (connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) < 0) return error.SocketConnectFailed;
     return fd;
 }
 

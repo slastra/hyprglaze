@@ -1,5 +1,5 @@
 const std = @import("std");
-const flags = @import("flags");
+const iohelp = @import("core/io_helper.zig");
 const wayland = @import("core/wayland.zig");
 const egl_mod = @import("core/egl.zig");
 const shader_mod = @import("core/shader.zig");
@@ -21,7 +21,7 @@ const log = std.log.scoped(.hyprglaze);
 
 var should_exit = std.atomic.Value(bool).init(false);
 
-fn onSignal(_: c_int) callconv(.c) void {
+fn onSignal(_: std.posix.SIG) callconv(.c) void {
     should_exit.store(true, .release);
 }
 
@@ -36,8 +36,8 @@ const CliArgs = struct {
     fps: bool = false,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -49,7 +49,7 @@ pub fn main() !void {
     std.posix.sigaction(std.posix.SIG.INT, &sig_act, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sig_act, null);
 
-    const cli = try parseCli(allocator);
+    const cli = try parseCli(allocator, init.args.vector);
     defer {
         if (cli.shader_path) |p| allocator.free(p);
         if (cli.theme_name) |t| allocator.free(t);
@@ -69,7 +69,8 @@ pub fn main() !void {
     if (cli.set_theme) |name| {
         const path = config_mod.resolveConfigPath(allocator) catch |err| switch (err) {
             error.ConfigNotFound => blk: {
-                const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+                const home_z = std.c.getenv("HOME") orelse return error.NoHomeDir;
+                const home = std.mem.span(home_z);
                 break :blk try std.fmt.allocPrint(allocator, "{s}/.config/hypr/hyprglaze.toml", .{home});
             },
             else => return err,
@@ -209,8 +210,8 @@ pub fn main() !void {
     var cached_focused_class_len: u8 = 0;
     var cached_focused_title: [64]u8 = [_]u8{0} ** 64;
     var cached_focused_title_len: u8 = 0;
-    var fps_timer = try std.time.Timer.start();
-    var timer = try std.time.Timer.start();
+    var fps_timer = try iohelp.Timer.start();
+    var timer = try iohelp.Timer.start();
 
     // Seed: bootstrap the focused-window address once via `j/activewindow`
     // because the event stream only carries future changes, never the
@@ -268,7 +269,7 @@ pub fn main() !void {
         wl.dispatch() catch |err| {
             if (should_exit.load(.acquire)) break;
             log.warn("Wayland dispatch error: {} — reconnecting in 1s", .{err});
-            std.Thread.sleep(1 * std.time.ns_per_s);
+            iohelp.sleepNs(1 * std.time.ns_per_s);
             wl.reconnect() catch |e2| {
                 log.err("Wayland reconnect failed: {} — exiting", .{e2});
                 return e2;
@@ -767,22 +768,74 @@ const CliFlags = struct {
     fps: bool = false,
 };
 
-fn parseCli(allocator: std.mem.Allocator) !CliArgs {
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+/// Minimal in-tree CLI parser. Replaces the upstream `flags` package which
+/// broke on Zig 0.16 (uses removed std.Io.tty / std.fs.File APIs). Supports
+/// `--key value`, `--key=value`, and bool flags. Unknown args → error.
+fn parseCli(allocator: std.mem.Allocator, raw_argv: []const [*:0]const u8) !CliArgs {
+    var out = CliArgs{};
 
-    const parsed = flags.parse(argv, "hyprglaze", CliFlags, .{});
+    // Skip argv[0] (the program path).
+    var i: usize = 1;
+    while (i < raw_argv.len) : (i += 1) {
+        const arg = std.mem.span(raw_argv[i]);
+        // Split "--key=value" → key, value.
+        var key: []const u8 = arg;
+        var value: ?[]const u8 = null;
+        if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+            key = arg[0..eq];
+            value = arg[eq + 1 ..];
+        }
 
-    return .{
-        .config_path = if (parsed.config) |v| try allocator.dupe(u8, v) else null,
-        .effect_name = if (parsed.effect) |v| try allocator.dupe(u8, v) else null,
-        .shader_path = if (parsed.shader) |v| try allocator.dupe(u8, v) else null,
-        .theme_name = if (parsed.theme) |v| try allocator.dupe(u8, v) else null,
-        .set_theme = if (parsed.set_theme) |v| try allocator.dupe(u8, v) else null,
-        .list_themes = parsed.list_themes,
-        .list_effects = parsed.list_effects,
-        .fps = parsed.fps,
-    };
+        const StrField = enum { config, effect, shader, theme, set_theme };
+        const BoolField = enum { list_themes, list_effects, fps, help };
+
+        const str_kind: ?StrField = if (std.mem.eql(u8, key, "--config")) .config
+            else if (std.mem.eql(u8, key, "--effect")) .effect
+            else if (std.mem.eql(u8, key, "--shader")) .shader
+            else if (std.mem.eql(u8, key, "--theme")) .theme
+            else if (std.mem.eql(u8, key, "--set-theme")) .set_theme
+            else null;
+
+        if (str_kind) |sk| {
+            const v = value orelse blk: {
+                i += 1;
+                if (i >= raw_argv.len) {
+                    std.log.err("missing value for {s}", .{key});
+                    return error.MissingArgValue;
+                }
+                break :blk std.mem.span(raw_argv[i]);
+            };
+            const dup = try allocator.dupe(u8, v);
+            switch (sk) {
+                .config => out.config_path = dup,
+                .effect => out.effect_name = dup,
+                .shader => out.shader_path = dup,
+                .theme => out.theme_name = dup,
+                .set_theme => out.set_theme = dup,
+            }
+            continue;
+        }
+
+        const bool_kind: ?BoolField = if (std.mem.eql(u8, key, "--list-themes")) .list_themes
+            else if (std.mem.eql(u8, key, "--list-effects")) .list_effects
+            else if (std.mem.eql(u8, key, "--fps")) .fps
+            else if (std.mem.eql(u8, key, "--help") or std.mem.eql(u8, key, "-h")) .help
+            else null;
+
+        if (bool_kind) |bk| switch (bk) {
+            .list_themes => out.list_themes = true,
+            .list_effects => out.list_effects = true,
+            .fps => out.fps = true,
+            .help => {
+                std.log.info("hyprglaze [--config PATH] [--effect NAME] [--shader PATH] [--theme NAME] [--set-theme NAME] [--list-themes] [--list-effects] [--fps]", .{});
+                std.process.exit(0);
+            },
+        } else {
+            std.log.err("unknown argument: {s}", .{arg});
+            return error.UnknownArg;
+        }
+    }
+    return out;
 }
 
 const system_data_dir = "/usr/share/hyprglaze";
@@ -790,14 +843,14 @@ const system_data_dir = "/usr/share/hyprglaze";
 /// Resolve a data file path: try relative, then absolute, then /usr/share/hyprglaze/
 fn resolveDataPath(path: []const u8, buf: *[512]u8) ?[]const u8 {
     // 1. Relative to CWD
-    if (std.fs.cwd().access(path, .{})) |_| return path else |_| {}
+    if (iohelp.accessRelative(path)) return path;
     // 2. Absolute path
     if (path.len > 0 and path[0] == '/') {
-        if (std.fs.accessAbsolute(path, .{})) |_| return path else |_| {}
+        if (iohelp.accessAbsolute(path)) return path;
     }
     // 3. System data dir fallback
     const full = std.fmt.bufPrint(buf, "{s}/{s}", .{ system_data_dir, path }) catch return null;
-    if (std.fs.accessAbsolute(full, .{})) |_| return full else |_| {}
+    if (iohelp.accessAbsolute(full)) return full;
     return null;
 }
 
@@ -805,17 +858,9 @@ fn loadShaderFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const u8 
     var resolve_buf: [512]u8 = undefined;
     const resolved = resolveDataPath(path, &resolve_buf) orelse path;
 
-    const file = std.fs.cwd().openFile(resolved, .{}) catch |err| {
-        const abs_file = std.fs.openFileAbsolute(resolved, .{}) catch return err;
-        defer abs_file.close();
-        const source = try abs_file.readToEndAlloc(allocator, 1024 * 1024);
-        const with_sentinel = try allocator.realloc(source, source.len + 1);
-        with_sentinel[source.len] = 0;
-        return with_sentinel[0..source.len :0];
-    };
-    defer file.close();
-    const source = try file.readToEndAlloc(allocator, 1024 * 1024);
-    const with_sentinel = try allocator.realloc(source, source.len + 1);
-    with_sentinel[source.len] = 0;
-    return with_sentinel[0..source.len :0];
+    if (iohelp.readFileRelative0(allocator, resolved, 1024 * 1024)) |source| {
+        return source;
+    } else |_| {}
+    return try iohelp.readFileAlloc0(allocator, resolved, 1024 * 1024);
 }
+

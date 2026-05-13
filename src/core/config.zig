@@ -1,5 +1,6 @@
 const std = @import("std");
 const toml = @import("toml");
+const iohelp = @import("io_helper.zig");
 
 const log = std.log.scoped(.config);
 
@@ -57,7 +58,7 @@ pub const EffectParams = struct {
         if (self.table) |t| {
             if (t.get(key)) |val| {
                 return switch (val) {
-                    .bool => val.bool,
+                    .boolean => val.boolean,
                     else => default,
                 };
             }
@@ -169,14 +170,13 @@ pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 1024 * 1024);
+    return iohelp.readFileAlloc(allocator, path, 1024 * 1024);
 }
 
 pub fn expandHome(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     if (path.len >= 1 and path[0] == '~') {
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+        const home_z = std.c.getenv("HOME") orelse return error.NoHomeDir;
+        const home = std.mem.span(home_z);
         return std.fmt.allocPrint(allocator, "{s}{s}", .{ home, path[1..] });
     }
     return allocator.dupe(u8, path);
@@ -235,7 +235,7 @@ pub fn setTheme(allocator: std.mem.Allocator, config_path: []const u8, new_theme
 
     // Ensure parent directory exists (mkdir -p)
     if (std.fs.path.dirname(config_path)) |dir| {
-        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        iohelp.makeDirAbsolute(dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -244,33 +244,29 @@ pub fn setTheme(allocator: std.mem.Allocator, config_path: []const u8, new_theme
     // Atomic write
     const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{config_path});
     defer allocator.free(tmp);
-    {
-        const file = try std.fs.createFileAbsolute(tmp, .{});
-        defer file.close();
-        try file.writeAll(out);
-    }
-    try std.fs.renameAbsolute(tmp, config_path);
+    try iohelp.writeFileAbsolute(tmp, out);
+    try iohelp.renameAbsolute(tmp, config_path);
 }
 
 fn isThemeLine(trimmed: []const u8) bool {
     if (trimmed.len < 6 or !std.mem.startsWith(u8, trimmed, "theme")) return false;
-    const rest = std.mem.trimLeft(u8, trimmed[5..], " \t");
+    const rest = std.mem.trimStart(u8, trimmed[5..], " \t");
     return rest.len > 0 and rest[0] == '=';
 }
 
 fn readFileMut(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 1024 * 1024);
+    return iohelp.readFileAlloc(allocator, path, 1024 * 1024);
 }
 
 pub fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
+    if (std.c.getenv("XDG_CONFIG_HOME")) |config_home_z| {
+        const config_home = std.mem.span(config_home_z);
         const path = try std.fmt.allocPrint(allocator, "{s}/hypr/hyprglaze.toml", .{config_home});
         if (fileExists(path)) return path;
         allocator.free(path);
     }
-    if (std.posix.getenv("HOME")) |home| {
+    if (std.c.getenv("HOME")) |home_z| {
+        const home = std.mem.span(home_z);
         const path = try std.fmt.allocPrint(allocator, "{s}/.config/hypr/hyprglaze.toml", .{home});
         if (fileExists(path)) return path;
         allocator.free(path);
@@ -279,9 +275,7 @@ pub fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 fn fileExists(path: []const u8) bool {
-    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
-    file.close();
-    return true;
+    return iohelp.accessAbsolute(path);
 }
 
 test "parse minimal config" {

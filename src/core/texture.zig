@@ -1,4 +1,5 @@
 const std = @import("std");
+const iohelp = @import("io_helper.zig");
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
     @cInclude("stb/stb_image.h");
@@ -17,11 +18,9 @@ pub const Texture = struct {
         // Resolve path: relative, absolute, then system data dir
         var resolved = path;
         var sys_buf: [512]u8 = undefined;
-        if (std.fs.cwd().access(path, .{})) |_| {} else |_| {
+        if (!iohelp.accessRelative(path)) {
             const sys_path = std.fmt.bufPrint(&sys_buf, "{s}/{s}", .{ system_data_dir, path }) catch path;
-            if (std.fs.accessAbsolute(sys_path, .{})) |_| {
-                resolved = sys_path;
-            } else |_| {}
+            if (iohelp.accessAbsolute(sys_path)) resolved = sys_path;
         }
 
         // Need null-terminated path for stb

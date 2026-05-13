@@ -1,4 +1,5 @@
 const std = @import("std");
+const iohelp = @import("io_helper.zig");
 
 const log = std.log.scoped(.palette);
 
@@ -59,19 +60,19 @@ const ThemesData = struct {
 fn readThemesData(allocator: std.mem.Allocator) !ThemesData {
     var path_buf: [512]u8 = undefined;
     const override_path = blk: {
-        if (std.posix.getenv("XDG_CONFIG_HOME")) |config_home| {
+        if (std.c.getenv("XDG_CONFIG_HOME")) |config_home_z| {
+            const config_home = std.mem.span(config_home_z);
             break :blk std.fmt.bufPrint(&path_buf, "{s}/hyprglaze/themes.json", .{config_home}) catch null;
         }
-        if (std.posix.getenv("HOME")) |home| {
+        if (std.c.getenv("HOME")) |home_z| {
+            const home = std.mem.span(home_z);
             break :blk std.fmt.bufPrint(&path_buf, "{s}/.config/hyprglaze/themes.json", .{home}) catch null;
         }
         break :blk null;
     };
 
     if (override_path) |p| {
-        if (std.fs.openFileAbsolute(p, .{})) |file| {
-            defer file.close();
-            const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+        if (iohelp.readFileAlloc(allocator, p, 64 * 1024 * 1024)) |data| {
             log.info("using theme override: {s}", .{p});
             return .{ .data = data, .owned = true };
         } else |_| {}
@@ -115,7 +116,8 @@ pub fn listThemes(allocator: std.mem.Allocator) !void {
     defer parsed.deinit();
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     var count: usize = 0;

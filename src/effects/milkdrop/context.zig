@@ -3,6 +3,7 @@ const shader_mod = @import("../../core/shader.zig");
 const config_mod = @import("../../core/config.zig");
 const effects = @import("../../effects.zig");
 const audio_mod = @import("../visualizer/audio.zig");
+const iohelp = @import("../../core/io_helper.zig");
 
 const log = std.log.scoped(.milkdrop);
 
@@ -295,7 +296,7 @@ pub const Context = struct {
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
         const wave = self.audio.getWaveform();
-        const time: f32 = @floatCast(@as(f64, @floatFromInt(std.time.milliTimestamp())) / 1000.0);
+        const time: f32 = @floatCast(@as(f64, @floatFromInt(iohelp.nowNs())) / 1_000_000_000.0);
         const prev = 1 - self.current;
         const curr = self.current;
 

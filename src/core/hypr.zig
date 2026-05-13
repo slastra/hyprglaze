@@ -1,6 +1,13 @@
 const std = @import("std");
 const posix = std.posix;
 
+// Zig 0.16 removed std.posix.{socket,connect,close} (Io rework). The libc
+// symbols are still linked; declare slim externs here rather than wrestle
+// raw syscall return values.
+extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
+extern "c" fn connect(fd: c_int, addr: *const anyopaque, addrlen: u32) c_int;
+extern "c" fn close(fd: c_int) c_int;
+
 pub const CursorPos = struct {
     x: i32,
     y: i32,
@@ -53,8 +60,10 @@ pub const HyprIpc = struct {
     socket_path_len: usize,
 
     pub fn init() !HyprIpc {
-        const xdg_runtime = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
-        const instance_sig = std.posix.getenv("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.NoHyprlandInstance;
+        const xdg_runtime_z = std.c.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
+        const xdg_runtime = std.mem.span(xdg_runtime_z);
+        const instance_sig_z = std.c.getenv("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.NoHyprlandInstance;
+        const instance_sig = std.mem.span(instance_sig_z);
 
         var path_buf: [256]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/hypr/{s}/.socket.sock", .{ xdg_runtime, instance_sig }) catch return error.PathTooLong;
@@ -72,11 +81,15 @@ pub const HyprIpc = struct {
         @memset(&addr.path, 0);
         @memcpy(addr.path[0..self.socket_path_len], self.socket_path[0..self.socket_path_len]);
 
-        const sock = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
-        defer std.posix.close(sock);
+        const sock_rc = socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+        if (sock_rc < 0) return error.SocketCreateFailed;
+        const sock: i32 = sock_rc;
+        defer _ = close(sock);
 
-        try std.posix.connect(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un));
-        _ = try std.posix.write(sock, command);
+        if (connect(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) < 0) {
+            return error.SocketConnectFailed;
+        }
+        if (std.c.write(sock, command.ptr, command.len) < 0) return error.SocketWriteFailed;
 
         var total: usize = 0;
         while (total < buf.len) {
