@@ -121,6 +121,9 @@ const Plo = struct {
     /// Smooth phase between detected beats.
     phase: f32 = 0,
     down_phase: f32 = 0,
+    // Frames since the last time we were locked — used to trigger CRNN reset
+    // so the LSTM cell state doesn't drift to saturation over hours.
+    unlocked_frames: u32 = 0,
 
     /// Process one CRNN frame; returns updated BeatNet state.
     fn step(self: *Plo, beat_logit: f32, down_logit: f32) BeatNetState {
@@ -197,10 +200,14 @@ const Plo = struct {
 
         // Lock state: locked after 4 consecutive plausible beats; unlocks if
         // no beat for >2 s (100 frames at 50 fps).
-        if (self.consecutive_beats >= 4) self.locked = true;
+        if (self.consecutive_beats >= 4) {
+            self.locked = true;
+            self.unlocked_frames = 0;
+        }
         if (self.frame_idx - self.last_beat_frame > 100) {
             self.locked = false;
             self.consecutive_beats = 0;
+            self.unlocked_frames +|= 1;
         }
 
         const tempo_bpm = 60.0 * 50.0 / self.period_frames; // 50 fps
@@ -381,6 +388,9 @@ pub const BeatNet = struct {
                     crnn.forward(&feature, &logits);
 
                     const state = plo.step(logits[0], logits[1]);
+
+                    // Reset LSTM state after 30s unlocked to prevent cell drift.
+                    if (plo.unlocked_frames == 1500) crnn.reset();
 
                     // Publish via triple-buffer swap (single producer).
                     const wi = self.write_idx.load(.acquire);

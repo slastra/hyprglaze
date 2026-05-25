@@ -199,7 +199,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer if (config_watcher) |*w| w.deinit();
 
     // Frame state
-    var prev_time: f32 = 0.0;
+    var prev_time_f64: f64 = 0.0;
     var frame_count: u32 = 0;
     var ipc_skip: u32 = 0;
     var cached_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
@@ -303,9 +303,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (wl.frame_done) {
             const elapsed_ns = timer.read();
             const time_f64: f64 = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
-            const time: f32 = @floatCast(time_f64);
-            const dt = time - prev_time;
-            prev_time = time;
+            const dt: f32 = @floatCast(time_f64 - prev_time_f64);
+            prev_time_f64 = time_f64;
+            // Wrap iTime so the f32 shader uniform never loses precision.
+            // 10000s period is invisible: the shader only feeds iTime into
+            // sin/cos, which are periodic.
+            const time: f32 = @floatCast(@mod(time_f64, 10_000.0));
 
             // Cursor: Hyprland emits no cursor events on socket2, so we poll.
             // Capped at 60 Hz — finer sampling buys nothing visible because
