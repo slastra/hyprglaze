@@ -23,6 +23,7 @@ const ai_buddy = @import("effects/ai_buddy/context.zig");
 const tide = @import("effects/tide.zig");
 const fire = @import("effects/fire.zig");
 const meshflow = @import("effects/meshflow/context.zig");
+const swarm = @import("effects/swarm/context.zig");
 
 pub const WindowInfo = struct {
     class: [64]u8 = undefined,
@@ -62,6 +63,7 @@ pub const Effect = union(enum) {
     tide: tide.Context,
     fire: fire.Context,
     meshflow: meshflow.Context,
+    swarm: swarm.Context,
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
         if (std.mem.eql(u8, name, "particles")) {
@@ -103,6 +105,9 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "meshflow")) {
             const params = config_mod.effectParams(cfg, "meshflow");
             return .{ .meshflow = try meshflow.Context.init(allocator, params) };
+        } else if (std.mem.eql(u8, name, "swarm")) {
+            const params = config_mod.effectParams(cfg, "swarm");
+            return .{ .swarm = try swarm.Context.init(allocator, width, height, params) };
         }
         log.err("unknown effect: '{s}'. Available: {s}", .{ name, effect_names_csv });
         return error.UnknownEffect;
@@ -143,6 +148,7 @@ pub const Effect = union(enum) {
             .tide => "shaders/tide.frag",
             .fire => "shaders/fire.frag",
             .meshflow => "shaders/meshflow.frag",
+            .swarm => "shaders/swarm.frag",
         };
     }
 };
