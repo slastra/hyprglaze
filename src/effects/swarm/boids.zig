@@ -36,8 +36,8 @@ pub const BoidSystem = struct {
     alignment_w: f32 = 1.0,
     cohesion_w: f32 = 1.0,
 
-    // Window avoidance
-    avoidance_radius: f32 = 120.0,
+    // Window avoidance — kept small so boids can occupy gaps between tiled windows
+    avoidance_radius: f32 = 20.0,
 
     pub fn init(count: u32, width: f32, height: f32) BoidSystem {
         var sys = BoidSystem{
@@ -57,7 +57,7 @@ pub const BoidSystem = struct {
                 .y = rng.float(f32) * height,
                 .vx = @cos(angle) * speed,
                 .vy = @sin(angle) * speed,
-                .size = 4.0 + rng.float(f32) * 3.0,
+                .size = 2.5 + rng.float(f32) * 2.0,
                 .color_idx = rng.float(f32),
                 .heading = angle,
             };
@@ -151,12 +151,67 @@ pub const BoidSystem = struct {
                 steer_y += cen_y * self.cohesion_w * cohesion_mod;
             }
 
-            // Window avoidance — tangential steering
+            // Window avoidance — gap-aware centering.
+            // Find the nearest window edge in each cardinal direction.
+            // When between two windows, steer toward the gap center
+            // rather than fleeing both walls (which makes gaps uninhabitable).
+            var nearest_left: f32 = b.x; // distance to nearest edge on left
+            var nearest_right: f32 = self.width - b.x;
+            var nearest_above: f32 = b.y;
+            var nearest_below: f32 = self.height - b.y;
+            var inside_any = false;
+
             for (windows) |win| {
                 if (win.w < 1 or win.h < 1) continue;
-                const avoid = windowAvoidForce(b, win, self.avoidance_radius);
-                steer_x += avoid[0];
-                steer_y += avoid[1];
+                const wx1 = win.x;
+                const wy1 = win.y;
+                const wx2 = win.x + win.w;
+                const wy2 = win.y + win.h;
+
+                // If boid is inside this window, push it out
+                if (b.x >= wx1 and b.x <= wx2 and b.y >= wy1 and b.y <= wy2) {
+                    inside_any = true;
+                    const to_l = b.x - wx1;
+                    const to_r = wx2 - b.x;
+                    const to_t = b.y - wy1;
+                    const to_b = wy2 - b.y;
+                    const min_d = @min(@min(to_l, to_r), @min(to_t, to_b));
+                    const push: f32 = 3000.0;
+                    if (min_d == to_l) steer_x -= push
+                    else if (min_d == to_r) steer_x += push
+                    else if (min_d == to_t) steer_y -= push
+                    else steer_y += push;
+                    continue;
+                }
+
+                // Horizontally aligned — window is to the left or right
+                if (b.y >= wy1 and b.y <= wy2) {
+                    if (wx1 > b.x) nearest_right = @min(nearest_right, wx1 - b.x);
+                    if (wx2 < b.x) nearest_left = @min(nearest_left, b.x - wx2);
+                }
+                // Vertically aligned — window is above or below
+                if (b.x >= wx1 and b.x <= wx2) {
+                    if (wy1 > b.y) nearest_below = @min(nearest_below, wy1 - b.y);
+                    if (wy2 < b.y) nearest_above = @min(nearest_above, b.y - wy2);
+                }
+            }
+
+            if (!inside_any) {
+                const radius = self.avoidance_radius;
+                // Horizontal gap centering
+                if (nearest_left < radius or nearest_right < radius) {
+                    const gap_w = nearest_left + nearest_right;
+                    const center_offset = (nearest_right - nearest_left) * 0.5;
+                    const urgency = 1.0 - @min(gap_w, radius * 4.0) / (radius * 4.0);
+                    steer_x += center_offset * (200.0 + urgency * 600.0);
+                }
+                // Vertical gap centering
+                if (nearest_above < radius or nearest_below < radius) {
+                    const gap_h = nearest_above + nearest_below;
+                    const center_offset = (nearest_below - nearest_above) * 0.5;
+                    const urgency = 1.0 - @min(gap_h, radius * 4.0) / (radius * 4.0);
+                    steer_y += center_offset * (200.0 + urgency * 600.0);
+                }
             }
 
             // Cursor interaction: attract far, repel close
@@ -230,61 +285,3 @@ fn lerpAngle(from: f32, to: f32, t: f32) f32 {
     return from + diff * t;
 }
 
-fn windowAvoidForce(b: *const Boid, win: particles_sys.Rect, radius: f32) [2]f32 {
-    // Signed distance to rect boundary (negative = inside)
-    const cx = win.x + win.w * 0.5;
-    const cy = win.y + win.h * 0.5;
-    const hx = win.w * 0.5;
-    const hy = win.h * 0.5;
-
-    const dx = @abs(b.x - cx) - hx;
-    const dy = @abs(b.y - cy) - hy;
-    const dist = @sqrt(@max(dx, 0) * @max(dx, 0) + @max(dy, 0) * @max(dy, 0)) +
-        @min(@max(dx, dy), 0);
-
-    if (dist > radius) return .{ 0, 0 };
-    if (dist < -radius) {
-        // Deep inside — hard push to nearest edge
-        const to_left = b.x - win.x;
-        const to_right = win.x + win.w - b.x;
-        const to_top = b.y - win.y;
-        const to_bottom = win.y + win.h - b.y;
-        const min_d = @min(@min(to_left, to_right), @min(to_top, to_bottom));
-        if (min_d == to_left) return .{ -2000.0, 0 };
-        if (min_d == to_right) return .{ 2000.0, 0 };
-        if (min_d == to_top) return .{ 0, -2000.0 };
-        return .{ 0, 2000.0 };
-    }
-
-    // Normal pointing away from rect surface
-    var nx: f32 = 0;
-    var ny: f32 = 0;
-    if (dx > 0 and dy > 0) {
-        // Corner region
-        const len = @sqrt(dx * dx + dy * dy);
-        nx = @max(dx, 0) / len * std.math.sign(b.x - cx);
-        ny = @max(dy, 0) / len * std.math.sign(b.y - cy);
-    } else if (dx > dy) {
-        nx = std.math.sign(b.x - cx);
-    } else {
-        ny = std.math.sign(b.y - cy);
-    }
-
-    // Tangential component — steer along edge, not just away
-    const tx = -ny;
-    const ty = nx;
-    // Blend: heading into window → more tangential; heading away → more normal
-    const dot_heading = b.vx * nx + b.vy * ny;
-    const approaching = @max(0.0, -dot_heading) / (@sqrt(b.vx * b.vx + b.vy * b.vy) + 1.0);
-    const tangent_blend = 0.3 + approaching * 0.5;
-
-    // Choose tangent direction based on which side of the window center
-    const cross = (b.x - cx) * b.vy - (b.y - cy) * b.vx;
-    const t_sign: f32 = if (cross > 0) 1.0 else -1.0;
-
-    const strength = 800.0 * (1.0 - dist / radius);
-    const fx = (nx * (1.0 - tangent_blend) + tx * t_sign * tangent_blend) * strength;
-    const fy = (ny * (1.0 - tangent_blend) + ty * t_sign * tangent_blend) * strength;
-
-    return .{ fx, fy };
-}

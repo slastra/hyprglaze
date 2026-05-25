@@ -58,7 +58,7 @@ void main() {
 
         float color_seed = head.w;
         vec3 boid_col = paletteColor(color_seed);
-        float sz = 6.0;
+        float sz = 3.5;
 
         // Bounding box early-out over all points
         vec2 lo = pts[0];
