@@ -97,23 +97,19 @@ void main() {
     // --- Isocontour lines with screen-space anti-aliasing ---
     float contours = 6.0;
     float f_scaled = field * contours;
-    float band = fract(f_scaled);
 
-    // Screen-space anti-aliasing scaled to field gradient
+    // Distance to the nearest integer of f_scaled (= nearest isocontour).
+    // Triangle-wave trick avoids the fract() discontinuity that caused
+    // stairstepping when the two-sided smoothstep straddled the wrap.
+    float dist = abs(fract(f_scaled + 0.5) - 0.5);
     float fw = fwidth(f_scaled);
-    float aa = max(fw * 3.0, 0.12);
-
-    float line = 1.0 - smoothstep(0.0, aa, band);
-    line += 1.0 - smoothstep(1.0 - aa, 1.0, band);
-    line = min(line, 1.0);
+    float line = 1.0 - smoothstep(0.0, max(fw * 2.0, 0.005), dist);
 
     // Fade lines with distance from sources
     float intensity = smoothstep(0.1, 0.5, field);
 
-    // Invert: background is colored, lines are dark
-    float fill = smoothstep(0.1, 0.5, field);
-    col = mix(col, field_color, fill * (1.0 - line) * intensity);
-    col = mix(col, bg, line * intensity);
+    // Thin colored lines on a surface-color background
+    col = mix(col, field_color, line * intensity);
 
 
     fragColor = vec4(col, 1.0);
