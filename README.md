@@ -36,6 +36,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `tide` | Time-aware rising water line tied to wall-clock time, with falling teardrops, crater splashes, and Worthington jets |
 | `fire` | Palette-driven flames rise from every window's top edge; moving windows fade with a directional wipe, neighbors warp from the wake |
 | `voltaic` | Tesla-coil desktop: branching midpoint-displacement lightning strikes between window borders, St. Elmo's fire crawls the focused window, bass beats trigger discharges |
+| `kepler` | Windows become gravitational bodies: motes orbit them with real softened gravity while a lensed starfield and spacetime grid bend around window mass, the cursor a rogue comet that steals moons. Default `fuzz` mode renders bodies as huge interfering wave packets; `fuzz = false` switches to tight comet-trailed dots |
 
 ## Install (Arch Linux)
 
@@ -60,7 +61,7 @@ zig build run
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
 #          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire,
-#          meshflow, swarm, voltaic
+#          meshflow, swarm, voltaic, kepler
 effect = "fluid"
 theme = "Rosé Pine"
 

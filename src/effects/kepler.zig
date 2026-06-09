@@ -1,0 +1,305 @@
+const std = @import("std");
+const shader_mod = @import("../core/shader.zig");
+const config_mod = @import("../core/config.zig");
+const effects = @import("../effects.zig");
+const audio_mod = @import("visualizer/audio.zig");
+
+const c = @cImport({
+    @cInclude("GLES3/gl3.h");
+});
+
+const max_windows = 32;
+
+// 300 iParticles slots, swarm-style layout: head + trail dots per body.
+const trail_len = 4;
+const trail_history = 32;
+const slots_per = trail_len + 1;
+const max_bodies = 300 / slots_per; // 60
+
+// Gravitational constant, tuned for orbital periods of a few seconds at
+// a few hundred pixels around a typical window (mass = sqrt(area)).
+const G: f32 = 4.3e4;
+
+// Plummer softening radius — keeps close passes finite so nothing
+// slingshots off at machine-epsilon perihelion.
+const soften: f32 = 60.0;
+const soften2: f32 = soften * soften;
+
+// Cursor's mass, in the same sqrt-area units as windows.
+const cursor_mass: f32 = 180.0;
+
+const focus_boost: f32 = 2.0;
+const speed_cap: f32 = 2200.0;
+const respawn_margin: f32 = 260.0;
+
+// A body parked deep inside a window for this long is an invisible moon —
+// rescue it into a fresh visible orbit. (No velocity drag: drag drains
+// orbital energy and every body ends up buried under a window within
+// minutes. Semi-implicit Euler is stable enough on its own; the speed cap
+// and respawn margin handle slingshot heating instead.)
+const buried_rescue_secs: f32 = 6.0;
+
+const Body = struct {
+    pos: [2]f32 = .{ 0, 0 },
+    vel: [2]f32 = .{ 0, 0 },
+    size: f32 = 3.0,
+    color_idx: f32 = 0,
+    buried_t: f32 = 0,
+};
+
+const Mass = struct {
+    pos: [2]f32,
+    m: f32,
+    /// Half of the window's smaller dimension — sizes spawn orbits so they
+    /// clear the border instead of circling unseen behind the window.
+    half_min: f32,
+};
+
+pub const Context = struct {
+    allocator: std.mem.Allocator,
+    audio: *audio_mod.AudioCapture,
+    rng: std.Random.DefaultPrng,
+
+    width: f32,
+    height: f32,
+    now: f32 = 0,
+
+    bodies: [max_bodies]Body = [_]Body{.{}} ** max_bodies,
+    count: u32 = max_bodies,
+    history: [max_bodies][trail_history][2]f32 = undefined,
+    history_idx: u32 = 0,
+    seeded: bool = false,
+
+    bass: f32 = 0,
+
+    /// Render mode: wave-packet interference fuzz (default) vs. comet dots.
+    fuzz: bool = true,
+
+    cached_program: c.GLuint = 0,
+    loc_time: c.GLint = -1,
+    loc_bass: c.GLint = -1,
+    loc_fuzz: c.GLint = -1,
+
+    pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
+        const sink = params.getString("sink", null);
+        const audio = try allocator.create(audio_mod.AudioCapture);
+        audio.* = audio_mod.AudioCapture.init(sink);
+        audio.start();
+
+        var count: u32 = @intCast(params.getInt("count", max_bodies));
+        count = @min(count, max_bodies);
+
+        return .{
+            .allocator = allocator,
+            .audio = audio,
+            .rng = std.Random.DefaultPrng.init(0x6b65706c6572),
+            .width = width,
+            .height = height,
+            .count = count,
+            .fuzz = params.getBool("fuzz", true),
+        };
+    }
+
+    /// Window masses for this frame: m = sqrt(area), focused window heavier.
+    /// With no windows, a weak attractor at screen center keeps the field
+    /// alive on an empty workspace.
+    fn gatherMasses(self: *Context, state: effects.FrameState, out: *[max_windows + 2]Mass) u32 {
+        var n: u32 = 0;
+        const wcount = @min(state.windows.len, max_windows);
+
+        const fc = [2]f32{
+            state.focused_win.x + state.focused_win.w * 0.5,
+            state.focused_win.y + state.focused_win.h * 0.5,
+        };
+
+        for (0..wcount) |i| {
+            const w = state.windows[i];
+            if (w.w < 8.0 or w.h < 8.0) continue;
+            var m = @sqrt(w.w * w.h);
+            const cx = w.x + w.w * 0.5;
+            const cy = w.y + w.h * 0.5;
+            // Focused window (matched by smoothed center) pulls harder.
+            if (state.focused_win.hasArea() and @abs(cx - fc[0]) < 40.0 and @abs(cy - fc[1]) < 40.0) {
+                m *= focus_boost;
+            }
+            out[n] = .{ .pos = .{ cx, cy }, .m = m, .half_min = @min(w.w, w.h) * 0.5 };
+            n += 1;
+        }
+
+        if (n == 0) {
+            out[0] = .{ .pos = .{ self.width * 0.5, self.height * 0.5 }, .m = 350.0, .half_min = 0 };
+            n = 1;
+        }
+
+        // Cursor: rogue comet.
+        out[n] = .{ .pos = state.cursor, .m = cursor_mass, .half_min = 0 };
+        n += 1;
+        return n;
+    }
+
+    /// Drop a body into a circular orbit around a random mass. Direction is
+    /// random, so systems end up with mixed prograde/retrograde moons.
+    fn spawnOrbit(self: *Context, body: *Body, masses: []const Mass) void {
+        const r = self.rng.random();
+        // Exclude the cursor (last slot) as a spawn anchor.
+        const anchor_count = if (masses.len > 1) masses.len - 1 else masses.len;
+        const a = masses[r.intRangeLessThan(usize, 0, anchor_count)];
+
+        // Clear the window border by a margin so the whole orbit is visible.
+        const radius = a.half_min + 90.0 + r.float(f32) * 320.0;
+        const theta = r.float(f32) * std.math.tau;
+        body.pos = .{
+            a.pos[0] + radius * @cos(theta),
+            a.pos[1] + radius * @sin(theta),
+        };
+
+        const v_circ = @sqrt(G * a.m / radius);
+        const sign: f32 = if (r.boolean()) 1.0 else -1.0;
+        body.vel = .{
+            -@sin(theta) * v_circ * sign,
+            @cos(theta) * v_circ * sign,
+        };
+        body.size = 3.0 + r.float(f32) * 3.5;
+        body.color_idx = @floatFromInt(r.intRangeAtMost(u8, 1, 14));
+        body.buried_t = 0;
+    }
+
+    pub fn update(self: *Context, state: effects.FrameState) void {
+        const dt = std.math.clamp(state.dt, 0.0, 0.033);
+        self.now += dt;
+
+        // Bass envelope — breathes the lens depth in the shader.
+        const wave = self.audio.getWaveform();
+        var energy: f32 = 0;
+        for (0..25) |j| energy += @abs(wave[j]) + @abs(wave[128 + j]);
+        const raw = (energy / 50.0) * 6.0;
+        const k = if (raw > self.bass) @min(1.0, 25.0 * dt) else @min(1.0, 5.0 * dt);
+        self.bass += (raw - self.bass) * k;
+
+        var masses: [max_windows + 2]Mass = undefined;
+        const n_mass = self.gatherMasses(state, &masses);
+
+        if (!self.seeded) {
+            self.seeded = true;
+            for (self.bodies[0..self.count]) |*b| self.spawnOrbit(b, masses[0..n_mass]);
+            for (0..self.count) |i| {
+                for (0..trail_history) |h| self.history[i][h] = self.bodies[i].pos;
+            }
+        }
+
+        for (self.bodies[0..self.count], 0..) |*b, i| {
+            // Softened gravity from every mass (semi-implicit Euler).
+            var ax: f32 = 0;
+            var ay: f32 = 0;
+            for (masses[0..n_mass]) |mass| {
+                const dx = mass.pos[0] - b.pos[0];
+                const dy = mass.pos[1] - b.pos[1];
+                const r2 = dx * dx + dy * dy + soften2;
+                const inv_r3 = 1.0 / (r2 * @sqrt(r2));
+                const gm = G * mass.m * inv_r3;
+                ax += gm * dx;
+                ay += gm * dy;
+            }
+
+            b.vel[0] += ax * dt;
+            b.vel[1] += ay * dt;
+
+            const speed = @sqrt(b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1]);
+            if (speed > speed_cap) {
+                const s = speed_cap / speed;
+                b.vel[0] *= s;
+                b.vel[1] *= s;
+            }
+
+            b.pos[0] += b.vel[0] * dt;
+            b.pos[1] += b.vel[1] * dt;
+
+            // Escaped the system → recapture into a fresh orbit.
+            if (b.pos[0] < -respawn_margin or b.pos[0] > self.width + respawn_margin or
+                b.pos[1] < -respawn_margin or b.pos[1] > self.height + respawn_margin)
+            {
+                self.spawnOrbit(b, masses[0..n_mass]);
+                for (0..trail_history) |h| self.history[i][h] = b.pos;
+                continue;
+            }
+
+            // Buried-moon rescue: a body lingering deep inside a window is
+            // invisible — after a grace period, recapture it somewhere seen.
+            var buried = false;
+            const wcount = @min(state.windows.len, max_windows);
+            for (0..wcount) |wi| {
+                const w = state.windows[wi];
+                const inset_x = w.w * 0.15;
+                const inset_y = w.h * 0.15;
+                if (b.pos[0] > w.x + inset_x and b.pos[0] < w.x + w.w - inset_x and
+                    b.pos[1] > w.y + inset_y and b.pos[1] < w.y + w.h - inset_y)
+                {
+                    buried = true;
+                    break;
+                }
+            }
+            if (buried) {
+                b.buried_t += dt;
+                if (b.buried_t > buried_rescue_secs) {
+                    self.spawnOrbit(b, masses[0..n_mass]);
+                    for (0..trail_history) |h| self.history[i][h] = b.pos;
+                }
+            } else {
+                b.buried_t = 0;
+            }
+        }
+
+        const idx = self.history_idx % trail_history;
+        for (0..self.count) |i| {
+            self.history[i][idx] = self.bodies[i].pos;
+        }
+        self.history_idx +%= 1;
+    }
+
+    pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
+        c.glUseProgram(prog.program);
+
+        if (self.cached_program != prog.program) {
+            self.cached_program = prog.program;
+            self.loc_time = c.glGetUniformLocation(prog.program, "iKepTime");
+            self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
+            self.loc_fuzz = c.glGetUniformLocation(prog.program, "iFuzz");
+        }
+
+        // Slot layout: (x, y, size, color_idx + 16*trail_age). Age 0 = head.
+        var slot: u32 = 0;
+        const spacing = trail_history / trail_len;
+        for (0..self.count) |i| {
+            const b = self.bodies[i];
+            if (prog.i_particles[slot] >= 0) {
+                c.glUniform4f(prog.i_particles[slot], b.pos[0], b.pos[1], b.size, b.color_idx);
+            }
+            slot += 1;
+
+            for (0..trail_len) |t| {
+                const age = (t + 1) * spacing;
+                const h_idx = (self.history_idx -% @as(u32, @intCast(age))) % trail_history;
+                const pos = self.history[i][h_idx];
+                const tag = b.color_idx + 16.0 * @as(f32, @floatFromInt(t + 1));
+                if (prog.i_particles[slot] >= 0) {
+                    c.glUniform4f(prog.i_particles[slot], pos[0], pos[1], b.size, tag);
+                }
+                slot += 1;
+            }
+        }
+        if (prog.i_particle_count >= 0) {
+            c.glUniform1i(prog.i_particle_count, @intCast(slot));
+        }
+
+        // Effect-local time (fire.zig pattern) — keeps shader noise/twinkle
+        // coordinates small so f32 precision holds over long sessions.
+        if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
+        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
+        if (self.loc_fuzz >= 0) c.glUniform1f(self.loc_fuzz, if (self.fuzz) 1.0 else 0.0);
+    }
+
+    pub fn deinit(self: *Context) void {
+        self.audio.stop();
+        self.allocator.destroy(self.audio);
+    }
+};
