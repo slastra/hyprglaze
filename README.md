@@ -88,6 +88,15 @@ max_calls_per_minute = 6
 [tide]
 start_hour = 6.0      # hour at which the tide is empty
 end_hour   = 24.0     # hour at which the tide is full
+
+[voltaic]
+arc_rate = 1.0        # ambient strike frequency multiplier
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
+
+[kepler]
+count = 60            # orbiting bodies (max 60)
+fuzz = true           # wave-packet interference; false = comet dots + trails
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
 ```
 
 ### CLI
