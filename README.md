@@ -35,6 +35,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `glitch` | Audio-reactive glitch art with RGB split, block displacement, VHS wobble, scanlines |
 | `tide` | Time-aware rising water line tied to wall-clock time, with falling teardrops, crater splashes, and Worthington jets |
 | `fire` | Palette-driven flames rise from every window's top edge; moving windows fade with a directional wipe, neighbors warp from the wake |
+| `voltaic` | Tesla-coil desktop: branching midpoint-displacement lightning strikes between window borders, St. Elmo's fire crawls the focused window, bass beats trigger discharges |
 
 ## Install (Arch Linux)
 
@@ -58,7 +59,8 @@ zig build run
 
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
-#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire
+#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire,
+#          meshflow, swarm, voltaic
 effect = "fluid"
 theme = "Rosé Pine"
 
