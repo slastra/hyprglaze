@@ -316,6 +316,11 @@ test "parse config defaults when fields missing" {
 }
 
 test "parse invalid toml returns error" {
+    // The parse failure logs a warning by design; suppress it so the build
+    // runner doesn't echo a misleading "failed command:" on a green run.
+    std.testing.log_level = .err;
+    defer std.testing.log_level = .warn;
+
     const src = "this is = = not valid\n";
     const result = parse(std.testing.allocator, src, "/tmp/bad.toml");
     try std.testing.expectError(error.UnexpectedToken, result);

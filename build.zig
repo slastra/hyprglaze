@@ -107,7 +107,11 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "toml", .module = toml_dep.module("toml") },
             },
         }),
+        .use_llvm = llvm_backend,
+        .use_lld = llvm_backend,
     });
+    // watcher.zig calls libc (inotify, getenv) via std.c.
+    tests.root_module.link_libc = true;
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
