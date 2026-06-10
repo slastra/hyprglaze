@@ -19,6 +19,9 @@ uniform sampler2D iField;
 uniform float iBeat;
 uniform float iBass;
 uniform float iEnergy;
+// Ink saturation: 0 = full palette color, 1 = greyscale. Config-tunable
+// ([swarm] mute), hot-reloads with the config watcher.
+uniform float iMute;
 
 out vec4 fragColor;
 
@@ -78,9 +81,9 @@ float sdRoundBox(vec2 p, vec2 center, vec2 half_size, float radius) {
 
 // ---------- main ----------
 
-// Block quantization, kept as a dial: 1.0 = smooth contours (the look),
-// >1 quantizes everything into sprite blocks — pixelated topography.
-const float PIX = 1.0;
+// Block quantization, kept as a dial: 1.0 = smooth, >1 quantizes
+// everything into sprite blocks.
+const float PIX = 30.0;
 // In block mode fwidth is useless (density is constant within a block), so
 // the isoline threshold needs a fixed floor wide enough that contour rings
 // render as connected chains of blocks instead of scattered dots.
@@ -122,9 +125,10 @@ void main() {
 
     // ---------- contour-map rendering ----------
     // The flock is an elevation field: density is altitude. Thin isolines
-    // ring each density threshold like a topographic map, with faint
-    // hypsometric terraces between them. The murmuration reads as a living
-    // mountain range forming and eroding.
+    // ring each density threshold like a topographic map. CONTOUR = false
+    // shows the raw smooth field instead (diagnosis / taste-testing).
+    const bool CONTOUR = false;
+
     float panic = agit * (0.7 + 0.3 * vnoise(fc * 0.05 + iSwarmTime * 9.0));
 
     const float levels = 4.0;
@@ -137,24 +141,29 @@ void main() {
 
     // Elevation tint: walk the theme's terrain ramp band by band.
     // Disturbance zones (the unseen predator's wake) ring hot.
-    float lt = clamp(level / levels, 0.0, 1.0);
+    float lt = CONTOUR ? clamp(level / levels, 0.0, 1.0) : clamp(dens, 0.0, 1.0);
     float e = lt * 4.0;
     vec3 ramp;
     if      (e < 1.0) ramp = mix(elev0, elev1, e);
     else if (e < 2.0) ramp = mix(elev1, elev2, e - 1.0);
     else if (e < 3.0) ramp = mix(elev2, elev3, e - 2.0);
     else              ramp = mix(elev3, fg, min(e - 3.0, 1.0));
-    // Mute toward ink: heavily desaturated, leaned into the foreground —
-    // printed-map line tones rather than neon. Panic stays vivid.
+    // Mute toward ink: desaturated by the config dial, leaned into the
+    // foreground — printed-map line tones rather than neon. Panic stays vivid.
     float lum = dot(ramp, vec3(0.299, 0.587, 0.114));
-    ramp = mix(ramp, vec3(lum), 0.45);
+    ramp = mix(ramp, vec3(lum), iMute);
     ramp = mix(ramp, fg, 0.15);
     ramp = mix(ramp, hot, clamp(panic * 1.4, 0.0, 0.75));
 
-    // Pure line-work: no terraced fill, just crisp colored isolines on the
-    // bare theme background — the formations read as drawn cartography.
     float present = smoothstep(0.02, 0.10, dens);
-    col += ramp * iso * present * (0.8 + iEnergy * 0.4);
+    if (CONTOUR) {
+        // Pure line-work: crisp colored isolines on the bare theme
+        // background — the formations read as drawn cartography.
+        col += ramp * iso * present * (0.8 + iEnergy * 0.4);
+    } else {
+        // Raw field: the smooth density cloud, no quantization.
+        col += ramp * smoothstep(0.03, 0.75, dens) * (0.7 + iEnergy * 0.4);
+    }
 
     // The predator is deliberately invisible — an unseen force. You read
     // its position only from the holes it tears in the map and the hot
@@ -168,6 +177,10 @@ void main() {
         if (d < 0.0 || d > 60.0) continue;
         col += ramp * exp(-d * d / 800.0) * 0.08 * present * (1.0 + iBeat);
     }
+
+    // Grain: per-block random flicker — at chunky PIX sizes it reads as
+    // CRT static breathing under the image.
+    col += (hash21(fc + fract(iSwarmTime) * 100.0) - 0.5) * 0.012;
 
     fragColor = vec4(col, 1.0);
 }

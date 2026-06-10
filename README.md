@@ -37,7 +37,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `fire` | Palette-driven flames rise from every window's top edge; moving windows fade with a directional wipe, neighbors warp from the wake |
 | `voltaic` | Tesla-coil desktop: branching midpoint-displacement lightning strikes between window borders, St. Elmo's fire crawls the focused window, bass beats trigger discharges |
 | `kepler` | Windows become gravitational bodies: motes orbit them with real softened gravity while a lensed starfield and spacetime grid bend around window mass, the cursor a rogue comet that steals moons. Default `fuzz` mode renders bodies as huge interfering wave packets; `fuzz = false` switches to tight comet-trailed dots |
-| `swarm` | A boid murmuration rendered as a living topographic map: flock density becomes elevation with palette-tinted contour isolines. An invisible hawk dives at the densest formation on every beat, and fear contagion shatters islands apart; sustained silence settles the birds onto window top edges until music bursts them back into the sky |
+| `swarm` | A boid murmuration rendered as a chunky pixel-block cloud field in muted theme ink. An invisible hawk dives at the densest formation on every beat and fear contagion shatters islands apart; sustained silence settles the birds onto window top edges until music bursts them back into the sky. Shader dials switch to smooth or topographic contour-line rendering |
 
 ## Install (Arch Linux)
 
@@ -104,6 +104,7 @@ count = 240           # birds (max 256)
 speed = 220.0         # base flight speed (px/s)
 perception = 240.0    # neighbor sense radius
 separation = 54.0     # bird spacing — larger means bigger formations
+mute = 0.55           # ink saturation: 0 = full palette color, 1 = greyscale
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 ```
 

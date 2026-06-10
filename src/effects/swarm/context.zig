@@ -53,6 +53,9 @@ pub const Context = struct {
     quiet_t: f32 = 0,
     roost: f32 = 0,
 
+    /// Contour ink saturation control: 0 = full palette color, 1 = greyscale.
+    mute: f32 = 0.55,
+
     /// Field texture — created lazily on first upload, when GL is current.
     tex: c.GLuint = 0,
     cached_program: c.GLuint = 0,
@@ -61,6 +64,7 @@ pub const Context = struct {
     loc_beat: c.GLint = -1,
     loc_bass: c.GLint = -1,
     loc_energy: c.GLint = -1,
+    loc_mute: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -79,12 +83,14 @@ pub const Context = struct {
         sys.base_speed = params.getFloat("speed", 220.0);
         sys.perception = params.getFloat("perception", 240.0);
         sys.separation_dist = params.getFloat("separation", 54.0);
+        const mute = params.getFloat("mute", 0.55);
 
         return .{
             .audio = audio,
             .sys = sys,
             .allocator = allocator,
             .accum = accum,
+            .mute = mute,
         };
     }
 
@@ -242,6 +248,7 @@ pub const Context = struct {
             self.loc_beat = c.glGetUniformLocation(prog.program, "iBeat");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
             self.loc_energy = c.glGetUniformLocation(prog.program, "iEnergy");
+            self.loc_mute = c.glGetUniformLocation(prog.program, "iMute");
         }
 
         c.glActiveTexture(c.GL_TEXTURE0);
@@ -254,6 +261,7 @@ pub const Context = struct {
         if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
         if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.total_energy);
+        if (self.loc_mute >= 0) c.glUniform1f(self.loc_mute, self.mute);
     }
 
     pub fn deinit(self: *Context) void {
