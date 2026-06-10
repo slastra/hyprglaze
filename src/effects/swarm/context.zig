@@ -9,19 +9,32 @@ const c = @cImport({
     @cInclude("GLES3/gl3.h");
 });
 
-const TRAIL_LEN = 4;
-const TRAIL_HISTORY = 24;
-const SLOTS_PER = TRAIL_LEN + 1;
-const MAX_BOIDS = 300 / SLOTS_PER; // 60
+// Field resolution: the flock is splatted into this grid each frame and the
+// shader renders the field, not the boids — that's what turns dots into a
+// continuous murmuration. ~19px cells at 3072x1728; bilinear filtering and
+// shader-side noise hide the grid entirely.
+const field_w = 160;
+const field_h = 90;
+const field_cells = field_w * field_h;
+
+// Velocity normalization for the RG channels (pixels/sec mapped to ±1).
+const vel_scale: f32 = 700.0;
+
+const Accum = struct {
+    dens: [field_cells]f32,
+    velx: [field_cells]f32,
+    vely: [field_cells]f32,
+    agit: [field_cells]f32,
+    bytes: [field_cells * 4]u8,
+};
 
 pub const Context = struct {
     audio: *audio_mod.AudioCapture,
     sys: boids_mod.BoidSystem,
     allocator: std.mem.Allocator,
+    accum: *Accum,
 
-    // Position history ring buffer for trails
-    history: [boids_mod.max_boids][TRAIL_HISTORY][2]f32 = undefined,
-    history_idx: u32 = 0,
+    now: f32 = 0,
 
     // Audio analysis (glitch.zig pattern)
     bands: [6]f32 = [_]f32{0} ** 6,
@@ -35,37 +48,49 @@ pub const Context = struct {
     beat_cooldown: f32 = 0,
     total_energy: f32 = 0,
 
+    /// Roost state: sustained silence settles the flock onto window tops;
+    /// returning music bursts it back into the air.
+    quiet_t: f32 = 0,
+    roost: f32 = 0,
+
+    /// Field texture — created lazily on first upload, when GL is current.
+    tex: c.GLuint = 0,
+    cached_program: c.GLuint = 0,
+    loc_field: c.GLint = -1,
+    loc_time: c.GLint = -1,
+    loc_beat: c.GLint = -1,
+    loc_bass: c.GLint = -1,
+    loc_energy: c.GLint = -1,
+
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
         const audio = try allocator.create(audio_mod.AudioCapture);
+        errdefer allocator.destroy(audio);
         audio.* = audio_mod.AudioCapture.init(sink);
         audio.start();
 
-        var count: u32 = @intCast(params.getInt("count", 60));
-        count = @min(count, MAX_BOIDS);
+        const accum = try allocator.create(Accum);
+        accum.* = std.mem.zeroes(Accum);
+
+        var count: u32 = @intCast(params.getInt("count", 240));
+        count = @min(count, boids_mod.max_boids);
 
         var sys = boids_mod.BoidSystem.init(count, width, height);
-        sys.base_speed = params.getFloat("speed", 200.0);
-        sys.perception = params.getFloat("perception", 150.0);
-        sys.separation_dist = params.getFloat("separation", 40.0);
+        sys.base_speed = params.getFloat("speed", 220.0);
+        sys.perception = params.getFloat("perception", 240.0);
+        sys.separation_dist = params.getFloat("separation", 54.0);
 
-        var ctx = Context{
+        return .{
             .audio = audio,
             .sys = sys,
             .allocator = allocator,
+            .accum = accum,
         };
-
-        // Seed history with initial positions
-        for (0..count) |i| {
-            for (0..TRAIL_HISTORY) |h| {
-                ctx.history[i][h] = .{ sys.boids[i].x, sys.boids[i].y };
-            }
-        }
-        return ctx;
     }
 
     pub fn update(self: *Context, state: effects.FrameState) void {
         const dt = @min(state.dt, 0.05);
+        self.now += dt;
         const wave = self.audio.getWaveform();
 
         // 6 spectrum bands from waveform (same as glitch.zig)
@@ -99,89 +124,142 @@ pub const Context = struct {
         self.flux_avg += (flux_raw - self.flux_avg) * @min(1.0, 1.5 * dt);
 
         self.beat_cooldown -= dt;
+        var beat_hit = false;
+        var punch: f32 = 1.0;
         if (self.flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0 and self.bass_instant > self.bass_smooth * 1.5) {
             self.beat = 1.0;
             self.beat_cooldown = 0.25;
+            beat_hit = true;
+            punch = std.math.clamp(self.flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
         }
         self.beat *= @exp(-4.0 * dt);
         if (self.beat < 0.01) self.beat = 0;
 
-        // Update screen dimensions from FrameState windows
-        if (state.windows.len > 0) {
-            // Infer screen size from the first window's parent info or just use
-            // a large-enough boundary. The collision_rects and cursor positions
-            // are in screen coordinates, so we track via iResolution if available.
+        // Silence settles the flock; sound lifts it. Roost ramps in slowly
+        // (the birds drift down over a few seconds) but releases fast.
+        if (self.total_energy < 0.05) {
+            self.quiet_t += dt;
+        } else {
+            self.quiet_t = @max(0.0, self.quiet_t - dt * 6.0);
         }
+        const roost_target: f32 = std.math.clamp((self.quiet_t - 4.0) / 3.0, 0.0, 1.0);
+        const roost_prev = self.roost;
+        const roost_k: f32 = if (roost_target > self.roost) 0.5 else 2.5;
+        self.roost += (roost_target - self.roost) * @min(1.0, roost_k * dt);
+        // The frame the roost breaks, the flock explodes off its perches.
+        const burst = roost_prev > 0.55 and self.roost <= 0.55;
 
-        // Update boid simulation
+        // Flock + predator simulation
         self.sys.update(dt, state.cursor[0], state.cursor[1], state.collision_rects, .{
             .bass = self.bass,
             .beat = self.beat,
+            .beat_hit = beat_hit,
+            .punch = punch,
             .total_energy = self.total_energy,
+            .roost = self.roost,
+            .burst = burst,
         });
 
-        // Record position history
-        const idx = self.history_idx % TRAIL_HISTORY;
+        self.splatField();
+    }
+
+    /// Rasterize the flock into the density/velocity/agitation field.
+    /// Each boid drops a 3x3 gaussian; velocity is density-weighted so the
+    /// shader can streak the cloud along local motion.
+    fn splatField(self: *Context) void {
+        const a = self.accum;
+        @memset(&a.dens, 0);
+        @memset(&a.velx, 0);
+        @memset(&a.vely, 0);
+        @memset(&a.agit, 0);
+
+        const sx = @as(f32, field_w) / self.sys.width;
+        const sy = @as(f32, field_h) / self.sys.height;
+
         for (0..self.sys.count) |i| {
-            self.history[i][idx] = .{ self.sys.boids[i].x, self.sys.boids[i].y };
+            const b = self.sys.boids[i];
+            const fx = b.x * sx;
+            const fy = b.y * sy;
+            const cx: i32 = @intFromFloat(@floor(fx));
+            const cy: i32 = @intFromFloat(@floor(fy));
+
+            var oy: i32 = -3;
+            while (oy <= 3) : (oy += 1) {
+                var ox: i32 = -3;
+                while (ox <= 3) : (ox += 1) {
+                    const gx = cx + ox;
+                    const gy = cy + oy;
+                    if (gx < 0 or gx >= field_w or gy < 0 or gy >= field_h) continue;
+                    const dx = (@as(f32, @floatFromInt(gx)) + 0.5) - fx;
+                    const dy = (@as(f32, @floatFromInt(gy)) + 0.5) - fy;
+                    const w = @exp(-(dx * dx + dy * dy) * 0.22);
+                    const idx: usize = @intCast(gy * field_w + gx);
+                    a.dens[idx] += w;
+                    a.velx[idx] += b.vx * w;
+                    a.vely[idx] += b.vy * w;
+                    a.agit[idx] += b.agit * w;
+                }
+            }
         }
-        self.history_idx +%= 1;
+
+        // Pack to RGBA8: R/G = density-weighted velocity (biased ±vel_scale),
+        // B = agitation, A = soft-saturated density.
+        for (0..field_cells) |i| {
+            const d = a.dens[i];
+            var vx: f32 = 0;
+            var vy: f32 = 0;
+            var ag: f32 = 0;
+            if (d > 0.001) {
+                vx = std.math.clamp(a.velx[i] / d / vel_scale, -1.0, 1.0);
+                vy = std.math.clamp(a.vely[i] / d / vel_scale, -1.0, 1.0);
+                ag = std.math.clamp(a.agit[i] / d, 0.0, 1.0);
+            }
+            const dens = 1.0 - @exp(-d * 0.55);
+            a.bytes[i * 4 + 0] = @intFromFloat((vx * 0.5 + 0.5) * 255.0);
+            a.bytes[i * 4 + 1] = @intFromFloat((vy * 0.5 + 0.5) * 255.0);
+            a.bytes[i * 4 + 2] = @intFromFloat(ag * 255.0);
+            a.bytes[i * 4 + 3] = @intFromFloat(dens * 255.0);
+        }
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
         c.glUseProgram(prog.program);
 
-        const count = @min(self.sys.count, MAX_BOIDS);
-        var slot: u32 = 0;
-        const spacing = TRAIL_HISTORY / TRAIL_LEN;
-
-        for (0..count) |i| {
-            if (slot >= 300) break;
-            const b = self.sys.boids[i];
-
-            // Head: (pos.x, pos.y, heading, color_idx)
-            if (prog.i_particles[slot] >= 0) {
-                c.glUniform4f(prog.i_particles[slot], b.x, b.y, b.heading, b.color_idx);
-            }
-            slot += 1;
-
-            // Trail dots
-            for (0..TRAIL_LEN) |t| {
-                if (slot >= 300) break;
-                const age = (t + 1) * spacing;
-                const h_idx = (self.history_idx -% @as(u32, @intCast(age))) % TRAIL_HISTORY;
-                const pos = self.history[i][h_idx];
-
-                const fade: f32 = 1.0 - @as(f32, @floatFromInt(t + 1)) / @as(f32, @floatFromInt(TRAIL_LEN + 1));
-                const trail_size = b.size * fade;
-                const age_tag: f32 = @as(f32, @floatFromInt(t + 1)) * 10.0;
-
-                if (prog.i_particles[slot] >= 0) {
-                    c.glUniform4f(prog.i_particles[slot], pos[0], pos[1], trail_size, b.color_idx + age_tag);
-                }
-                slot += 1;
-            }
+        if (self.tex == 0) {
+            c.glGenTextures(1, &self.tex);
+            c.glBindTexture(c.GL_TEXTURE_2D, self.tex);
+            c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA8, field_w, field_h, 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, null);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
         }
 
-        if (prog.i_particle_count >= 0) {
-            c.glUniform1i(prog.i_particle_count, @intCast(slot));
+        if (self.cached_program != prog.program) {
+            self.cached_program = prog.program;
+            self.loc_field = c.glGetUniformLocation(prog.program, "iField");
+            self.loc_time = c.glGetUniformLocation(prog.program, "iSwarmTime");
+            self.loc_beat = c.glGetUniformLocation(prog.program, "iBeat");
+            self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
+            self.loc_energy = c.glGetUniformLocation(prog.program, "iEnergy");
         }
 
-        // Custom audio uniforms
-        var name_buf: [16]u8 = undefined;
-        for (0..6) |i| {
-            const bn = std.fmt.bufPrintZ(&name_buf, "iBands[{d}]", .{i}) catch continue;
-            const loc = c.glGetUniformLocation(prog.program, bn.ptr);
-            if (loc >= 0) c.glUniform1f(loc, self.bands[i]);
-        }
-        const beat_loc = c.glGetUniformLocation(prog.program, "iBeat");
-        if (beat_loc >= 0) c.glUniform1f(beat_loc, self.beat);
-        const bass_loc = c.glGetUniformLocation(prog.program, "iBass");
-        if (bass_loc >= 0) c.glUniform1f(bass_loc, self.bass);
+        c.glActiveTexture(c.GL_TEXTURE0);
+        c.glBindTexture(c.GL_TEXTURE_2D, self.tex);
+        c.glTexSubImage2D(c.GL_TEXTURE_2D, 0, 0, 0, field_w, field_h, c.GL_RGBA, c.GL_UNSIGNED_BYTE, &self.accum.bytes[0]);
+        if (self.loc_field >= 0) c.glUniform1i(self.loc_field, 0);
+
+        // Effect-local time (fire.zig pattern) for noise precision.
+        if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
+        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
+        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
+        if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.total_energy);
     }
 
     pub fn deinit(self: *Context) void {
+        if (self.tex != 0) c.glDeleteTextures(1, &self.tex);
         self.audio.stop();
         self.allocator.destroy(self.audio);
+        self.allocator.destroy(self.accum);
     }
 };
