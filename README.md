@@ -105,6 +105,8 @@ speed = 220.0         # base flight speed (px/s)
 perception = 240.0    # neighbor sense radius
 separation = 54.0     # bird spacing — larger means bigger formations
 mute = 0.55           # ink saturation: 0 = full palette color, 1 = greyscale
+pixel = 30.0          # block size in px; 1.0 = full-res smooth rendering
+contour = false       # true = topographic isoline mode instead of blocks
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 ```
 
