@@ -27,7 +27,6 @@ uniform float iTreble;
 uniform float iBeatPhase;
 uniform float iFlash;
 uniform int iGhostStart;   // segments at/after this index are afterglow embers
-uniform float iGhostCool;  // 0 = freshly struck ember, 1 = fully cooled
 
 out vec4 fragColor;
 
@@ -50,6 +49,17 @@ vec3 glowColor() {
 vec3 coreColor() {
     vec3 fg = (iPaletteSize > 0) ? iPaletteFg : vec3(0.9);
     return mix(fg, vec3(1.0), 0.6);
+}
+
+// Afterglow ember: the theme's purple (ANSI magenta — Rosé Pine's iris, etc).
+// Deepen it slightly so it stays readably purple when added over the dark bench
+// rather than washing toward pastel.
+vec3 emberColor() {
+    vec3 p = (iPaletteSize > 13) ? iPalette[13]
+           : (iPaletteSize > 5)  ? iPalette[5]
+           : vec3(0.66, 0.20, 1.0);
+    // Pull toward a saturated violet to counter pastel palette purples.
+    return mix(p, vec3(0.60, 0.16, 0.95), 0.45);
 }
 
 // ---------- focus rim ----------
@@ -116,10 +126,10 @@ void main() {
         // Dimmer (branch) segments are also thinner; bass fattens everything.
         float w = mix(0.55, 1.0, min(b, 1.0)) * (1.0 + iBass * 0.35);
 
-        // Afterglow embers: no hot core, just a soft cooling glow that the
-        // post-loop tint shifts toward violet as the channel fades.
+        // Afterglow embers: no hot core, just a soft violet glow. A tight inner
+        // channel plus a wider haze so the cooling ionized air reads as a cloud.
         if (i >= iGhostStart) {
-            ember = max(ember, exp(-d * 0.030 / w) * b);
+            ember = max(ember, exp(-d * 0.045 / w) * b + exp(-d * 0.013) * b * 0.5);
             continue;
         }
 
@@ -144,12 +154,9 @@ void main() {
     col += ccol * light.z * 3.20;           // overexposed core — blows out to white
 
     // Cooling-ember afterglow: the ionized channel still glows after the bolt
-    // is gone, shifting from electric blue toward violet as it cools — the
-    // recombination glow of real lightning's decaying channel. Always carries
-    // a little violet so embers read distinct from the live blue bolts.
-    vec3 violet = vec3(0.62, 0.24, 0.92);
-    vec3 emberCol = mix(mix(gcol, violet, 0.35), violet, iGhostCool);
-    col += emberCol * ember * 1.6;
+    // is gone — the recombination glow of real lightning's decaying channel.
+    // Theme purple, distinct from the live blue bolts.
+    col += emberColor() * ember * 1.9;
 
     // Beat: the whole bench flashes faintly, like a capacitor letting go.
     col += gcol * iBeat * 0.045;

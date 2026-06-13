@@ -58,8 +58,22 @@ const spawn_max: f32 = 1.10;
 const max_crawls = 6;
 const crawl_segs = 8;
 
-// Afterglow channel snapshot budget (one strong strike's worth of segments).
-const max_ghost = 90;
+// Afterglow: a pool of frozen channel snapshots, each from a strong strike,
+// fading independently. max_ghost caps one snapshot's segment count; max_embers
+// is how many recent strikes leave lingering violet ghosts at once.
+const max_ghost = 40;
+const max_embers = 4;
+const ember_life: f32 = 0.55;
+
+/// A frozen imprint of a strong strike's channel — re-emitted each frame as
+/// dim violet segments that fade over ember_life, outliving the bolt itself.
+const Ember = struct {
+    segs: [max_ghost][4]f32 = undefined,
+    b: [max_ghost]f32 = undefined,
+    count: u32 = 0,
+    age: f32 = 0,
+    active: bool = false,
+};
 
 const Crawl = struct {
     /// Perimeter offset of the start point and arc-length of the walk to
@@ -83,6 +97,7 @@ const Arc = struct {
     life: f32 = 0,
     intensity: f32 = 0,
     amp: f32 = 0,
+    captured: bool = false, // has this strike imprinted its afterglow ember yet
     active: bool = false,
 };
 
@@ -163,19 +178,13 @@ pub const Context = struct {
     seg_b: [max_segments]f32 = undefined,
     seg_count: u32 = 0,
 
-    // Afterglow: a frozen snapshot of the last strong strike's channel,
-    // re-emitted as dim decaying segments — the ionized air still glowing
-    // after the bolt itself is gone.
-    ghost_segs: [max_ghost][4]f32 = undefined,
-    ghost_b: [max_ghost]f32 = undefined,
-    ghost_count: u32 = 0,
-    ghost_age: f32 = 0,
-    ghost_life: f32 = 0,
-    // Index in segs[] where the appended ghost (afterglow) segments begin, and
-    // how cooled the ember is (0 = just struck, 1 = fully faded) — the shader
-    // tints segments past this index from electric blue toward violet.
+    // Afterglow: a pool of frozen channel snapshots from recent strong strikes,
+    // each fading independently. The ionized air still glowing after each bolt.
+    embers: [max_embers]Ember = [_]Ember{.{}} ** max_embers,
+    next_ember: u8 = 0,
+    // Index in segs[] where the appended ember segments begin — the shader
+    // tints everything past this index violet.
     ghost_start_idx: u32 = 0,
-    ghost_cool: f32 = 0,
 
     // Thunder flash: full-screen ambient brighten on big downbeat discharges,
     // fast decay — the room lighting up.
@@ -218,7 +227,6 @@ pub const Context = struct {
     loc_beat_phase: c.GLint = -1,
     loc_flash: c.GLint = -1,
     loc_ghost_start: c.GLint = -1,
-    loc_ghost_cool: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -489,8 +497,12 @@ pub const Context = struct {
         self.flash *= @exp(-7.0 * dt);
         if (self.flash < 0.004) self.flash = 0;
 
-        // Afterglow channel ages out continuously; strong strikes reset it.
-        self.ghost_age += dt;
+        // Afterglow embers each age independently; strong strikes add new ones.
+        for (&self.embers) |*e| {
+            if (!e.active) continue;
+            e.age += dt;
+            if (e.age >= ember_life) e.active = false;
+        }
 
         // ---- BPM-phase sync ----
         // Advance before snap so crossing detection uses the pre-snap fraction.
@@ -624,20 +636,25 @@ pub const Context = struct {
             const before = self.seg_count;
             self.genBolt(arc.a, arc.b, arc.amp * wander, env, reach, ar, bolt_segs, false, true);
 
-            // Snapshot strong, fully-extended strikes as the afterglow channel.
-            // While the arc lives this overwrites every frame (ghost tracks the
-            // live bolt); once it dies the last snapshot freezes and fades.
-            if (arc.intensity >= 0.9 and reach >= 1.0) {
+            // Imprint a strong, fully-extended strike into a fresh ember slot,
+            // exactly once (the frame its leader completes). Each ember then
+            // ages on its own, outliving the bolt so the violet ghost lingers
+            // at this spot while new strikes fire elsewhere.
+            if (arc.intensity >= 0.9 and reach >= 1.0 and !arc.captured) {
+                arc.captured = true;
+                const slot = self.next_ember;
+                self.next_ember = (self.next_ember + 1) % max_embers;
+                const e = &self.embers[slot];
                 var gi: u32 = 0;
                 var k = before;
                 while (k < self.seg_count and gi < max_ghost) : (k += 1) {
-                    self.ghost_segs[gi] = self.segs[k];
-                    self.ghost_b[gi] = self.seg_b[k];
+                    e.segs[gi] = self.segs[k];
+                    e.b[gi] = self.seg_b[k];
                     gi += 1;
                 }
-                self.ghost_count = gi;
-                self.ghost_age = 0;
-                self.ghost_life = 0.30;
+                e.count = gi;
+                e.age = 0;
+                e.active = true;
             }
         }
 
@@ -748,18 +765,19 @@ pub const Context = struct {
         }
 
         // ---- afterglow re-emission ----
-        // Append the frozen channel snapshot as dim, fast-fading segments.
-        // Quadratic falloff so the ember dies away rather than cutting out.
-        // Segments past ghost_start_idx are tinted violet by the shader.
+        // Append every active ember's frozen channel as dim segments that fade
+        // linearly over its life. Everything past ghost_start_idx is tinted
+        // violet by the shader. Embers from several recent strikes coexist, so
+        // violet ghosts linger at old strike sites as new bolts fire elsewhere.
         self.ghost_start_idx = self.seg_count;
-        if (self.ghost_count > 0 and self.ghost_age < self.ghost_life) {
-            const gp = self.ghost_age / self.ghost_life;
-            self.ghost_cool = gp;
-            const gfade = (1.0 - gp) * (1.0 - gp) * 0.20;
-            for (0..self.ghost_count) |k| {
+        for (&self.embers) |*e| {
+            if (!e.active) continue;
+            const gp = e.age / ember_life;
+            const gfade = (1.0 - gp) * 0.5;
+            for (0..e.count) |k| {
                 if (self.seg_count >= max_segments) break;
-                self.segs[self.seg_count] = self.ghost_segs[k];
-                self.seg_b[self.seg_count] = self.ghost_b[k] * gfade;
+                self.segs[self.seg_count] = e.segs[k];
+                self.seg_b[self.seg_count] = e.b[k] * gfade;
                 self.seg_count += 1;
             }
         }
@@ -780,7 +798,6 @@ pub const Context = struct {
             self.loc_beat_phase = c.glGetUniformLocation(prog.program, "iBeatPhase");
             self.loc_flash = c.glGetUniformLocation(prog.program, "iFlash");
             self.loc_ghost_start = c.glGetUniformLocation(prog.program, "iGhostStart");
-            self.loc_ghost_cool = c.glGetUniformLocation(prog.program, "iGhostCool");
         }
 
         const n = self.seg_count;
@@ -804,7 +821,6 @@ pub const Context = struct {
         if (self.loc_beat_phase >= 0) c.glUniform1f(self.loc_beat_phase, self.beat_phase);
         if (self.loc_flash >= 0) c.glUniform1f(self.loc_flash, self.flash);
         if (self.loc_ghost_start >= 0) c.glUniform1i(self.loc_ghost_start, @intCast(self.ghost_start_idx));
-        if (self.loc_ghost_cool >= 0) c.glUniform1f(self.loc_ghost_cool, self.ghost_cool);
     }
 
     pub fn deinit(self: *Context) void {
