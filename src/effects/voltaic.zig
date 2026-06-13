@@ -171,6 +171,11 @@ pub const Context = struct {
     ghost_count: u32 = 0,
     ghost_age: f32 = 0,
     ghost_life: f32 = 0,
+    // Index in segs[] where the appended ghost (afterglow) segments begin, and
+    // how cooled the ember is (0 = just struck, 1 = fully faded) — the shader
+    // tints segments past this index from electric blue toward violet.
+    ghost_start_idx: u32 = 0,
+    ghost_cool: f32 = 0,
 
     // Thunder flash: full-screen ambient brighten on big downbeat discharges,
     // fast decay — the room lighting up.
@@ -212,6 +217,8 @@ pub const Context = struct {
     loc_treble: c.GLint = -1,
     loc_beat_phase: c.GLint = -1,
     loc_flash: c.GLint = -1,
+    loc_ghost_start: c.GLint = -1,
+    loc_ghost_cool: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -743,8 +750,11 @@ pub const Context = struct {
         // ---- afterglow re-emission ----
         // Append the frozen channel snapshot as dim, fast-fading segments.
         // Quadratic falloff so the ember dies away rather than cutting out.
+        // Segments past ghost_start_idx are tinted violet by the shader.
+        self.ghost_start_idx = self.seg_count;
         if (self.ghost_count > 0 and self.ghost_age < self.ghost_life) {
             const gp = self.ghost_age / self.ghost_life;
+            self.ghost_cool = gp;
             const gfade = (1.0 - gp) * (1.0 - gp) * 0.20;
             for (0..self.ghost_count) |k| {
                 if (self.seg_count >= max_segments) break;
@@ -769,6 +779,8 @@ pub const Context = struct {
             self.loc_treble = c.glGetUniformLocation(prog.program, "iTreble");
             self.loc_beat_phase = c.glGetUniformLocation(prog.program, "iBeatPhase");
             self.loc_flash = c.glGetUniformLocation(prog.program, "iFlash");
+            self.loc_ghost_start = c.glGetUniformLocation(prog.program, "iGhostStart");
+            self.loc_ghost_cool = c.glGetUniformLocation(prog.program, "iGhostCool");
         }
 
         const n = self.seg_count;
@@ -791,6 +803,8 @@ pub const Context = struct {
         if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble);
         if (self.loc_beat_phase >= 0) c.glUniform1f(self.loc_beat_phase, self.beat_phase);
         if (self.loc_flash >= 0) c.glUniform1f(self.loc_flash, self.flash);
+        if (self.loc_ghost_start >= 0) c.glUniform1i(self.loc_ghost_start, @intCast(self.ghost_start_idx));
+        if (self.loc_ghost_cool >= 0) c.glUniform1f(self.loc_ghost_cool, self.ghost_cool);
     }
 
     pub fn deinit(self: *Context) void {

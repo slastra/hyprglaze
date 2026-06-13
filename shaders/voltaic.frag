@@ -26,6 +26,8 @@ uniform float iBass;
 uniform float iTreble;
 uniform float iBeatPhase;
 uniform float iFlash;
+uniform int iGhostStart;   // segments at/after this index are afterglow embers
+uniform float iGhostCool;  // 0 = freshly struck ember, 1 = fully cooled
 
 out vec4 fragColor;
 
@@ -92,6 +94,7 @@ void main() {
     //   halo:   colored mid-range bloom (plasma sheath)
     //   core:   overexposed white return-stroke channel
     vec3 light = vec3(0.0);
+    float ember = 0.0;   // afterglow channel glow (tinted violet below)
     for (int i = 0; i < iSegCount && i < 240; i++) {
         vec4 s = iSegs[i];
 
@@ -112,6 +115,14 @@ void main() {
 
         // Dimmer (branch) segments are also thinner; bass fattens everything.
         float w = mix(0.55, 1.0, min(b, 1.0)) * (1.0 + iBass * 0.35);
+
+        // Afterglow embers: no hot core, just a soft cooling glow that the
+        // post-loop tint shifts toward violet as the channel fades.
+        if (i >= iGhostStart) {
+            ember = max(ember, exp(-d * 0.030 / w) * b);
+            continue;
+        }
+
         // Wide outer corona: lights up the space around the bolt.
         light.x = max(light.x, exp(-d * 0.011) * b * 0.24);
         // Colored plasma halo.
@@ -131,6 +142,14 @@ void main() {
     col += gcol * light.x * 0.60;           // wide corona: faint space-lighting
     col += gcol * light.y * 0.90;           // colored plasma halo
     col += ccol * light.z * 3.20;           // overexposed core — blows out to white
+
+    // Cooling-ember afterglow: the ionized channel still glows after the bolt
+    // is gone, shifting from electric blue toward violet as it cools — the
+    // recombination glow of real lightning's decaying channel. Always carries
+    // a little violet so embers read distinct from the live blue bolts.
+    vec3 violet = vec3(0.62, 0.24, 0.92);
+    vec3 emberCol = mix(mix(gcol, violet, 0.35), violet, iGhostCool);
+    col += emberCol * ember * 1.6;
 
     // Beat: the whole bench flashes faintly, like a capacitor letting go.
     col += gcol * iBeat * 0.045;
