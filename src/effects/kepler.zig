@@ -85,6 +85,12 @@ pub const Context = struct {
     seeded: bool = false,
 
     bass: f32 = 0,
+    /// Broadband energy envelope — drives the ring flow speed.
+    energy: f32 = 0,
+    /// Outward-ripple phase clock; advances faster with energy so the rings
+    /// flow quicker on louder passages. Accumulated (not time*speed) so the
+    /// rate can change without phase discontinuities.
+    flow: f32 = 0,
 
     /// Render mode: wave-packet interference fuzz (default) vs. comet dots.
     fuzz: bool = true,
@@ -93,6 +99,7 @@ pub const Context = struct {
     loc_time: c.GLint = -1,
     loc_bass: c.GLint = -1,
     loc_fuzz: c.GLint = -1,
+    loc_flow: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -194,6 +201,16 @@ pub const Context = struct {
         const raw = (energy / 50.0) * 6.0;
         const k = if (raw > self.bass) @min(1.0, 25.0 * dt) else @min(1.0, 5.0 * dt);
         self.bass += (raw - self.bass) * k;
+
+        // Broadband energy across the whole waveform, same attack/decay shape.
+        var e_sum: f32 = 0;
+        for (0..128) |j| e_sum += @abs(wave[j]) + @abs(wave[128 + j]);
+        const e_raw = (e_sum / 256.0) * 6.0;
+        const ek = if (e_raw > self.energy) @min(1.0, 25.0 * dt) else @min(1.0, 5.0 * dt);
+        self.energy += (e_raw - self.energy) * ek;
+
+        // Advance the ripple clock: base flow plus an energy-driven boost.
+        self.flow += dt * (2.2 + self.energy * 4.0);
 
         var masses: [max_windows + 2]Mass = undefined;
         const n_mass = self.gatherMasses(state, &masses);
@@ -297,6 +314,7 @@ pub const Context = struct {
             self.loc_time = c.glGetUniformLocation(prog.program, "iKepTime");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
             self.loc_fuzz = c.glGetUniformLocation(prog.program, "iFuzz");
+            self.loc_flow = c.glGetUniformLocation(prog.program, "iFlow");
         }
 
         // Slot layout: (x, y, size, color_idx + 16*trail_age). Age 0 = head.
@@ -335,6 +353,7 @@ pub const Context = struct {
         if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
         if (self.loc_fuzz >= 0) c.glUniform1f(self.loc_fuzz, if (self.fuzz) 1.0 else 0.0);
+        if (self.loc_flow >= 0) c.glUniform1f(self.loc_flow, self.flow);
     }
 
     pub fn deinit(self: *Context) void {

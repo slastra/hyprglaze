@@ -22,6 +22,8 @@ uniform int iParticleCount;
 uniform float iBass;
 // 1.0 = wave-packet interference fuzz (default), 0.0 = comet dots + trails.
 uniform float iFuzz;
+// Outward-ripple phase clock, accumulated CPU-side; speeds up with energy.
+uniform float iFlow;
 
 out vec4 fragColor;
 
@@ -62,6 +64,8 @@ vec2 deflect(vec2 p) {
 // dispersion (the gravitational lens splits the fringes into rainbow).
 float interferenceField(vec2 p) {
     float field = 0.0;
+    // Bass loosens the ring spacing — the whole field breathes outward on hits.
+    float rf = RING_FREQ * (1.0 - iBass * 0.22);
     for (int i = 0; i < iParticleCount && i < 300; i++) {
         vec4 P = iParticles[i];
         if (P.w >= 16.0) continue; // heads only
@@ -72,7 +76,7 @@ float interferenceField(vec2 p) {
         float r = length(d);
         float env = exp(-(r * r) / (2.0 * sigma * sigma));
         float phase = float(cid) * 2.4;
-        field += env * sin(r * RING_FREQ - iKepTime * 2.2 + phase);
+        field += env * sin(r * rf - iFlow + phase);
     }
     return field;
 }
@@ -100,6 +104,7 @@ void main() {
         float field = 0.0;
         vec3 tint = vec3(0.0);
         float env_sum = 0.0;
+        float rf = RING_FREQ * (1.0 - iBass * 0.22); // bass breathes the spacing
         for (int i = 0; i < iParticleCount && i < 300; i++) {
             vec4 P = iParticles[i];
             if (P.w >= 16.0) continue; // heads only — trails are comet-mode
@@ -114,7 +119,7 @@ void main() {
             float r = length(d);
             float env = exp(-(r * r) / (2.0 * sigma * sigma));
             float phase = float(cid) * 2.4;
-            field += env * sin(r * RING_FREQ - iKepTime * 2.2 + phase);
+            field += env * sin(r * rf - iFlow + phase);
             tint += pc * env;
             env_sum += env;
         }
@@ -128,8 +133,13 @@ void main() {
         // Chromatic split: sample the field offset along the lens deflection,
         // a different shift per "wavelength". Identical to mono in calm space
         // (all three sample the same point) but fans apart where D is large.
-        float fR = interferenceField(fc + D * 1.1);
-        float fB = interferenceField(fc - D * 1.1);
+        // The offset axis slowly rotates so the dispersion fringes swirl around
+        // the bodies rather than sitting static along the lens direction.
+        float sw = iKepTime * 0.5;
+        mat2 swirl = mat2(cos(sw), -sin(sw), sin(sw), cos(sw));
+        vec2 disp = swirl * D * 1.1;
+        float fR = interferenceField(fc + disp);
+        float fB = interferenceField(fc - disp);
 
         // Theme-colored dispersion: tint the three lens-shifted samples with
         // palette colors spanning warm→cool instead of pure R/G/B primaries,
@@ -143,6 +153,13 @@ void main() {
 
         float lensAmt = smoothstep(5.0, 55.0, lens);
         vec3 inter = max(mix(mono, rgb, lensAmt), vec3(0.0));
+
+        // Antinodes: only the very strongest constructive peaks flare into
+        // bright near-white focal sparks (sharp cubic so the field stays calm
+        // elsewhere) — gives the kaleidoscope sparkle and depth.
+        float anti = bc * bc * bc;
+        inter += mix(avg, vec3(1.0), 0.6) * anti * 1.1;
+
         // Soft Reinhard so dense overlaps stay colored instead of clipping.
         col += inter / (1.0 + 0.35 * inter);
     } else {
