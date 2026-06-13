@@ -155,7 +155,11 @@ void main() {
             // Lorentzian envelope (long 1/r^2 tail, not a tight gaussian) so each
             // source radiates far across the medium and interferes everywhere —
             // the field reads as one rippling surface, not separate packets.
-            float env = (1.0 / (1.0 + (r * r) / (sigma * sigma * 4.0))) * aw;
+            // A smooth radial window tapers it to zero before the square reject
+            // box, so the slow tail never hits a hard edge (which clipped into
+            // axis-aligned "+" artifacts around bright sources).
+            float window = smoothstep(600.0, 420.0, r);
+            float env = (1.0 / (1.0 + (r * r) / (sigma * sigma * 4.0))) * aw * window;
             float phase = float(cid) * 2.4;
             field += env * sin(r * rf * dopp - iFlow + phase);
             tint += pc * env;
