@@ -114,10 +114,12 @@ pub const Context = struct {
     bass_prev: f32 = 0,
     flux_avg: f32 = 0,
     beat_cooldown: f32 = 0,
-    /// Sharp beat-pulse envelope — spikes on a hit, decays fast. Punches the
-    /// field brightness and ring spacing so beats land hard against a calmer
-    /// baseline flow.
+    /// Beat-pulse envelope — punches the field brightness and ring spacing so
+    /// beats land hard against a calmer baseline flow. `beat` eases toward
+    /// `beat_target` (set on a hit, then decaying) so the pulse swells in
+    /// smoothly over a few frames rather than snapping in one.
     beat: f32 = 0,
+    beat_target: f32 = 0,
     shocks: [max_shocks]Shock = [_]Shock{.{}} ** max_shocks,
     next_shock: u8 = 0,
 
@@ -290,16 +292,19 @@ pub const Context = struct {
                 .strength = punch,
                 .active = true,
             };
-            self.beat = punch;
+            self.beat_target = punch;
         }
         for (&self.shocks) |*s| {
             if (!s.active) continue;
             s.age += dt;
             if (s.age > shock_life) s.active = false;
         }
-        // Sharp decay so the beat punch is a snap, not a sustain.
-        self.beat *= @exp(-8.0 * dt);
-        if (self.beat < 0.01) self.beat = 0;
+        // Smooth attack + decay: the target relaxes toward zero while `beat`
+        // eases toward it, so the punch swells in over ~100ms and falls off
+        // rather than snapping in a single frame (which read as a hard jerk).
+        self.beat_target *= @exp(-6.0 * dt);
+        self.beat += (self.beat_target - self.beat) * @min(1.0, 14.0 * dt);
+        if (self.beat < 0.01 and self.beat_target < 0.01) self.beat = 0;
 
         if (!self.seeded) {
             self.seeded = true;

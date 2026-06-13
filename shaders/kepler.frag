@@ -85,7 +85,7 @@ float interferenceField(vec2 p) {
         // This body's band loosens its ring spacing — it breathes on its slice.
         // The beat punch pops every ring outward briefly.
         float be = min(iBands[cid % 6], 1.4);
-        float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.13);
+        float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.18);
         float sigma = P.z * 26.0;
         float r = length(d);
         float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
@@ -140,7 +140,7 @@ void main() {
             // ring spacing, so bass bodies pulse on kicks, treble on hats.
             // The beat punch pops every ring outward briefly.
             float be = min(iBands[cid % 6], 1.4);
-            float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.13);
+            float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.18);
             float sigma = P.z * 26.0;
             float r = length(d);
             float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
@@ -177,7 +177,7 @@ void main() {
         inter += mix(avg, vec3(1.0), 0.6) * anti * 1.1;
 
         // Beat punch: the whole field flares brighter on the hit.
-        inter *= 1.0 + min(iBeat, 1.6) * 0.55;
+        inter *= 1.0 + min(iBeat, 1.6) * 0.75;
 
         // Soft Reinhard so dense overlaps stay colored instead of clipping.
         col += inter / (1.0 + 0.35 * inter);
