@@ -26,6 +26,8 @@ uniform float iFuzz;
 uniform float iFlow;
 // Six-band spectrum; each body breathes on the band picked by its color index.
 uniform float iBands[6];
+// Beat shockwaves: (origin.xy, age_seconds, strength); strength 0 = inactive.
+uniform vec4 iShocks[4];
 
 out vec4 fragColor;
 
@@ -68,16 +70,19 @@ float interferenceField(vec2 p) {
     float field = 0.0;
     for (int i = 0; i < iParticleCount && i < 300; i++) {
         vec4 P = iParticles[i];
-        if (P.w >= 16.0) continue; // heads only
         vec2 d = p - P.xy;
         if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
+        // Doppler streak: trail samples (age>0) add dimmer smears behind the
+        // head, so fast bodies blur into arcs along their motion.
+        float age = floor(P.w / 16.0);
+        float aw = exp(-age * 0.7);
         int cid = int(mod(P.w, 16.0));
         // This body's band loosens its ring spacing — it breathes on its slice.
         float be = min(iBands[cid % 6], 1.4);
         float rf = RING_FREQ * (1.0 - be * 0.30);
         float sigma = P.z * 26.0;
         float r = length(d);
-        float env = exp(-(r * r) / (2.0 * sigma * sigma));
+        float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
         float phase = float(cid) * 2.4;
         field += env * sin(r * rf - iFlow + phase);
     }
@@ -109,11 +114,14 @@ void main() {
         float env_sum = 0.0;
         for (int i = 0; i < iParticleCount && i < 300; i++) {
             vec4 P = iParticles[i];
-            if (P.w >= 16.0) continue; // heads only — trails are comet-mode
 
             vec2 d = fc - P.xy;
             if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
 
+            // Doppler streak: include trail samples (age>0) as dimmer smears so
+            // fast bodies blur into motion arcs behind their heads.
+            float age = floor(P.w / 16.0);
+            float aw = exp(-age * 0.7);
             int cid = int(mod(P.w, 16.0));
             vec3 pc = (iPaletteSize > cid) ? iPalette[cid] : vec3(0.7, 0.8, 1.0);
 
@@ -123,7 +131,7 @@ void main() {
             float rf = RING_FREQ * (1.0 - be * 0.30);
             float sigma = P.z * 26.0;
             float r = length(d);
-            float env = exp(-(r * r) / (2.0 * sigma * sigma));
+            float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
             float phase = float(cid) * 2.4;
             field += env * sin(r * rf - iFlow + phase);
             tint += pc * env;
@@ -188,6 +196,19 @@ void main() {
             vec3 body_col = mix(pc, fg, age < 0.5 ? 0.25 : 0.0);
             col += (body_col * (core + halo)) * fade * 1.35;
         }
+    }
+
+    // Beat shockwaves: expanding ring pulses sweeping out from the loudest
+    // window on each detected bass hit. Radius grows with age; the ring fades
+    // over its life. Tinted with the theme accent.
+    for (int i = 0; i < 4; i++) {
+        vec4 sh = iShocks[i];
+        if (sh.w <= 0.001) continue;
+        float radius = sh.z * 900.0;
+        float dring = abs(length(fc - sh.xy) - radius);
+        float ring = exp(-dring * dring / (2.0 * 55.0 * 55.0));
+        float fade = sh.w * max(0.0, 1.0 - sh.z / 0.8);
+        col += accent * ring * fade * 0.55;
     }
 
     // Whisper of vignette so the field has depth.

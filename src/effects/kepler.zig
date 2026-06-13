@@ -69,6 +69,18 @@ const Mass = struct {
     half_min: f32,
 };
 
+// Beat shockwaves: expanding ring pulses emitted from the loudest window on
+// each detected bass hit.
+const max_shocks = 4;
+const shock_life: f32 = 0.8;
+
+const Shock = struct {
+    pos: [2]f32 = .{ 0, 0 },
+    age: f32 = 0,
+    strength: f32 = 0,
+    active: bool = false,
+};
+
 pub const Context = struct {
     allocator: std.mem.Allocator,
     audio: *audio_mod.AudioCapture,
@@ -96,6 +108,13 @@ pub const Context = struct {
     /// rate can change without phase discontinuities.
     flow: f32 = 0,
 
+    // Bass-flux beat detection for shockwave triggering.
+    bass_prev: f32 = 0,
+    flux_avg: f32 = 0,
+    beat_cooldown: f32 = 0,
+    shocks: [max_shocks]Shock = [_]Shock{.{}} ** max_shocks,
+    next_shock: u8 = 0,
+
     /// Render mode: wave-packet interference fuzz (default) vs. comet dots.
     fuzz: bool = true,
 
@@ -105,6 +124,7 @@ pub const Context = struct {
     loc_fuzz: c.GLint = -1,
     loc_flow: c.GLint = -1,
     loc_bands: c.GLint = -1,
+    loc_shocks: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -235,6 +255,38 @@ pub const Context = struct {
         var masses: [max_windows + 2]Mass = undefined;
         const n_mass = self.gatherMasses(state, &masses);
 
+        // Bass-flux beat detection → emit a shockwave from the heaviest window.
+        const flux = @max(0.0, self.bass - self.bass_prev);
+        self.bass_prev = self.bass;
+        self.flux_avg += (flux - self.flux_avg) * @min(1.0, 1.5 * dt);
+        self.beat_cooldown -= dt;
+        if (flux > self.flux_avg * 3.0 + 0.02 and self.beat_cooldown <= 0 and self.bass > 0.15) {
+            self.beat_cooldown = 0.22;
+            // Origin = heaviest anchor mass (exclude the cursor in the last slot).
+            var origin = [2]f32{ self.width * 0.5, self.height * 0.5 };
+            var best_m: f32 = -1.0;
+            const anchor_n = if (n_mass > 1) n_mass - 1 else n_mass;
+            for (0..anchor_n) |mi| {
+                if (masses[mi].m > best_m) {
+                    best_m = masses[mi].m;
+                    origin = masses[mi].pos;
+                }
+            }
+            const slot = self.next_shock;
+            self.next_shock = (self.next_shock + 1) % max_shocks;
+            self.shocks[slot] = .{
+                .pos = origin,
+                .age = 0,
+                .strength = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.02), 1.0, 2.0),
+                .active = true,
+            };
+        }
+        for (&self.shocks) |*s| {
+            if (!s.active) continue;
+            s.age += dt;
+            if (s.age > shock_life) s.active = false;
+        }
+
         if (!self.seeded) {
             self.seeded = true;
             for (self.bodies[0..self.count]) |*b| self.spawnOrbit(b, masses[0..n_mass]);
@@ -336,6 +388,7 @@ pub const Context = struct {
             self.loc_fuzz = c.glGetUniformLocation(prog.program, "iFuzz");
             self.loc_flow = c.glGetUniformLocation(prog.program, "iFlow");
             self.loc_bands = c.glGetUniformLocation(prog.program, "iBands[0]");
+            self.loc_shocks = c.glGetUniformLocation(prog.program, "iShocks[0]");
         }
 
         // Slot layout: (x, y, size, color_idx + 16*trail_age). Age 0 = head.
@@ -379,6 +432,14 @@ pub const Context = struct {
         if (self.loc_fuzz >= 0) c.glUniform1f(self.loc_fuzz, if (self.fuzz) 1.0 else 0.0);
         if (self.loc_flow >= 0) c.glUniform1f(self.loc_flow, self.flow);
         if (self.loc_bands >= 0) c.glUniform1fv(self.loc_bands, 6, &self.bands[0]);
+        if (self.loc_shocks >= 0) {
+            // Pack each shock as (x, y, age, strength); strength 0 = inactive.
+            var packed_sh: [max_shocks][4]f32 = undefined;
+            for (self.shocks, 0..) |s, si| {
+                packed_sh[si] = .{ s.pos[0], s.pos[1], s.age, if (s.active) s.strength else 0.0 };
+            }
+            c.glUniform4fv(self.loc_shocks, max_shocks, @ptrCast(&packed_sh[0]));
+        }
     }
 
     pub fn deinit(self: *Context) void {
