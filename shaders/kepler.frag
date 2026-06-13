@@ -122,12 +122,20 @@ void main() {
         vec3 mono = avg * bc * bc * 1.6 + avg * min(field, 0.0) * 0.20;
 
         // Chromatic split: sample the field offset along the lens deflection,
-        // a different shift per channel. Identical to mono in calm space (all
-        // three sample the same point) but fans into rainbow where D is large.
+        // a different shift per "wavelength". Identical to mono in calm space
+        // (all three sample the same point) but fans apart where D is large.
         float fR = interferenceField(fc + D * 1.1);
         float fB = interferenceField(fc - D * 1.1);
-        vec3 rgb = vec3(max(fR, 0.0), bc, max(fB, 0.0));
-        rgb = rgb * rgb * 1.6;
+
+        // Theme-colored dispersion: tint the three lens-shifted samples with
+        // palette colors spanning warm→cool instead of pure R/G/B primaries,
+        // so the "rainbow" is the scheme's own spectrum.
+        vec3 cWarm = (iPaletteSize > 9)  ? iPalette[9]  : vec3(1.0, 0.35, 0.35);
+        vec3 cMid  = (iPaletteSize > 11) ? iPalette[11] : vec3(0.5, 1.0, 0.4);
+        vec3 cCool = (iPaletteSize > 12) ? iPalette[12] : vec3(0.35, 0.5, 1.0);
+        float rR = max(fR, 0.0);
+        float rB = max(fB, 0.0);
+        vec3 rgb = (cWarm * rR * rR + cMid * bc * bc + cCool * rB * rB) * 1.6;
 
         float lensAmt = smoothstep(5.0, 55.0, lens);
         vec3 inter = max(mix(mono, rgb, lensAmt), vec3(0.0));
