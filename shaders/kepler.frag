@@ -28,6 +28,9 @@ uniform float iFlow;
 uniform float iBands[6];
 // Sharp beat-pulse envelope — flashes brightness and pops the rings outward.
 uniform float iBeat;
+// Per-body velocity (px/s), indexed by body = particle_index / 5. Drives the
+// Doppler wavefront compression.
+uniform vec2 iVel[60];
 
 out vec4 fragColor;
 
@@ -124,7 +127,7 @@ void main() {
             vec4 P = iParticles[i];
 
             vec2 d = wfc - P.xy; // read through the gravitational lens
-            if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
+            if (abs(d.x) > 600.0 || abs(d.y) > 600.0) continue;
 
             // Doppler streak: include trail samples (age>0) as dimmer smears so
             // fast bodies blur into motion arcs behind their heads.
@@ -140,9 +143,21 @@ void main() {
             float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.18);
             float sigma = P.z * 26.0;
             float r = length(d);
-            float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
+
+            // Real Doppler: a moving source bunches its wavefronts ahead of its
+            // motion and stretches them behind. Scale the ring frequency by the
+            // velocity component along the body->point direction.
+            vec2 vel = iVel[i / 5];
+            float sp = length(vel);
+            float dopp = 1.0 + clamp(sp / 1100.0, 0.0, 0.45)
+                       * dot(d / max(r, 1.0), vel / max(sp, 1.0));
+
+            // Lorentzian envelope (long 1/r^2 tail, not a tight gaussian) so each
+            // source radiates far across the medium and interferes everywhere —
+            // the field reads as one rippling surface, not separate packets.
+            float env = (1.0 / (1.0 + (r * r) / (sigma * sigma * 4.0))) * aw;
             float phase = float(cid) * 2.4;
-            field += env * sin(r * rf - iFlow + phase);
+            field += env * sin(r * rf * dopp - iFlow + phase);
             tint += pc * env;
             env_sum += env;
         }
@@ -161,7 +176,7 @@ void main() {
         // through the field, sharpening the wave structure into a fine web.
         // Gated by env_sum so the empty background (field ~ 0 everywhere)
         // doesn't flood with the zero-level line.
-        float g = field / 0.5;
+        float g = field / 0.5 - 0.5; // offset so lines sit between the nodes
         float di = abs(g - floor(g + 0.5));
         float aa = fwidth(g) + 1e-4;
         float contour = (1.0 - smoothstep(0.0, aa * 1.5, di)) * smoothstep(0.05, 0.45, env_sum);
@@ -178,6 +193,13 @@ void main() {
 
         // Soft Reinhard so dense overlaps stay colored instead of clipping.
         col += inter / (1.0 + 0.35 * inter);
+
+        // Fringe duality: carve dark nodal lines where the waves cancel
+        // (field ~ 0), so bright fringes alternate with true dark minima — the
+        // Young's-interference signature. Gated by wave presence so the empty
+        // background isn't darkened.
+        float node = exp(-field * field * 7.0) * smoothstep(0.1, 0.5, env_sum);
+        col = mix(col, col * 0.35, node * 0.6);
     } else {
         // Comet mode: tight additive dots with fading trails.
         for (int i = 0; i < iParticleCount && i < 300; i++) {

@@ -119,6 +119,7 @@ pub const Context = struct {
     loc_flow: c.GLint = -1,
     loc_bands: c.GLint = -1,
     loc_beat: c.GLint = -1,
+    loc_vel: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -369,6 +370,7 @@ pub const Context = struct {
             self.loc_flow = c.glGetUniformLocation(prog.program, "iFlow");
             self.loc_bands = c.glGetUniformLocation(prog.program, "iBands[0]");
             self.loc_beat = c.glGetUniformLocation(prog.program, "iBeat");
+            self.loc_vel = c.glGetUniformLocation(prog.program, "iVel[0]");
         }
 
         // Slot layout: (x, y, size, color_idx + 16*trail_age). Age 0 = head.
@@ -415,6 +417,12 @@ pub const Context = struct {
         if (self.loc_flow >= 0) c.glUniform1f(self.loc_flow, self.flow);
         if (self.loc_bands >= 0) c.glUniform1fv(self.loc_bands, 6, &self.bands[0]);
         if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
+        if (self.loc_vel >= 0) {
+            // Per-body velocity for the shader's Doppler term (one vec2 each).
+            var vels: [max_bodies][2]f32 = undefined;
+            for (0..self.count) |i| vels[i] = self.bodies[i].vel;
+            c.glUniform2fv(self.loc_vel, @intCast(self.count), @ptrCast(&vels[0]));
+        }
     }
 
     pub fn deinit(self: *Context) void {
