@@ -105,7 +105,6 @@ void main() {
     vec3 accent = (iPaletteSize > 12) ? iPalette[12] : vec3(0.35, 0.5, 0.95);
 
     vec2 D = deflect(fc);
-    float lens = length(D);
     // Gravitationally-warped sample position: the interference pattern is read
     // through the lens, so its rings bend and magnify toward heavy windows.
     vec2 wfc = fc + D * 1.4;
@@ -157,29 +156,8 @@ void main() {
         float bc = max(field, 0.0);
         vec3 mono = avg * bc * bc * 1.6 + avg * min(field, 0.0) * 0.20;
 
-        // Chromatic split: sample the field offset along the lens deflection,
-        // a different shift per "wavelength". Identical to mono in calm space
-        // (all three sample the same point) but fans apart where D is large.
-        // The offset axis slowly rotates so the dispersion fringes swirl around
-        // the bodies rather than sitting static along the lens direction.
-        float sw = iKepTime * 0.5;
-        mat2 swirl = mat2(cos(sw), -sin(sw), sin(sw), cos(sw));
-        vec2 disp = swirl * D * 1.1;
-        float fR = interferenceField(wfc + disp);
-        float fB = interferenceField(wfc - disp);
-
-        // Theme-colored dispersion: tint the three lens-shifted samples with
-        // palette colors spanning warm→cool instead of pure R/G/B primaries,
-        // so the "rainbow" is the scheme's own spectrum.
-        vec3 cWarm = (iPaletteSize > 9)  ? iPalette[9]  : vec3(1.0, 0.35, 0.35);
-        vec3 cMid  = (iPaletteSize > 11) ? iPalette[11] : vec3(0.5, 1.0, 0.4);
-        vec3 cCool = (iPaletteSize > 12) ? iPalette[12] : vec3(0.35, 0.5, 1.0);
-        float rR = max(fR, 0.0);
-        float rB = max(fB, 0.0);
-        vec3 rgb = (cWarm * rR * rR + cMid * bc * bc + cCool * rB * rB) * 1.6;
-
-        float lensAmt = smoothstep(5.0, 55.0, lens);
-        vec3 inter = max(mix(mono, rgb, lensAmt), vec3(0.0));
+        // Chromatic dispersion disabled — just the palette-colored interference.
+        vec3 inter = max(mono, vec3(0.0));
 
         // Antinodes: only the very strongest constructive peaks flare into
         // bright near-white focal sparks (sharp cubic so the field stays calm
