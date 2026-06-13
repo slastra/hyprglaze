@@ -85,6 +85,10 @@ pub const Context = struct {
     seeded: bool = false,
 
     bass: f32 = 0,
+    /// Six-band spectrum (sub-bass → air). Each body is assigned one band by
+    /// its color index and pulses with that band, so the field splits the
+    /// music across the swarm instead of every body reacting to everything.
+    bands: [6]f32 = [_]f32{0} ** 6,
     /// Broadband energy envelope — drives the ring flow speed.
     energy: f32 = 0,
     /// Outward-ripple phase clock; advances faster with energy so the rings
@@ -100,6 +104,7 @@ pub const Context = struct {
     loc_bass: c.GLint = -1,
     loc_fuzz: c.GLint = -1,
     loc_flow: c.GLint = -1,
+    loc_bands: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -209,6 +214,21 @@ pub const Context = struct {
         const ek = if (e_raw > self.energy) @min(1.0, 25.0 * dt) else @min(1.0, 5.0 * dt);
         self.energy += (e_raw - self.energy) * ek;
 
+        // Six-band split (glitch/voltaic pattern): per-band envelope so each
+        // body can ride its own slice of the spectrum.
+        const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
+        for (0..6) |bi| {
+            var en: f32 = 0;
+            const lo = ranges[bi][0];
+            const hi = ranges[bi][1];
+            for (lo..hi) |j| en += @abs(wave[j]) + @abs(wave[128 + j]);
+            en /= @floatFromInt((hi - lo) * 2);
+            const b_raw = en * 6.0;
+            const attack = @min(1.0, 25.0 * dt);
+            const decay = @min(1.0, 5.0 * dt);
+            self.bands[bi] += (b_raw - self.bands[bi]) * (if (b_raw > self.bands[bi]) attack else decay);
+        }
+
         // Advance the ripple clock: base flow plus an energy-driven boost.
         self.flow += dt * (2.2 + self.energy * 4.0);
 
@@ -315,6 +335,7 @@ pub const Context = struct {
             self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
             self.loc_fuzz = c.glGetUniformLocation(prog.program, "iFuzz");
             self.loc_flow = c.glGetUniformLocation(prog.program, "iFlow");
+            self.loc_bands = c.glGetUniformLocation(prog.program, "iBands[0]");
         }
 
         // Slot layout: (x, y, size, color_idx + 16*trail_age). Age 0 = head.
@@ -322,12 +343,15 @@ pub const Context = struct {
         const spacing = trail_history / trail_len;
         for (0..self.count) |i| {
             const b = self.bodies[i];
-            // Render size folds in the perihelion swell and a bass breath,
-            // clamped so the packet never outgrows the shader's reject box,
-            // then scaled by a smoothstep fade-in so fresh bodies grow in.
+            // Render size folds in the perihelion swell and this body's own
+            // spectral band (assigned by color index), clamped so the packet
+            // never outgrows the shader's reject box, then scaled by a
+            // smoothstep fade-in so fresh bodies grow in.
+            const band = @as(usize, @intFromFloat(b.color_idx)) % 6;
+            const be = @min(self.bands[band], 1.4);
             const ft = std.math.clamp(b.birth / birth_fade_secs, 0.0, 1.0);
             const fade = ft * ft * (3.0 - 2.0 * ft);
-            const dsize = @min(b.size * b.glow * (1.0 + self.bass * 0.2), render_size_max) * fade;
+            const dsize = @min(b.size * b.glow * (1.0 + be * 0.6), render_size_max) * fade;
             if (prog.i_particles[slot] >= 0) {
                 c.glUniform4f(prog.i_particles[slot], b.pos[0], b.pos[1], dsize, b.color_idx);
             }
@@ -354,6 +378,7 @@ pub const Context = struct {
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
         if (self.loc_fuzz >= 0) c.glUniform1f(self.loc_fuzz, if (self.fuzz) 1.0 else 0.0);
         if (self.loc_flow >= 0) c.glUniform1f(self.loc_flow, self.flow);
+        if (self.loc_bands >= 0) c.glUniform1fv(self.loc_bands, 6, &self.bands[0]);
     }
 
     pub fn deinit(self: *Context) void {

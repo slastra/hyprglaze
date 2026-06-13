@@ -24,6 +24,8 @@ uniform float iBass;
 uniform float iFuzz;
 // Outward-ripple phase clock, accumulated CPU-side; speeds up with energy.
 uniform float iFlow;
+// Six-band spectrum; each body breathes on the band picked by its color index.
+uniform float iBands[6];
 
 out vec4 fragColor;
 
@@ -64,14 +66,15 @@ vec2 deflect(vec2 p) {
 // dispersion (the gravitational lens splits the fringes into rainbow).
 float interferenceField(vec2 p) {
     float field = 0.0;
-    // Bass loosens the ring spacing — the whole field breathes outward on hits.
-    float rf = RING_FREQ * (1.0 - iBass * 0.22);
     for (int i = 0; i < iParticleCount && i < 300; i++) {
         vec4 P = iParticles[i];
         if (P.w >= 16.0) continue; // heads only
         vec2 d = p - P.xy;
         if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
         int cid = int(mod(P.w, 16.0));
+        // This body's band loosens its ring spacing — it breathes on its slice.
+        float be = min(iBands[cid % 6], 1.4);
+        float rf = RING_FREQ * (1.0 - be * 0.30);
         float sigma = P.z * 26.0;
         float r = length(d);
         float env = exp(-(r * r) / (2.0 * sigma * sigma));
@@ -104,7 +107,6 @@ void main() {
         float field = 0.0;
         vec3 tint = vec3(0.0);
         float env_sum = 0.0;
-        float rf = RING_FREQ * (1.0 - iBass * 0.22); // bass breathes the spacing
         for (int i = 0; i < iParticleCount && i < 300; i++) {
             vec4 P = iParticles[i];
             if (P.w >= 16.0) continue; // heads only — trails are comet-mode
@@ -115,6 +117,10 @@ void main() {
             int cid = int(mod(P.w, 16.0));
             vec3 pc = (iPaletteSize > cid) ? iPalette[cid] : vec3(0.7, 0.8, 1.0);
 
+            // Each body breathes on its assigned band: that slice loosens its
+            // ring spacing, so bass bodies pulse on kicks, treble on hats.
+            float be = min(iBands[cid % 6], 1.4);
+            float rf = RING_FREQ * (1.0 - be * 0.30);
             float sigma = P.z * 26.0;
             float r = length(d);
             float env = exp(-(r * r) / (2.0 * sigma * sigma));
