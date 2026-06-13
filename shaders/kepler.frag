@@ -25,6 +25,10 @@ uniform float iFuzz;
 
 out vec4 fragColor;
 
+// Wave-packet ring frequency — higher packs more concentric rings into each
+// body, so overlaps moiré into denser kaleidoscopic interference.
+const float RING_FREQ = 0.13;
+
 // ---------- gravitational deflection ----------
 
 // Aggregate lens deflection at p: each window bends "light" toward itself
@@ -68,7 +72,7 @@ float interferenceField(vec2 p) {
         float r = length(d);
         float env = exp(-(r * r) / (2.0 * sigma * sigma));
         float phase = float(cid) * 2.4;
-        field += env * sin(r * 0.055 - iKepTime * 2.2 + phase);
+        field += env * sin(r * RING_FREQ - iKepTime * 2.2 + phase);
     }
     return field;
 }
@@ -110,7 +114,7 @@ void main() {
             float r = length(d);
             float env = exp(-(r * r) / (2.0 * sigma * sigma));
             float phase = float(cid) * 2.4;
-            field += env * sin(r * 0.055 - iKepTime * 2.2 + phase);
+            field += env * sin(r * RING_FREQ - iKepTime * 2.2 + phase);
             tint += pc * env;
             env_sum += env;
         }
