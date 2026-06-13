@@ -43,7 +43,7 @@ const float RING_FREQ = 0.13;
 // rim glow, so all three layers agree about the geometry.
 vec2 deflect(vec2 p) {
     vec2 D = vec2(0.0);
-    float depth = 16.0 * (1.0 + iBass * 0.7);
+    float depth = 26.0 * (1.0 + iBass * 0.7);
     for (int i = 0; i < iWindowCount && i < 32; i++) {
         vec4 win = iWindows[i];
         if (win.z < 8.0 || win.w < 8.0) continue;
@@ -100,6 +100,9 @@ void main() {
 
     vec2 D = deflect(fc);
     float lens = length(D);
+    // Gravitationally-warped sample position: the interference pattern is read
+    // through the lens, so its rings bend and magnify toward heavy windows.
+    vec2 wfc = fc + D * 2.4;
 
     // Deep-space backdrop, slightly darker than the raw theme bg.
     vec3 col = bg * 0.75;
@@ -115,7 +118,7 @@ void main() {
         for (int i = 0; i < iParticleCount && i < 300; i++) {
             vec4 P = iParticles[i];
 
-            vec2 d = fc - P.xy;
+            vec2 d = wfc - P.xy; // read through the gravitational lens
             if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
 
             // Doppler streak: include trail samples (age>0) as dimmer smears so
@@ -152,8 +155,8 @@ void main() {
         float sw = iKepTime * 0.5;
         mat2 swirl = mat2(cos(sw), -sin(sw), sin(sw), cos(sw));
         vec2 disp = swirl * D * 1.1;
-        float fR = interferenceField(fc + disp);
-        float fB = interferenceField(fc - disp);
+        float fR = interferenceField(wfc + disp);
+        float fB = interferenceField(wfc - disp);
 
         // Theme-colored dispersion: tint the three lens-shifted samples with
         // palette colors spanning warm→cool instead of pure R/G/B primaries,
