@@ -26,8 +26,6 @@ uniform float iFuzz;
 uniform float iFlow;
 // Six-band spectrum; each body breathes on the band picked by its color index.
 uniform float iBands[6];
-// Beat shockwaves: (origin.xy, age_seconds, strength); strength 0 = inactive.
-uniform vec4 iShocks[4];
 // Sharp beat-pulse envelope — flashes brightness and pops the rings outward.
 uniform float iBeat;
 
@@ -102,7 +100,6 @@ void main() {
 
     vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.01, 0.012, 0.025);
     vec3 fg = (iPaletteSize > 0) ? iPaletteFg : vec3(0.85);
-    vec3 accent = (iPaletteSize > 12) ? iPalette[12] : vec3(0.35, 0.5, 0.95);
 
     vec2 D = deflect(fc);
     // Gravitationally-warped sample position: the interference pattern is read
@@ -201,19 +198,6 @@ void main() {
             vec3 body_col = mix(pc, fg, age < 0.5 ? 0.25 : 0.0);
             col += (body_col * (core + halo)) * fade * 1.35;
         }
-    }
-
-    // Beat shockwaves: expanding ring pulses sweeping out from the loudest
-    // window on each detected bass hit. Radius grows with age; the ring fades
-    // over its life. Tinted with the theme accent.
-    for (int i = 0; i < 4; i++) {
-        vec4 sh = iShocks[i];
-        if (sh.w <= 0.001) continue;
-        float radius = sh.z * 1100.0;
-        float dring = abs(length(fc - sh.xy) - radius);
-        float ring = exp(-dring * dring / (2.0 * 42.0 * 42.0));
-        float fade = sh.w * max(0.0, 1.0 - sh.z / 0.8);
-        col += accent * ring * fade * 0.9;
     }
 
     // Whisper of vignette so the field has depth.
