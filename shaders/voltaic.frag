@@ -134,9 +134,6 @@ void main() {
 
     // Beat: the whole bench flashes faintly, like a capacitor letting go.
     col += gcol * iBeat * 0.045;
-    // Charge-up: glow builds in the final 20% of each beat — anticipation
-    // before the next discharge snaps it back to zero.
-    col += gcol * smoothstep(0.80, 1.0, iBeatPhase) * 0.028;
 
     // Fine static grain so the dark field never looks flat.
     col += (hash21(fc + fract(iVoltTime) * 100.0) - 0.5) * 0.012;
