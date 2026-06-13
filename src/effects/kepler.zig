@@ -12,7 +12,9 @@ const max_windows = 32;
 
 // 300 iParticles slots, swarm-style layout: head + trail dots per body.
 const trail_len = 4;
-const trail_history = 32;
+// Longer history so the fuzz-mode Doppler echoes spread far enough apart to
+// read as a streak rather than overlapping the head into one blob.
+const trail_history = 90;
 const slots_per = trail_len + 1;
 const max_bodies = 300 / slots_per; // 60
 
@@ -392,8 +394,10 @@ pub const Context = struct {
         }
 
         // Slot layout: (x, y, size, color_idx + 16*trail_age). Age 0 = head.
+        // Spacing uses trail_len+1 so the oldest sample stays short of a full
+        // history wrap (which would land back on the head).
         var slot: u32 = 0;
-        const spacing = trail_history / trail_len;
+        const spacing = trail_history / (trail_len + 1);
         for (0..self.count) |i| {
             const b = self.bodies[i];
             // Render size folds in the perihelion swell and this body's own

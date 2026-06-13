@@ -75,7 +75,7 @@ float interferenceField(vec2 p) {
         // Doppler streak: trail samples (age>0) add dimmer smears behind the
         // head, so fast bodies blur into arcs along their motion.
         float age = floor(P.w / 16.0);
-        float aw = exp(-age * 0.7);
+        float aw = exp(-age * 0.45);
         int cid = int(mod(P.w, 16.0));
         // This body's band loosens its ring spacing — it breathes on its slice.
         float be = min(iBands[cid % 6], 1.4);
@@ -121,7 +121,7 @@ void main() {
             // Doppler streak: include trail samples (age>0) as dimmer smears so
             // fast bodies blur into motion arcs behind their heads.
             float age = floor(P.w / 16.0);
-            float aw = exp(-age * 0.7);
+            float aw = exp(-age * 0.45);
             int cid = int(mod(P.w, 16.0));
             vec3 pc = (iPaletteSize > cid) ? iPalette[cid] : vec3(0.7, 0.8, 1.0);
 
