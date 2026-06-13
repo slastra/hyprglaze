@@ -28,6 +28,8 @@ uniform float iFlow;
 uniform float iBands[6];
 // Beat shockwaves: (origin.xy, age_seconds, strength); strength 0 = inactive.
 uniform vec4 iShocks[4];
+// Sharp beat-pulse envelope — flashes brightness and pops the rings outward.
+uniform float iBeat;
 
 out vec4 fragColor;
 
@@ -78,8 +80,9 @@ float interferenceField(vec2 p) {
         float aw = exp(-age * 0.45);
         int cid = int(mod(P.w, 16.0));
         // This body's band loosens its ring spacing — it breathes on its slice.
+        // The beat punch pops every ring outward briefly.
         float be = min(iBands[cid % 6], 1.4);
-        float rf = RING_FREQ * (1.0 - be * 0.30);
+        float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.13);
         float sigma = P.z * 26.0;
         float r = length(d);
         float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
@@ -104,8 +107,11 @@ void main() {
     // through the lens, so its rings bend and magnify toward heavy windows.
     vec2 wfc = fc + D * 2.4;
 
-    // Deep-space backdrop, slightly darker than the raw theme bg.
-    vec3 col = bg * 0.75;
+    // Backdrop aligned to the theme's surface tone — the base lifted slightly
+    // toward the foreground — so the wallpaper sits cohesively with the window
+    // surfaces instead of reading as a separate darker void.
+    vec3 surface = mix(bg, fg, 0.06);
+    vec3 col = surface;
 
     if (iFuzz > 0.5) {
         // PURE INTERFERENCE: nothing renders but the wave-packet interference
@@ -130,8 +136,9 @@ void main() {
 
             // Each body breathes on its assigned band: that slice loosens its
             // ring spacing, so bass bodies pulse on kicks, treble on hats.
+            // The beat punch pops every ring outward briefly.
             float be = min(iBands[cid % 6], 1.4);
-            float rf = RING_FREQ * (1.0 - be * 0.30);
+            float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.13);
             float sigma = P.z * 26.0;
             float r = length(d);
             float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
@@ -177,6 +184,9 @@ void main() {
         float anti = bc * bc * bc;
         inter += mix(avg, vec3(1.0), 0.6) * anti * 1.1;
 
+        // Beat punch: the whole field flares brighter on the hit.
+        inter *= 1.0 + min(iBeat, 1.6) * 0.55;
+
         // Soft Reinhard so dense overlaps stay colored instead of clipping.
         col += inter / (1.0 + 0.35 * inter);
     } else {
@@ -207,11 +217,11 @@ void main() {
     for (int i = 0; i < 4; i++) {
         vec4 sh = iShocks[i];
         if (sh.w <= 0.001) continue;
-        float radius = sh.z * 900.0;
+        float radius = sh.z * 1100.0;
         float dring = abs(length(fc - sh.xy) - radius);
-        float ring = exp(-dring * dring / (2.0 * 55.0 * 55.0));
+        float ring = exp(-dring * dring / (2.0 * 42.0 * 42.0));
         float fade = sh.w * max(0.0, 1.0 - sh.z / 0.8);
-        col += accent * ring * fade * 0.55;
+        col += accent * ring * fade * 0.9;
     }
 
     // Whisper of vignette so the field has depth.

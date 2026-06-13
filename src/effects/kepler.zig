@@ -114,6 +114,10 @@ pub const Context = struct {
     bass_prev: f32 = 0,
     flux_avg: f32 = 0,
     beat_cooldown: f32 = 0,
+    /// Sharp beat-pulse envelope — spikes on a hit, decays fast. Punches the
+    /// field brightness and ring spacing so beats land hard against a calmer
+    /// baseline flow.
+    beat: f32 = 0,
     shocks: [max_shocks]Shock = [_]Shock{.{}} ** max_shocks,
     next_shock: u8 = 0,
 
@@ -127,6 +131,7 @@ pub const Context = struct {
     loc_flow: c.GLint = -1,
     loc_bands: c.GLint = -1,
     loc_shocks: c.GLint = -1,
+    loc_beat: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -251,8 +256,10 @@ pub const Context = struct {
             self.bands[bi] += (b_raw - self.bands[bi]) * (if (b_raw > self.bands[bi]) attack else decay);
         }
 
-        // Advance the ripple clock: base flow plus an energy-driven boost.
-        self.flow += dt * (2.2 + self.energy * 4.0);
+        // Advance the ripple clock: a calm baseline flow plus a gentle
+        // energy boost — kept low so the field doesn't constantly vibrate;
+        // the punch comes from the beat envelope instead.
+        self.flow += dt * (1.3 + self.energy * 1.8);
 
         var masses: [max_windows + 2]Mass = undefined;
         const n_mass = self.gatherMasses(state, &masses);
@@ -276,18 +283,23 @@ pub const Context = struct {
             }
             const slot = self.next_shock;
             self.next_shock = (self.next_shock + 1) % max_shocks;
+            const punch = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.02), 1.0, 2.0);
             self.shocks[slot] = .{
                 .pos = origin,
                 .age = 0,
-                .strength = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.02), 1.0, 2.0),
+                .strength = punch,
                 .active = true,
             };
+            self.beat = punch;
         }
         for (&self.shocks) |*s| {
             if (!s.active) continue;
             s.age += dt;
             if (s.age > shock_life) s.active = false;
         }
+        // Sharp decay so the beat punch is a snap, not a sustain.
+        self.beat *= @exp(-8.0 * dt);
+        if (self.beat < 0.01) self.beat = 0;
 
         if (!self.seeded) {
             self.seeded = true;
@@ -391,6 +403,7 @@ pub const Context = struct {
             self.loc_flow = c.glGetUniformLocation(prog.program, "iFlow");
             self.loc_bands = c.glGetUniformLocation(prog.program, "iBands[0]");
             self.loc_shocks = c.glGetUniformLocation(prog.program, "iShocks[0]");
+            self.loc_beat = c.glGetUniformLocation(prog.program, "iBeat");
         }
 
         // Slot layout: (x, y, size, color_idx + 16*trail_age). Age 0 = head.
@@ -444,6 +457,7 @@ pub const Context = struct {
             }
             c.glUniform4fv(self.loc_shocks, max_shocks, @ptrCast(&packed_sh[0]));
         }
+        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
     }
 
     pub fn deinit(self: *Context) void {
