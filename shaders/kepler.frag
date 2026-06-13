@@ -159,6 +159,17 @@ void main() {
         // Chromatic dispersion disabled — just the palette-colored interference.
         vec3 inter = max(mono, vec3(0.0));
 
+        // Enhance the fringes with crisp iso-amplitude contour lines: thin,
+        // constant-width (fwidth-AA) lines trace the wavefronts and weave
+        // through the field, sharpening the wave structure into a fine web.
+        // Gated by env_sum so the empty background (field ~ 0 everywhere)
+        // doesn't flood with the zero-level line.
+        float g = field / 0.5;
+        float di = abs(g - floor(g + 0.5));
+        float aa = fwidth(g) + 1e-4;
+        float contour = (1.0 - smoothstep(0.0, aa * 1.5, di)) * smoothstep(0.05, 0.45, env_sum);
+        inter += mix(avg, vec3(1.0), 0.25) * contour * 0.6;
+
         // Antinodes: only the very strongest constructive peaks flare into
         // bright near-white focal sparks (sharp cubic so the field stays calm
         // elsewhere) — gives the kaleidoscope sparkle and depth.
