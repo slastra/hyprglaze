@@ -43,9 +43,18 @@ const Body = struct {
     pos: [2]f32 = .{ 0, 0 },
     vel: [2]f32 = .{ 0, 0 },
     size: f32 = 3.0,
+    /// Dynamic size/brightness multiplier — swells near perihelion (close
+    /// passes) and relaxes at apoapsis, smoothed frame to frame.
+    glow: f32 = 1.0,
     color_idx: f32 = 0,
     buried_t: f32 = 0,
 };
+
+// Clamp on the rendered wave-packet size so swelling bodies never grow a
+// packet wider than the shader's cheap bounding-box reject (~sigma).
+const render_size_max: f32 = 7.0;
+// Distance (px) at which a body begins to swell as it nears a mass.
+const swell_radius: f32 = 340.0;
 
 const Mass = struct {
     pos: [2]f32,
@@ -159,7 +168,11 @@ pub const Context = struct {
             -@sin(theta) * v_circ * sign,
             @cos(theta) * v_circ * sign,
         };
-        body.size = 3.0 + r.float(f32) * 3.5;
+        // Quadratic weighting: mostly small moons, a few large bodies — a
+        // far wider, more varied spread than a flat random range.
+        const u = r.float(f32);
+        body.size = 1.4 + u * u * 4.6;
+        body.glow = 1.0;
         body.color_idx = @floatFromInt(r.intRangeAtMost(u8, 1, 14));
         body.buried_t = 0;
     }
@@ -188,18 +201,30 @@ pub const Context = struct {
         }
 
         for (self.bodies[0..self.count], 0..) |*b, i| {
-            // Softened gravity from every mass (semi-implicit Euler).
+            // Softened gravity from every mass (semi-implicit Euler), tracking
+            // the closest mass so the body can swell at perihelion.
             var ax: f32 = 0;
             var ay: f32 = 0;
+            var r2_min: f32 = std.math.floatMax(f32);
             for (masses[0..n_mass]) |mass| {
                 const dx = mass.pos[0] - b.pos[0];
                 const dy = mass.pos[1] - b.pos[1];
-                const r2 = dx * dx + dy * dy + soften2;
+                const r2_raw = dx * dx + dy * dy;
+                if (r2_raw < r2_min) r2_min = r2_raw;
+                const r2 = r2_raw + soften2;
                 const inv_r3 = 1.0 / (r2 * @sqrt(r2));
                 const gm = G * mass.m * inv_r3;
                 ax += gm * dx;
                 ay += gm * dy;
             }
+
+            // Perihelion swell: the nearer the closest mass, the larger and
+            // brighter the body grows. Smoothed so it breathes rather than
+            // snaps as the body rounds a tight pass.
+            const r_min = @sqrt(r2_min);
+            const prox = std.math.clamp((swell_radius - r_min) / swell_radius, 0.0, 1.0);
+            const target_glow = 1.0 + prox * prox * 0.8;
+            b.glow += (target_glow - b.glow) * @min(1.0, 8.0 * dt);
 
             b.vel[0] += ax * dt;
             b.vel[1] += ay * dt;
@@ -271,8 +296,11 @@ pub const Context = struct {
         const spacing = trail_history / trail_len;
         for (0..self.count) |i| {
             const b = self.bodies[i];
+            // Render size folds in the perihelion swell and a bass breath,
+            // clamped so the packet never outgrows the shader's reject box.
+            const dsize = @min(b.size * b.glow * (1.0 + self.bass * 0.2), render_size_max);
             if (prog.i_particles[slot] >= 0) {
-                c.glUniform4f(prog.i_particles[slot], b.pos[0], b.pos[1], b.size, b.color_idx);
+                c.glUniform4f(prog.i_particles[slot], b.pos[0], b.pos[1], dsize, b.color_idx);
             }
             slot += 1;
 
@@ -282,7 +310,7 @@ pub const Context = struct {
                 const pos = self.history[i][h_idx];
                 const tag = b.color_idx + 16.0 * @as(f32, @floatFromInt(t + 1));
                 if (prog.i_particles[slot] >= 0) {
-                    c.glUniform4f(prog.i_particles[slot], pos[0], pos[1], b.size, tag);
+                    c.glUniform4f(prog.i_particles[slot], pos[0], pos[1], dsize, tag);
                 }
                 slot += 1;
             }

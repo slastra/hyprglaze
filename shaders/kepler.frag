@@ -25,19 +25,6 @@ uniform float iFuzz;
 
 out vec4 fragColor;
 
-// ---------- hash / star helpers ----------
-
-float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-vec2 hash22(vec2 p) {
-    float n = hash21(p);
-    return vec2(n, hash21(p + n + 17.17));
-}
-
 // ---------- gravitational deflection ----------
 
 // Aggregate lens deflection at p: each window bends "light" toward itself
@@ -65,30 +52,6 @@ vec2 deflect(vec2 p) {
     return D;
 }
 
-// ---------- background layers ----------
-
-// Procedural star layer sampled in warped space — stars smear and crowd
-// toward heavy windows. Cell size sets density; tier thins it out.
-float stars(vec2 wp, float cell, float tier) {
-    vec2 id = floor(wp / cell);
-    vec2 jitter = hash22(id);
-    vec2 center = (id + 0.15 + jitter * 0.7) * cell;
-    float bright = hash21(id + 7.7);
-    if (bright < tier) return 0.0;
-
-    float d = length(wp - center);
-    float twinkle = 0.75 + 0.25 * sin(iKepTime * (1.0 + jitter.x * 3.0) + jitter.y * 6.28);
-    float core = exp(-d * d / (1.8 + bright * 2.0));
-    return core * (bright - tier) / (1.0 - tier) * twinkle;
-}
-
-// Spacetime graticule in warped space: thin lines that dent toward masses.
-float grid(vec2 wp) {
-    vec2 g = abs(fract(wp / 90.0) - 0.5) * 90.0;
-    float line = min(g.x, g.y);
-    return 1.0 - smoothstep(0.0, 1.4, line);
-}
-
 // ---------- main ----------
 
 void main() {
@@ -99,19 +62,10 @@ void main() {
     vec3 accent = (iPaletteSize > 12) ? iPalette[12] : vec3(0.35, 0.5, 0.95);
 
     vec2 D = deflect(fc);
-    vec2 wp = fc + D;
     float lens = length(D);
 
     // Deep-space backdrop, slightly darker than the raw theme bg.
     vec3 col = bg * 0.75;
-
-    // Spacetime grid — quiet, but clearly denting where space is stretched.
-    float gridv = grid(wp);
-    col += accent * gridv * (0.05 + 0.10 * smoothstep(8.0, 60.0, lens));
-
-    // Two parallax-free star tiers (different cell sizes) in lensed space.
-    float s = stars(wp, 90.0, 0.70) + stars(wp * 1.7 + 31.0, 130.0, 0.80) * 0.7;
-    col += mix(fg, accent, 0.35) * s;
 
     // Einstein-rim shimmer where deflection is strong (window borders).
     col += accent * smoothstep(25.0, 90.0, lens) * 0.05;
