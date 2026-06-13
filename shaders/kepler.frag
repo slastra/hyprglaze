@@ -227,6 +227,21 @@ void main() {
         col += accent * ring * fade * 0.9;
     }
 
+    // Oil-slick iridescence: treat brightness as thin-film thickness and remap
+    // it through a petrol-rainbow spectrum so the bright fringes shimmer like
+    // oil on water. A slow time drift and a spatial gradient keep the sheen
+    // flowing; the effect is weighted by brightness so the dark theme surface
+    // stays clean and only the interference takes on the film colors.
+    {
+        vec2 ouv = fc / iResolution.xy;
+        float L = dot(col, vec3(0.299, 0.587, 0.114));
+        float phase = L * 2.2 + iKepTime * 0.08 + (ouv.x + ouv.y) * 0.18;
+        vec3 iri = 0.5 + 0.5 * cos(6.28318 * (phase + vec3(0.0, 0.35, 0.62)));
+        vec3 oil = iri * L * 1.7;
+        float w = smoothstep(0.12, 0.55, L) * 0.7;
+        col = mix(col, oil, w);
+    }
+
     // Whisper of vignette so the field has depth.
     vec2 uv = fc / iResolution.xy;
     col *= 1.0 - 0.25 * dot(uv - 0.5, uv - 0.5) * 4.0 * 0.5;
