@@ -11,7 +11,8 @@ const c = @cImport({
 const max_windows = 32;
 
 /// Active arc pool. Arcs only strike between window borders.
-const max_arcs = 10;
+/// Larger pool accommodates multi-stroke follow-up arcs (one extra per spawn).
+const max_arcs = 16;
 
 // Segment budget shared by all bolts in a frame. Geometry is regenerated
 // every frame (deterministic per re-strike tick), so this is also the
@@ -24,8 +25,16 @@ const seg_b_vec4s = max_segments / 4;
 const restrike_hz: f32 = 13.0;
 
 // Main bolts subdivide to this many segments (power of two <= 16).
+// Both values must be powers of two — the midpoint-displacement algorithm
+// reads pts[i ± step/2] and requires a complete binary subdivision tree.
 const bolt_segs = 16;
-const branch_segs = 4;
+const branch_segs = 8;
+
+// Stepped-leader propagation time: how long a fresh stroke takes to bridge
+// the gap from source window to target. A hot tip rides the advancing front.
+// Kept very brief — real leaders cross in microseconds; this is just enough
+// frames (~3-4 at 60fps) to read as a reach rather than an instant flash.
+const leader_extend: f32 = 0.055;
 
 // Storm mode: sustained energy locks a persistent arc between the two
 // largest windows. Engages above this smoothed-energy threshold, with
@@ -45,6 +54,9 @@ const spawn_max: f32 = 1.10;
 const max_crawls = 6;
 const crawl_segs = 8;
 
+// Afterglow channel snapshot budget (one strong strike's worth of segments).
+const max_ghost = 90;
+
 const Crawl = struct {
     /// Perimeter offset of the start point and arc-length of the walk to
     /// the end point — resolved against the *current* focused rect each
@@ -63,6 +75,7 @@ const Arc = struct {
     b: [2]f32 = .{ 0, 0 },
     seed: u32 = 0,
     age: f32 = 0,
+    start_delay: f32 = 0, // seconds before this stroke begins (multi-stroke)
     life: f32 = 0,
     intensity: f32 = 0,
     amp: f32 = 0,
@@ -146,6 +159,19 @@ pub const Context = struct {
     seg_b: [max_segments]f32 = undefined,
     seg_count: u32 = 0,
 
+    // Afterglow: a frozen snapshot of the last strong strike's channel,
+    // re-emitted as dim decaying segments — the ionized air still glowing
+    // after the bolt itself is gone.
+    ghost_segs: [max_ghost][4]f32 = undefined,
+    ghost_b: [max_ghost]f32 = undefined,
+    ghost_count: u32 = 0,
+    ghost_age: f32 = 0,
+    ghost_life: f32 = 0,
+
+    // Thunder flash: full-screen ambient brighten on big downbeat discharges,
+    // fast decay — the room lighting up.
+    flash: f32 = 0,
+
     // Audio analysis (glitch.zig pattern)
     bands: [6]f32 = [_]f32{0} ** 6,
     bass: f32 = 0,
@@ -162,6 +188,14 @@ pub const Context = struct {
     beat: f32 = 0,
     beat_cooldown: f32 = 0,
 
+    // BPM phase sync: beat_phase_total accumulates beats at bpm_est per
+    // minute; detected beats snap it to the nearest integer to keep the
+    // clock anchored to real music across passages of different energy.
+    bpm_est: f32 = 120.0,
+    beat_phase_total: f32 = 0.0,
+    beat_phase: f32 = 0.0,
+    last_beat_now: f32 = -1.0,
+
     /// Cached uniform locations — resolved on first upload, re-resolved on
     /// shader hot-reload (program ID changes).
     cached_program: c.GLuint = 0,
@@ -172,6 +206,8 @@ pub const Context = struct {
     loc_beat: c.GLint = -1,
     loc_bass: c.GLint = -1,
     loc_treble: c.GLint = -1,
+    loc_beat_phase: c.GLint = -1,
+    loc_flash: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -236,6 +272,7 @@ pub const Context = struct {
         const dist = @sqrt(dx * dx + dy * dy);
         if (dist < 24.0) return; // overlapping borders — nothing to strike across
 
+        const amp = std.math.clamp(dist * 0.16, 14.0, 180.0) * (0.8 + r.float(f32) * 0.5);
         const slot = self.next_slot;
         self.next_slot = (self.next_slot + 1) % max_arcs;
         self.arcs[slot] = .{
@@ -245,9 +282,28 @@ pub const Context = struct {
             .age = 0,
             .life = 0.18 + r.float(f32) * 0.30 + intensity * 0.12,
             .intensity = intensity,
-            .amp = std.math.clamp(dist * 0.16, 14.0, 180.0) * (0.8 + r.float(f32) * 0.5),
+            .amp = amp,
             .active = true,
         };
+
+        // Multi-stroke: real lightning fires 2-5 return strokes along the
+        // same channel ~60-90ms apart, each on a slightly different path.
+        // One follow-up stroke at high intensity gives that characteristic flicker.
+        if (intensity >= 0.75) {
+            const follow_slot = self.next_slot;
+            self.next_slot = (self.next_slot + 1) % max_arcs;
+            self.arcs[follow_slot] = .{
+                .a = a,
+                .b = b,
+                .seed = r.int(u32),
+                .age = 0,
+                .start_delay = 0.055 + r.float(f32) * 0.05,
+                .life = 0.10 + r.float(f32) * 0.08,
+                .intensity = intensity * 0.72,
+                .amp = amp * 0.88,
+                .active = true,
+            };
+        }
     }
 
     fn pushSeg(self: *Context, p: [2]f32, q: [2]f32, bright: f32) void {
@@ -262,7 +318,7 @@ pub const Context = struct {
     /// shrinking random offset — the path wanders freely in 2D, diagonals
     /// included. Branches peel off interior nodes at an angle, dimmer and
     /// tapering, with their own (branch-free) subdivision.
-    fn genBolt(self: *Context, a: [2]f32, b: [2]f32, amp: f32, bright: f32, r: std.Random, comptime n: usize, taper: bool, branches: bool) void {
+    fn genBolt(self: *Context, a: [2]f32, b: [2]f32, amp: f32, bright: f32, reach: f32, r: std.Random, comptime n: usize, taper: bool, branches: bool) void {
         const dx = b[0] - a[0];
         const dy = b[1] - a[1];
         const chord = @sqrt(dx * dx + dy * dy);
@@ -294,10 +350,41 @@ pub const Context = struct {
             off *= 0.45;
         }
 
+        // Continuous shimmer: a fast electric writhe layered on the discrete
+        // midpoint shape, so the channel never freezes between restrike ticks.
+        // Endpoints stay rooted on the window borders; only interior nodes
+        // buzz. Two incommensurate sines with spatial phase read as chaotic
+        // rather than a regular wave; treble (hi-hats) drives it harder.
+        const sh = std.math.clamp(amp * 0.014, 0.3, 1.4) * (0.8 + self.treble * 0.3);
+        for (1..n) |i| {
+            const ph = pts[i][0] * 0.043 + pts[i][1] * 0.031;
+            const wig = (@sin(self.now * 24.0 + ph) + 0.5 * @sin(self.now * 53.0 + ph * 1.7)) * sh;
+            pts[i][0] -= uy * wig;
+            pts[i][1] += ux * wig;
+        }
+
+        // Stepped-leader reach: only draw segments the advancing front has
+        // reached. The frontier segment is partial (lerped) and glows hot —
+        // the bright leader tip feeling its way toward the target window.
+        const n_f = @as(f32, @floatFromInt(n));
+        const reach_n = std.math.clamp(reach, 0.0, 1.0) * n_f;
         for (0..n) |i| {
-            const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n));
-            const sb = if (taper) bright * (1.0 - t * 0.75) else bright;
-            self.pushSeg(pts[i], pts[i + 1], sb);
+            const fi = @as(f32, @floatFromInt(i));
+            if (fi >= reach_n) break;
+            const frac = @min(reach_n - fi, 1.0);
+            const t = fi / n_f;
+            var sb = if (taper) bright * (1.0 - t * 0.75) else bright;
+            // Per-segment brightness ripple — an unstable arc's glow crawls
+            // and stutters along the channel rather than burning evenly.
+            const bz = pts[i][0] * 0.02 + pts[i][1] * 0.02;
+            sb *= 0.90 + 0.10 * @sin(self.now * 40.0 + bz);
+            // Hot leader tip: the advancing frontier segment burns brighter.
+            if (frac < 1.0) sb *= 1.0 + (1.0 - frac) * 1.4;
+            const q = [2]f32{
+                pts[i][0] + (pts[i + 1][0] - pts[i][0]) * frac,
+                pts[i][1] + (pts[i + 1][1] - pts[i][1]) * frac,
+            };
+            self.pushSeg(pts[i], q, sb);
         }
 
         if (branches) {
@@ -317,9 +404,19 @@ pub const Context = struct {
                 const sa = @sin(ang);
                 const bx = ldx * ca - ldy * sa;
                 const by = ldx * sa + ldy * ca;
-                const blen = chord * (0.15 + r.float(f32) * 0.25);
+                const blen = chord * (0.18 + r.float(f32) * 0.30);
                 const end = [2]f32{ pts[i][0] + bx * blen, pts[i][1] + by * blen };
-                self.genBolt(pts[i], end, blen * 0.3, bright * 0.5, r, branch_segs, true, false);
+                // Branches near the source are brighter; tip branches are dim.
+                const t_node = @as(f32, @floatFromInt(i)) / n_f;
+                const branch_bright = bright * (0.58 - t_node * 0.22);
+                // Draw the child seed unconditionally so the parent RNG stream
+                // stays aligned whether or not the fork has sparked yet — keeps
+                // branches from flickering as the leader front advances.
+                const bseed = r.int(u32);
+                // A fork only sparks once the leader front passes its node.
+                if (@as(f32, @floatFromInt(i)) >= reach_n) continue;
+                var bprng = std.Random.DefaultPrng.init(@as(u64, bseed) ^ 0xD1B54A32D192ED03);
+                self.genBolt(pts[i], end, blen * 0.35, branch_bright, 1.0, bprng.random(), branch_segs, true, false);
             }
         }
     }
@@ -376,6 +473,46 @@ pub const Context = struct {
         self.beat *= @exp(-4.0 * dt);
         if (self.beat < 0.01) self.beat = 0;
 
+        // Thunder flash decays fast (snap on, quick falloff). Triggered below
+        // on strong downbeat discharges; storm passages keep it flickering.
+        self.flash *= @exp(-7.0 * dt);
+        if (self.flash < 0.004) self.flash = 0;
+
+        // Afterglow channel ages out continuously; strong strikes reset it.
+        self.ghost_age += dt;
+
+        // ---- BPM-phase sync ----
+        // Advance before snap so crossing detection uses the pre-snap fraction.
+        const prev_phase_total = self.beat_phase_total;
+        self.beat_phase_total += dt * (self.bpm_est / 60.0);
+
+        if (beat_hit) {
+            // Update tempo estimate from inter-onset interval (IOI).
+            if (self.last_beat_now > 0.0) {
+                const ioi = self.now - self.last_beat_now;
+                if (ioi >= 0.25 and ioi <= 2.0) {
+                    var ioi_bpm: f32 = 60.0 / ioi;
+                    while (ioi_bpm > 180.0) { ioi_bpm *= 0.5; }
+                    while (ioi_bpm < 60.0) { ioi_bpm *= 2.0; }
+                    self.bpm_est += (ioi_bpm - self.bpm_est) * 0.25;
+                }
+            }
+            self.last_beat_now = self.now;
+            // Phase-lock: snap to nearest downbeat. frac(beat_phase_total) → ~0.
+            self.beat_phase_total = @round(self.beat_phase_total);
+        }
+
+        // Fractional phases for crossing detection.
+        const ppf = prev_phase_total - @floor(prev_phase_total);
+        const cpf = self.beat_phase_total - @floor(self.beat_phase_total);
+        self.beat_phase = cpf;
+
+        // Half-beat "and": 8th-note syncopation.
+        const half_crossed = ppf < 0.5 and cpf >= 0.5;
+        // Coasting arc: full beat elapsed without a detected hit — keeps the
+        // display alive during quiet passages at the fallback 120 BPM.
+        const full_crossed = cpf < ppf and !beat_hit;
+
         // ---- arc lifecycle ----
         for (&self.arcs) |*arc| {
             if (!arc.active) continue;
@@ -386,21 +523,28 @@ pub const Context = struct {
         // Treble bushes the bolts out: hi-hats raise the fork probability.
         self.branch_chance = std.math.clamp(0.12 + self.treble * 0.45, 0.12, 0.55);
 
-        // Ambient strikes on a randomized timer, scaled by total energy —
-        // silence decays to rare pops, loud passages storm.
-        self.spawn_timer -= dt * self.arc_rate * (0.35 + self.energy * 2.4);
+        // Ambient strikes fill silences; BPM-synced arcs take over during music.
+        // Rate reduced so both systems don't stack to a busy tangle.
+        self.spawn_timer -= dt * self.arc_rate * (0.18 + self.energy * 1.2);
         if (self.spawn_timer <= 0) {
             self.spawn_timer = spawn_min + r.float(f32) * (spawn_max - spawn_min);
             self.spawnArc(state.windows, 0.7 + r.float(f32) * 0.4);
         }
 
-        // Discharge on the beat, brightness scaled by how hard the flux
-        // spiked over its average — drops hit harder than pickup notes.
+        // Downbeat discharge: bright pair on every detected beat.
+        // Punch factor rewards sharp transients over soft hits.
         if (beat_hit) {
             const punch = std.math.clamp(self.flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
             self.spawnArc(state.windows, 1.1 * punch);
             self.spawnArc(state.windows, 0.9 * punch);
+            // Thunder flash: the room lights up, scaled by how hard the drop hit.
+            self.flash = @max(self.flash, std.math.clamp((punch - 1.0) * 0.9 + 0.35, 0.0, 1.0));
         }
+
+        // Half-beat arc: softer, syncopated eighth-note feel.
+        if (half_crossed) self.spawnArc(state.windows, 0.55 + r.float(f32) * 0.15);
+        // Coasting arc: one per beat when flux detection misses (quiet passages).
+        if (full_crossed and self.energy > 0.02) self.spawnArc(state.windows, 0.6 + r.float(f32) * 0.2);
 
         // ---- focus crawls ----
         const focused = state.focused_win;
@@ -434,7 +578,9 @@ pub const Context = struct {
         // (arc seed, strike index): the path holds steady within a strike
         // tick and snaps to a new shape restrike_hz times per second.
         self.seg_count = 0;
-        const strike: u32 = @intFromFloat(@max(self.now, 0.0) * restrike_hz);
+        // BPM-locked restrike: 8th-note subdivisions (8 shapes per beat).
+        // beat_phase_total is monotonic so the counter never jumps backward.
+        const strike: u32 = @intFromFloat(@max(self.beat_phase_total, 0.0) * 8.0);
 
         // Mids drive the wander: geometry regenerates every strike, so a
         // thick chorus makes live bolts writhe wider mid-flight.
@@ -442,13 +588,35 @@ pub const Context = struct {
 
         for (&self.arcs) |*arc| {
             if (!arc.active) continue;
+            // start_delay > 0: this return stroke hasn't fired yet
+            const eff_age = arc.age - arc.start_delay;
+            if (eff_age < 0) continue;
             var prng = std.Random.DefaultPrng.init(@as(u64, arc.seed) ^ (@as(u64, strike) *% 0x9E3779B97F4A7C15));
             const ar = prng.random();
             const flick = 0.55 + 0.9 * ar.float(f32);
-            const p = arc.age / arc.life;
+            const p = eff_age / arc.life;
             const env = smoothstep(0.0, 0.08, p) * (1.0 - p) * (1.0 - p) * arc.intensity * flick;
             if (env < 0.012) continue;
-            self.genBolt(arc.a, arc.b, arc.amp * wander, env, ar, bolt_segs, false, true);
+            // Brief stepped-leader reach at the start of each (return) stroke.
+            const reach = std.math.clamp(eff_age / leader_extend, 0.0, 1.0);
+            const before = self.seg_count;
+            self.genBolt(arc.a, arc.b, arc.amp * wander, env, reach, ar, bolt_segs, false, true);
+
+            // Snapshot strong, fully-extended strikes as the afterglow channel.
+            // While the arc lives this overwrites every frame (ghost tracks the
+            // live bolt); once it dies the last snapshot freezes and fades.
+            if (arc.intensity >= 0.9 and reach >= 1.0) {
+                var gi: u32 = 0;
+                var k = before;
+                while (k < self.seg_count and gi < max_ghost) : (k += 1) {
+                    self.ghost_segs[gi] = self.segs[k];
+                    self.ghost_b[gi] = self.seg_b[k];
+                    gi += 1;
+                }
+                self.ghost_count = gi;
+                self.ghost_age = 0;
+                self.ghost_life = 0.30;
+            }
         }
 
         // Storm arc: while sustained energy holds, a continuous discharge
@@ -491,7 +659,7 @@ pub const Context = struct {
                     const flick = 0.55 + 0.9 * ar.float(f32);
                     const env = self.storm * (0.55 + self.bass * 0.6) * flick;
                     const amp = std.math.clamp(dist * 0.16, 14.0, 180.0);
-                    self.genBolt(a, b, amp * wander, env, ar, bolt_segs, false, true);
+                    self.genBolt(a, b, amp * wander, env, 1.0, ar, bolt_segs, false, true);
                 }
             }
         }
@@ -509,7 +677,21 @@ pub const Context = struct {
                 if (env < 0.012) continue;
                 const a = perimeterPoint(focused, cr.t0);
                 const b = perimeterPoint(focused, cr.t0 + cr.dl);
-                self.genBolt(a, b, @min(cr.dl * 0.30, 36.0), env, ar, crawl_segs, false, false);
+                self.genBolt(a, b, @min(cr.dl * 0.30, 36.0), env, 1.0, ar, crawl_segs, false, false);
+            }
+        }
+
+        // ---- afterglow re-emission ----
+        // Append the frozen channel snapshot as dim, fast-fading segments.
+        // Quadratic falloff so the ember dies away rather than cutting out.
+        if (self.ghost_count > 0 and self.ghost_age < self.ghost_life) {
+            const gp = self.ghost_age / self.ghost_life;
+            const gfade = (1.0 - gp) * (1.0 - gp) * 0.20;
+            for (0..self.ghost_count) |k| {
+                if (self.seg_count >= max_segments) break;
+                self.segs[self.seg_count] = self.ghost_segs[k];
+                self.seg_b[self.seg_count] = self.ghost_b[k] * gfade;
+                self.seg_count += 1;
             }
         }
     }
@@ -526,6 +708,8 @@ pub const Context = struct {
             self.loc_beat = c.glGetUniformLocation(prog.program, "iBeat");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
             self.loc_treble = c.glGetUniformLocation(prog.program, "iTreble");
+            self.loc_beat_phase = c.glGetUniformLocation(prog.program, "iBeatPhase");
+            self.loc_flash = c.glGetUniformLocation(prog.program, "iFlash");
         }
 
         const n = self.seg_count;
@@ -546,6 +730,8 @@ pub const Context = struct {
         if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
         if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble);
+        if (self.loc_beat_phase >= 0) c.glUniform1f(self.loc_beat_phase, self.beat_phase);
+        if (self.loc_flash >= 0) c.glUniform1f(self.loc_flash, self.flash);
     }
 
     pub fn deinit(self: *Context) void {

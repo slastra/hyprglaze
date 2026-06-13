@@ -24,6 +24,8 @@ uniform int iSegCount;
 uniform float iBeat;
 uniform float iBass;
 uniform float iTreble;
+uniform float iBeatPhase;
+uniform float iFlash;
 
 out vec4 fragColor;
 
@@ -80,17 +82,24 @@ void main() {
     float vig = 1.0 - 0.35 * length(uv - 0.5);
     vec3 col = bg * (0.85 * vig + iBass * 0.06);
 
-    // Bolt segments. Brightness already carries the CPU-side envelope,
-    // flicker, and branch taper. max() instead of += keeps the channel
-    // continuous across segment joints (no beading) while branch tips
-    // still read against the main channel via their own brightness.
-    vec2 light = vec2(0.0);
+    // Thunder flash: on big discharges the whole bench floods with light,
+    // brightest toward center and tinted by the electric glow — like the
+    // room lighting up. Fast CPU-side decay keeps it a snap, not a wash.
+    col += (bg * 1.6 + gcol * 0.5) * iFlash * 0.17 * vig;
+
+    // Three-layer bolt glow — each layer models a distinct physical region:
+    //   corona: very wide diffuse glow that lights up air around the channel
+    //   halo:   colored mid-range bloom (plasma sheath)
+    //   core:   overexposed white return-stroke channel
+    vec3 light = vec3(0.0);
     for (int i = 0; i < iSegCount && i < 240; i++) {
         vec4 s = iSegs[i];
 
-        // Bounding-box reject covers the halo falloff width.
-        vec2 lo = min(s.xy, s.zw) - 110.0;
-        vec2 hi = max(s.xy, s.zw) + 110.0;
+        // Bounding-box reject. The outer corona (exp(-d*0.011)) drops below
+        // the grain noise floor (~0.012) only at d>320px; pad to 400 so the
+        // falloff is invisible even perpendicular to long segments.
+        vec2 lo = min(s.xy, s.zw) - 400.0;
+        vec2 hi = max(s.xy, s.zw) + 400.0;
         if (fc.x < lo.x || fc.x > hi.x || fc.y < lo.y || fc.y > hi.y) continue;
 
         float b = iSegB[i >> 2][i & 3];
@@ -103,8 +112,12 @@ void main() {
 
         // Dimmer (branch) segments are also thinner; bass fattens everything.
         float w = mix(0.55, 1.0, min(b, 1.0)) * (1.0 + iBass * 0.35);
-        light.x = max(light.x, exp(-d * 0.045 / w) * b);
-        light.y = max(light.y, exp(-d * d * 0.30 / (w * w)) * b);
+        // Wide outer corona: lights up the space around the bolt.
+        light.x = max(light.x, exp(-d * 0.011) * b * 0.24);
+        // Colored plasma halo.
+        light.y = max(light.y, exp(-d * 0.038 / w) * b);
+        // Overexposed white core — blows out to white at the channel center.
+        light.z = max(light.z, exp(-d * d * 0.42 / (w * w)) * b);
     }
 
     // Steady rim on the focused window (cross-fading through transitions).
@@ -112,14 +125,18 @@ void main() {
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
         if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
-        light.x += focusRim(fc, iWindows[i], focus_amt);
+        light.y += focusRim(fc, iWindows[i], focus_amt);
     }
 
-    col += gcol * light.x * 0.85;
-    col += ccol * min(light.y, 1.6);
+    col += gcol * light.x * 0.60;           // wide corona: faint space-lighting
+    col += gcol * light.y * 0.90;           // colored plasma halo
+    col += ccol * light.z * 3.20;           // overexposed core — blows out to white
 
     // Beat: the whole bench flashes faintly, like a capacitor letting go.
     col += gcol * iBeat * 0.045;
+    // Charge-up: glow builds in the final 20% of each beat — anticipation
+    // before the next discharge snaps it back to zero.
+    col += gcol * smoothstep(0.80, 1.0, iBeatPhase) * 0.028;
 
     // Fine static grain so the dark field never looks flat.
     col += (hash21(fc + fract(iVoltTime) * 100.0) - 0.5) * 0.012;
