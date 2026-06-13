@@ -175,10 +175,16 @@ void main() {
         float al = dot(avg, vec3(0.299, 0.587, 0.114));
         avg = max(mix(vec3(al), avg, 1.35), 0.0);
 
-        // Palette-colored interference (calm space): constructive fringes bloom
-        // quadratically, destructive bands gently darken.
+        // Two-tone interference: constructive crests glow in the local body
+        // hue; destructive troughs (the other half-cycle) glow in a cooler
+        // theme accent instead of falling to murky dark — so both fringe
+        // families read as on-palette colour. The nodes (field ~ 0) stay dark
+        // between them naturally.
         float bc = max(field, 0.0);
-        vec3 mono = avg * bc * bc * 1.6 + avg * min(field, 0.0) * 0.20;
+        float neg = max(-field, 0.0);
+        vec3 accent2 = (iPaletteSize > 12) ? iPalette[12] : vec3(0.4, 0.55, 0.95);
+        vec3 troughCol = mix(avg, accent2, 0.6);
+        vec3 mono = avg * bc * bc * 1.6 + troughCol * neg * neg * 1.1;
 
         // Chromatic dispersion disabled — just the palette-colored interference.
         vec3 inter = max(mono, vec3(0.0));
@@ -212,7 +218,7 @@ void main() {
         // background tone (not a murky multiplicative darken) so the dark
         // fringes stay on-palette. Gated by wave presence.
         float node = exp(-field * field * 10.0) * smoothstep(0.1, 0.5, env_sum);
-        col = mix(col, bg * 0.7, node * 0.7);
+        col = mix(col, bg * 0.7, node * 0.45);
     } else {
         // Comet mode: tight additive dots with fading trails.
         for (int i = 0; i < iParticleCount && i < 300; i++) {
