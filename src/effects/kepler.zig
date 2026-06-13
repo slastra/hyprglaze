@@ -46,6 +46,9 @@ const Body = struct {
     /// Dynamic size/brightness multiplier — swells near perihelion (close
     /// passes) and relaxes at apoapsis, smoothed frame to frame.
     glow: f32 = 1.0,
+    /// Seconds since (re)spawn — drives a brief fade-in so recaptured bodies
+    /// materialize instead of popping into view at full size.
+    birth: f32 = 0,
     color_idx: f32 = 0,
     buried_t: f32 = 0,
 };
@@ -55,6 +58,8 @@ const Body = struct {
 const render_size_max: f32 = 7.0;
 // Distance (px) at which a body begins to swell as it nears a mass.
 const swell_radius: f32 = 340.0;
+// Fade-in duration for a freshly (re)spawned body.
+const birth_fade_secs: f32 = 0.7;
 
 const Mass = struct {
     pos: [2]f32,
@@ -173,6 +178,7 @@ pub const Context = struct {
         const u = r.float(f32);
         body.size = 1.4 + u * u * 4.6;
         body.glow = 1.0;
+        body.birth = 0;
         body.color_idx = @floatFromInt(r.intRangeAtMost(u8, 1, 14));
         body.buried_t = 0;
     }
@@ -201,6 +207,8 @@ pub const Context = struct {
         }
 
         for (self.bodies[0..self.count], 0..) |*b, i| {
+            b.birth += dt;
+
             // Softened gravity from every mass (semi-implicit Euler), tracking
             // the closest mass so the body can swell at perihelion.
             var ax: f32 = 0;
@@ -297,8 +305,11 @@ pub const Context = struct {
         for (0..self.count) |i| {
             const b = self.bodies[i];
             // Render size folds in the perihelion swell and a bass breath,
-            // clamped so the packet never outgrows the shader's reject box.
-            const dsize = @min(b.size * b.glow * (1.0 + self.bass * 0.2), render_size_max);
+            // clamped so the packet never outgrows the shader's reject box,
+            // then scaled by a smoothstep fade-in so fresh bodies grow in.
+            const ft = std.math.clamp(b.birth / birth_fade_secs, 0.0, 1.0);
+            const fade = ft * ft * (3.0 - 2.0 * ft);
+            const dsize = @min(b.size * b.glow * (1.0 + self.bass * 0.2), render_size_max) * fade;
             if (prog.i_particles[slot] >= 0) {
                 c.glUniform4f(prog.i_particles[slot], b.pos[0], b.pos[1], dsize, b.color_idx);
             }
