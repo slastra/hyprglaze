@@ -52,6 +52,27 @@ vec2 deflect(vec2 p) {
     return D;
 }
 
+// Signed interference field at p: sum of each wave-packet's gaussian-enveloped
+// radial ripple. Constructive overlaps push positive, destructive negative.
+// Sampled at slightly lens-shifted positions per color channel for chromatic
+// dispersion (the gravitational lens splits the fringes into rainbow).
+float interferenceField(vec2 p) {
+    float field = 0.0;
+    for (int i = 0; i < iParticleCount && i < 300; i++) {
+        vec4 P = iParticles[i];
+        if (P.w >= 16.0) continue; // heads only
+        vec2 d = p - P.xy;
+        if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
+        int cid = int(mod(P.w, 16.0));
+        float sigma = P.z * 26.0;
+        float r = length(d);
+        float env = exp(-(r * r) / (2.0 * sigma * sigma));
+        float phase = float(cid) * 2.4;
+        field += env * sin(r * 0.055 - iKepTime * 2.2 + phase);
+    }
+    return field;
+}
+
 // ---------- main ----------
 
 void main() {
@@ -67,14 +88,11 @@ void main() {
     // Deep-space backdrop, slightly darker than the raw theme bg.
     vec3 col = bg * 0.75;
 
-    // Einstein-rim shimmer where deflection is strong (window borders).
-    col += accent * smoothstep(25.0, 90.0, lens) * 0.05;
-
     if (iFuzz > 0.5) {
-        // Orbiting bodies as wave packets: a broad gaussian envelope carrying
-        // a radial ripple, no core term — just breathing fuzz. Signed
-        // amplitudes sum, so overlapping bodies interfere: constructive
-        // fringes bloom, destructive ones cancel into dark bands.
+        // PURE INTERFERENCE: nothing renders but the wave-packet interference
+        // pattern itself. The palette tint comes from a center pass; two more
+        // passes sampled at lens-shifted positions give per-channel chromatic
+        // dispersion, so the fringes split into rainbow where space bends most.
         float field = 0.0;
         vec3 tint = vec3(0.0);
         float env_sum = 0.0;
@@ -83,7 +101,6 @@ void main() {
             if (P.w >= 16.0) continue; // heads only — trails are comet-mode
 
             vec2 d = fc - P.xy;
-            // Cheap reject ~2.6 sigma out.
             if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
 
             int cid = int(mod(P.w, 16.0));
@@ -92,29 +109,30 @@ void main() {
             float sigma = P.z * 26.0;
             float r = length(d);
             float env = exp(-(r * r) / (2.0 * sigma * sigma));
-
-            // Phase varies per body (color seeds it) so the rings never
-            // sync; the time term makes each packet pulse from within.
             float phase = float(cid) * 2.4;
-            float wave = sin(r * 0.055 - iKepTime * 2.2 + phase);
-
-            field += env * wave;
+            field += env * sin(r * 0.055 - iKepTime * 2.2 + phase);
             tint += pc * env;
             env_sum += env;
         }
-
-        // Soft fuzzy presence everywhere the packets reach, then the
-        // interference term: bright where waves agree (quadratic so fringes
-        // pop), gently darkened where they cancel.
         vec3 avg = tint / max(env_sum, 1e-3);
-        float bloom = max(field, 0.0);
-        vec3 fuzz = tint * 0.22
-                  + avg * bloom * bloom * 1.4
-                  + avg * min(field, 0.0) * 0.18;
-        fuzz = max(fuzz, vec3(0.0));
-        // Soft Reinhard on the packet sum: dense overlaps stay pearlescent
-        // and palette-colored instead of clipping to flat white.
-        col += fuzz / (1.0 + 0.35 * fuzz);
+
+        // Palette-colored interference (calm space): constructive fringes bloom
+        // quadratically, destructive bands gently darken.
+        float bc = max(field, 0.0);
+        vec3 mono = avg * bc * bc * 1.6 + avg * min(field, 0.0) * 0.20;
+
+        // Chromatic split: sample the field offset along the lens deflection,
+        // a different shift per channel. Identical to mono in calm space (all
+        // three sample the same point) but fans into rainbow where D is large.
+        float fR = interferenceField(fc + D * 1.1);
+        float fB = interferenceField(fc - D * 1.1);
+        vec3 rgb = vec3(max(fR, 0.0), bc, max(fB, 0.0));
+        rgb = rgb * rgb * 1.6;
+
+        float lensAmt = smoothstep(5.0, 55.0, lens);
+        vec3 inter = max(mix(mono, rgb, lensAmt), vec3(0.0));
+        // Soft Reinhard so dense overlaps stay colored instead of clipping.
+        col += inter / (1.0 + 0.35 * inter);
     } else {
         // Comet mode: tight additive dots with fading trails.
         for (int i = 0; i < iParticleCount && i < 300; i++) {
