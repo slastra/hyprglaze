@@ -45,7 +45,10 @@ const float RING_FREQ = 0.13;
 // rim glow, so all three layers agree about the geometry.
 vec2 deflect(vec2 p) {
     vec2 D = vec2(0.0);
-    float depth = 26.0 * (1.0 + iBass * 0.7);
+    // Constant well depth — the warp holds a steady shape and does not react
+    // to the music (only the rings/brightness/shockwaves/bodies do). Kept
+    // moderate so the bending frames the field without overpowering it.
+    float depth = 20.0;
     for (int i = 0; i < iWindowCount && i < 32; i++) {
         vec4 win = iWindows[i];
         if (win.z < 8.0 || win.w < 8.0) continue;
@@ -105,7 +108,7 @@ void main() {
     float lens = length(D);
     // Gravitationally-warped sample position: the interference pattern is read
     // through the lens, so its rings bend and magnify toward heavy windows.
-    vec2 wfc = fc + D * 2.4;
+    vec2 wfc = fc + D * 1.4;
 
     // Backdrop aligned to the theme's surface tone — the base lifted slightly
     // toward the foreground — so the wallpaper sits cohesively with the window
