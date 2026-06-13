@@ -123,6 +123,7 @@ void main() {
         float field = 0.0;
         vec3 tint = vec3(0.0);
         float env_sum = 0.0;
+        float cw_sum = 0.0;
         for (int i = 0; i < iParticleCount && i < 300; i++) {
             vec4 P = iParticles[i];
 
@@ -162,10 +163,17 @@ void main() {
             float env = (1.0 / (1.0 + (r * r) / (sigma * sigma * 4.0))) * aw * window;
             float phase = float(cid) * 2.4;
             field += env * sin(r * rf * dopp - iFlow + phase);
-            tint += pc * env;
+            // Square-weight the colour so the nearest/strongest source dominates
+            // the local hue, instead of averaging every body to a washed grey.
+            float cw = env * env;
+            tint += pc * cw;
+            cw_sum += cw;
             env_sum += env;
         }
-        vec3 avg = tint / max(env_sum, 1e-3);
+        vec3 avg = tint / max(cw_sum, 1e-3);
+        // Push saturation so the field stays vivid rather than pastel.
+        float al = dot(avg, vec3(0.299, 0.587, 0.114));
+        avg = max(mix(vec3(al), avg, 1.35), 0.0);
 
         // Palette-colored interference (calm space): constructive fringes bloom
         // quadratically, destructive bands gently darken.
@@ -190,7 +198,7 @@ void main() {
         // bright near-white focal sparks (sharp cubic so the field stays calm
         // elsewhere) — gives the kaleidoscope sparkle and depth.
         float anti = bc * bc * bc;
-        inter += mix(avg, vec3(1.0), 0.6) * anti * 1.1;
+        inter += mix(avg, vec3(1.0), 0.4) * anti * 1.1;
 
         // Beat punch: the whole field flares brighter on the hit.
         inter *= 1.0 + min(iBeat, 1.6) * 0.75;
