@@ -36,6 +36,10 @@ const branch_segs = 8;
 // frames (~3-4 at 60fps) to read as a reach rather than an instant flash.
 const leader_extend: f32 = 0.055;
 
+// Pre-beat feeler tendrils: how far ahead of a downbeat the groping sparks
+// begin to reach out from window edges (seconds).
+const tendril_lead: f32 = 0.12;
+
 // Storm mode: sustained energy locks a persistent arc between the two
 // largest windows. Engages above this smoothed-energy threshold, with
 // asymmetric ramps so it snaps on with a chorus and lingers a beat after.
@@ -513,6 +517,17 @@ pub const Context = struct {
         // display alive during quiet passages at the fallback 120 BPM.
         const full_crossed = cpf < ppf and !beat_hit;
 
+        // Pre-beat charge: in the lead window before the next predicted
+        // downbeat, feeler tendrils grope out from window edges. Ramps 0→1
+        // across the window. Gated on music energy so silence stays calm and
+        // the free-running clock can't make the edges twitch in the quiet.
+        const beat_period = 60.0 / @max(self.bpm_est, 1.0);
+        const lead_frac = std.math.clamp(tendril_lead / beat_period, 0.0, 0.85);
+        const charge: f32 = if (self.energy > 0.08 and cpf > (1.0 - lead_frac))
+            smoothstep(1.0 - lead_frac, 1.0, cpf)
+        else
+            0.0;
+
         // ---- arc lifecycle ----
         for (&self.arcs) |*arc| {
             if (!arc.active) continue;
@@ -678,6 +693,50 @@ pub const Context = struct {
                 const a = perimeterPoint(focused, cr.t0);
                 const b = perimeterPoint(focused, cr.t0 + cr.dl);
                 self.genBolt(a, b, @min(cr.dl * 0.30, 36.0), env, 1.0, ar, crawl_segs, false, false);
+            }
+        }
+
+        // ---- pre-beat feeler tendrils ----
+        // As a downbeat approaches, faint sparks reach out from each window's
+        // edge toward its nearest neighbor, groping partway across the gap.
+        // They never fully bridge — the beat discharge completes the circuit.
+        // Reuses genBolt's reach to grow each stub in step with the charge.
+        if (charge > 0.02) {
+            const wcount = @min(state.windows.len, max_windows);
+            const ntend = @min(wcount, 6);
+            for (0..ntend) |i| {
+                const wi = state.windows[i];
+                // Nearest neighbor by center distance.
+                var jbest: usize = i;
+                var dbest: f32 = std.math.floatMax(f32);
+                for (0..wcount) |k| {
+                    if (k == i) continue;
+                    const dx = (state.windows[k].x + state.windows[k].w * 0.5) - (wi.x + wi.w * 0.5);
+                    const dy = (state.windows[k].y + state.windows[k].h * 0.5) - (wi.y + wi.h * 0.5);
+                    const d = dx * dx + dy * dy;
+                    if (d < dbest) {
+                        dbest = d;
+                        jbest = k;
+                    }
+                }
+                if (jbest == i) continue;
+                const wj = state.windows[jbest];
+                const cj = [2]f32{ wj.x + wj.w * 0.5, wj.y + wj.h * 0.5 };
+                const a = closestOnBorder(wi, cj);
+                const target = closestOnBorder(wj, a);
+                const dx = target[0] - a[0];
+                const dy = target[1] - a[1];
+                const dist = @sqrt(dx * dx + dy * dy);
+                if (dist < 24.0) continue;
+                var prng = std.Random.DefaultPrng.init((@as(u64, @intCast(i)) *% 0x2545F4914F6CDD1D) ^ (@as(u64, strike) *% 0x9E3779B97F4A7C15));
+                const ar = prng.random();
+                const flick = 0.55 + 0.9 * ar.float(f32);
+                // Grope partway only; the discharge finishes the connection.
+                const reach = charge * 0.7;
+                const bright = (0.08 + 0.16 * charge) * flick * (1.0 - self.storm * 0.6);
+                if (bright < 0.012) continue;
+                const amp = std.math.clamp(dist * 0.10, 8.0, 80.0);
+                self.genBolt(a, target, amp * wander, bright, reach, ar, crawl_segs, true, false);
             }
         }
 
