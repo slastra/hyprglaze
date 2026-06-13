@@ -206,12 +206,13 @@ void main() {
         // Soft Reinhard so dense overlaps stay colored instead of clipping.
         col += inter / (1.0 + 0.35 * inter);
 
-        // Fringe duality: carve dark nodal lines where the waves cancel
-        // (field ~ 0), so bright fringes alternate with true dark minima — the
-        // Young's-interference signature. Gated by wave presence so the empty
-        // background isn't darkened.
-        float node = exp(-field * field * 7.0) * smoothstep(0.1, 0.5, env_sum);
-        col = mix(col, col * 0.35, node * 0.6);
+        // Fringe duality: dark nodal lines where the waves cancel (field ~ 0),
+        // so bright fringes alternate with dark minima — the Young's-
+        // interference signature. The nodes resolve to the theme's deep
+        // background tone (not a murky multiplicative darken) so the dark
+        // fringes stay on-palette. Gated by wave presence.
+        float node = exp(-field * field * 10.0) * smoothstep(0.1, 0.5, env_sum);
+        col = mix(col, bg * 0.7, node * 0.7);
     } else {
         // Comet mode: tight additive dots with fading trails.
         for (int i = 0; i < iParticleCount && i < 300; i++) {
