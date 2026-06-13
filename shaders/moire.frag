@@ -2,7 +2,7 @@
 precision highp float;
 
 uniform vec3 iResolution;
-uniform float iKepTime;
+uniform float iMoireTime;
 uniform vec4 iMouse;
 uniform vec4 iWindows[32];
 uniform int iWindowCount;
@@ -15,8 +15,8 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
-// Orbiting bodies, packed by kepler.zig: (x, y, size, color_idx + 16*age).
-// Age 0 is the head; 1..4 are trail samples, dimmer with age.
+// Wave sources (invisibly orbiting bodies), packed by moire.zig:
+// (x, y, size, color_idx + 16*age). Age 0 is the head; 1..4 are trail samples.
 uniform vec4 iParticles[300];
 uniform int iParticleCount;
 uniform float iBass;
@@ -40,10 +40,10 @@ const float RING_FREQ = 0.13;
 
 // ---------- gravitational deflection ----------
 
-// Aggregate lens deflection at p: each window bends "light" toward itself
-// with the classic point-lens 1/r falloff (Plummer-softened). Bass breathes
-// the depth. The same field warps the grid, the starfield, and feeds the
-// rim glow, so all three layers agree about the geometry.
+// Aggregate gravitational-lens deflection at p: each window bends space toward
+// itself with the classic point-lens 1/r falloff (Plummer-softened). The
+// interference field is sampled through this deflection, so its fringes bend
+// and magnify toward heavy windows.
 vec2 deflect(vec2 p) {
     vec2 D = vec2(0.0);
     // Constant well depth — the warp holds a steady shape and does not react
@@ -68,34 +68,6 @@ vec2 deflect(vec2 p) {
     return D;
 }
 
-// Signed interference field at p: sum of each wave-packet's gaussian-enveloped
-// radial ripple. Constructive overlaps push positive, destructive negative.
-// Sampled at slightly lens-shifted positions per color channel for chromatic
-// dispersion (the gravitational lens splits the fringes into rainbow).
-float interferenceField(vec2 p) {
-    float field = 0.0;
-    for (int i = 0; i < iParticleCount && i < 300; i++) {
-        vec4 P = iParticles[i];
-        vec2 d = p - P.xy;
-        if (abs(d.x) > 450.0 || abs(d.y) > 450.0) continue;
-        // Doppler streak: trail samples (age>0) add dimmer smears behind the
-        // head, so fast bodies blur into arcs along their motion.
-        float age = floor(P.w / 16.0);
-        float aw = exp(-age * 0.45);
-        int cid = int(mod(P.w, 16.0));
-        // This body's band loosens its ring spacing — it breathes on its slice.
-        // The beat punch pops every ring outward briefly.
-        float be = min(iBands[cid % 6], 1.4);
-        float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.18);
-        float sigma = P.z * 26.0;
-        float r = length(d);
-        float env = exp(-(r * r) / (2.0 * sigma * sigma)) * aw;
-        float phase = float(cid) * 2.4;
-        field += env * sin(r * rf - iFlow + phase);
-    }
-    return field;
-}
-
 // ---------- main ----------
 
 void main() {
@@ -117,9 +89,8 @@ void main() {
 
     if (iFuzz > 0.5) {
         // PURE INTERFERENCE: nothing renders but the wave-packet interference
-        // pattern itself. The palette tint comes from a center pass; two more
-        // passes sampled at lens-shifted positions give per-channel chromatic
-        // dispersion, so the fringes split into rainbow where space bends most.
+        // pattern itself — every invisible source's ripples summed (signed) so
+        // they constructively/destructively interfere into one rippling medium.
         float field = 0.0;
         vec3 tint = vec3(0.0);
         float env_sum = 0.0;

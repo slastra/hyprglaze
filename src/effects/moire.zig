@@ -214,7 +214,7 @@ pub const Context = struct {
         const dt = std.math.clamp(state.dt, 0.0, 0.033);
         self.now += dt;
 
-        // Bass envelope — breathes the lens depth in the shader.
+        // Bass envelope — drives per-body size breathing in upload.
         const wave = self.audio.getWaveform();
         var energy: f32 = 0;
         for (0..25) |j| energy += @abs(wave[j]) + @abs(wave[128 + j]);
@@ -364,7 +364,7 @@ pub const Context = struct {
 
         if (self.cached_program != prog.program) {
             self.cached_program = prog.program;
-            self.loc_time = c.glGetUniformLocation(prog.program, "iKepTime");
+            self.loc_time = c.glGetUniformLocation(prog.program, "iMoireTime");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
             self.loc_fuzz = c.glGetUniformLocation(prog.program, "iFuzz");
             self.loc_flow = c.glGetUniformLocation(prog.program, "iFlow");

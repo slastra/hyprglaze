@@ -36,7 +36,7 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `tide` | Time-aware rising water line tied to wall-clock time, with falling teardrops, crater splashes, and Worthington jets |
 | `fire` | Palette-driven flames rise from every window's top edge; moving windows fade with a directional wipe, neighbors warp from the wake |
 | `voltaic` | Tesla-coil desktop: branching midpoint-displacement lightning strikes between window borders, St. Elmo's fire crawls the focused window, bass beats trigger discharges |
-| `kepler` | Windows become gravitational bodies: motes orbit them with real softened gravity while a lensed starfield and spacetime grid bend around window mass, the cursor a rogue comet that steals moons. Default `fuzz` mode renders bodies as huge interfering wave packets; `fuzz = false` switches to tight comet-trailed dots |
+| `moire` | A wave-interference field: dozens of invisible bodies orbit your windows under real softened gravity, each radiating ripples that sum into one continuous rippling medium of brain-coral fringes. Constructive crests and destructive troughs glow in two palette colors with dark nodal lines between, the whole field gravitationally lensed so it bends and magnifies toward heavy windows. Each body rides its own spectrum band (bass throbs, treble shimmers), real Doppler compresses wavefronts ahead of motion, and beats pulse the rings outward. `fuzz = false` switches to a tight comet-trailed orbital view of the underlying bodies |
 | `swarm` | A boid murmuration rendered as a chunky pixel-block cloud field in muted theme ink. An invisible hawk dives at the densest formation on every beat and fear contagion shatters islands apart; sustained silence settles the birds onto window top edges until music bursts them back into the sky. Shader dials switch to smooth or topographic contour-line rendering |
 
 ## Install (Arch Linux)
@@ -62,7 +62,7 @@ zig build run
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
 #          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire,
-#          meshflow, swarm, voltaic, kepler
+#          meshflow, swarm, voltaic, moire
 effect = "fluid"
 theme = "Rosé Pine"
 
@@ -94,9 +94,9 @@ end_hour   = 24.0     # hour at which the tide is full
 arc_rate = 1.0        # ambient strike frequency multiplier
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
-[kepler]
-count = 60            # orbiting bodies (max 60)
-fuzz = true           # wave-packet interference; false = comet dots + trails
+[moire]
+count = 60            # wave sources / orbiting bodies (max 60)
+fuzz = true           # wave-interference field; false = comet dots + trails
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [swarm]
