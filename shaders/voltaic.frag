@@ -27,6 +27,8 @@ uniform float iTreble;
 uniform float iBeatPhase;
 uniform float iFlash;
 uniform int iGhostStart;   // segments at/after this index are afterglow embers
+uniform vec4 iFlares[32];   // xy = root contact point, z = intensity, w = radius
+uniform int iFlareCount;
 
 out vec4 fragColor;
 
@@ -149,9 +151,26 @@ void main() {
         light.y += focusRim(fc, iWindows[i], focus_amt);
     }
 
+    // Attachment flares: a hot bloom where each bolt roots on a window border —
+    // the contact point flashing as charge dumps into the frame. A colored
+    // halo with a tight near-white core.
+    float fglow = 0.0;
+    float fcore = 0.0;
+    for (int i = 0; i < iFlareCount && i < 32; i++) {
+        vec4 f = iFlares[i];
+        vec2 dp = fc - f.xy;
+        float r2 = dot(dp, dp);
+        float rad2 = f.w * f.w;
+        if (r2 > rad2 * 16.0) continue;
+        fglow += exp(-r2 / rad2) * f.z;
+        fcore += exp(-r2 / (rad2 * 0.16)) * f.z;
+    }
+
     col += gcol * light.x * 0.60;           // wide corona: faint space-lighting
     col += gcol * light.y * 0.90;           // colored plasma halo
     col += ccol * light.z * 3.20;           // overexposed core — blows out to white
+    col += gcol * fglow * 0.85;             // flare halo at the contact point
+    col += ccol * min(fcore, 2.0) * 1.5;    // hot near-white attachment center
 
     // Cooling-ember afterglow: the ionized channel still glows after the bolt
     // is gone — the recombination glow of real lightning's decaying channel.

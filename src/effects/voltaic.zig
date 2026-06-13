@@ -65,6 +65,10 @@ const max_ghost = 40;
 const max_embers = 4;
 const ember_life: f32 = 0.55;
 
+// Attachment flares: a hot bloom at each point where a bolt roots on a window
+// border — the contact/strike point. Rebuilt each frame from live endpoints.
+const max_flares = 32;
+
 /// A frozen imprint of a strong strike's channel — re-emitted each frame as
 /// dim violet segments that fade over ember_life, outliving the bolt itself.
 const Ember = struct {
@@ -186,6 +190,11 @@ pub const Context = struct {
     // tints everything past this index violet.
     ghost_start_idx: u32 = 0,
 
+    // Attachment flares: (x, y, intensity, radius) per bolt-root contact point,
+    // rebuilt every frame.
+    flares: [max_flares][4]f32 = undefined,
+    flare_count: u32 = 0,
+
     // Thunder flash: full-screen ambient brighten on big downbeat discharges,
     // fast decay — the room lighting up.
     flash: f32 = 0,
@@ -227,6 +236,8 @@ pub const Context = struct {
     loc_beat_phase: c.GLint = -1,
     loc_flash: c.GLint = -1,
     loc_ghost_start: c.GLint = -1,
+    loc_flares: c.GLint = -1,
+    loc_flarecount: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const sink = params.getString("sink", null);
@@ -330,6 +341,13 @@ pub const Context = struct {
         self.segs[self.seg_count] = .{ p[0], p[1], q[0], q[1] };
         self.seg_b[self.seg_count] = bright;
         self.seg_count += 1;
+    }
+
+    /// Register an attachment flare at a bolt-root contact point.
+    fn pushFlare(self: *Context, p: [2]f32, intensity: f32, radius: f32) void {
+        if (self.flare_count >= max_flares or intensity < 0.02) return;
+        self.flares[self.flare_count] = .{ p[0], p[1], intensity, radius };
+        self.flare_count += 1;
     }
 
     /// Midpoint-displacement bolt from `a` to `b`: split the chord in halves,
@@ -612,6 +630,7 @@ pub const Context = struct {
         // (arc seed, strike index): the path holds steady within a strike
         // tick and snaps to a new shape restrike_hz times per second.
         self.seg_count = 0;
+        self.flare_count = 0;
         // BPM-locked restrike: 8th-note subdivisions (8 shapes per beat).
         // beat_phase_total is monotonic so the counter never jumps backward.
         const strike: u32 = @intFromFloat(@max(self.beat_phase_total, 0.0) * 8.0);
@@ -635,6 +654,13 @@ pub const Context = struct {
             const reach = std.math.clamp(eff_age / leader_extend, 0.0, 1.0);
             const before = self.seg_count;
             self.genBolt(arc.a, arc.b, arc.amp * wander, env, reach, ar, bolt_segs, false, true);
+
+            // Attachment flares at both rooted contact points. The source end
+            // (a) flares as soon as the leader launches; the target end (b)
+            // only lights once the leader has bridged the gap (reach complete).
+            const fr = 16.0 + env * 16.0 + self.bass * 10.0;
+            self.pushFlare(arc.a, env * 1.15, fr);
+            if (reach >= 1.0) self.pushFlare(arc.b, env * 1.15, fr);
 
             // Imprint a strong, fully-extended strike into a fresh ember slot,
             // exactly once (the frame its leader completes). Each ember then
@@ -699,6 +725,9 @@ pub const Context = struct {
                     const env = self.storm * (0.55 + self.bass * 0.6) * flick;
                     const amp = std.math.clamp(dist * 0.16, 14.0, 180.0);
                     self.genBolt(a, b, amp * wander, env, 1.0, ar, bolt_segs, false, true);
+                    const fr = 16.0 + env * 16.0 + self.bass * 10.0;
+                    self.pushFlare(a, env * 1.15, fr);
+                    self.pushFlare(b, env * 1.15, fr);
                 }
             }
         }
@@ -761,6 +790,8 @@ pub const Context = struct {
                 if (bright < 0.012) continue;
                 const amp = std.math.clamp(dist * 0.10, 8.0, 80.0);
                 self.genBolt(a, target, amp * wander, bright, reach, ar, crawl_segs, true, false);
+                // Faint flare at the feeler's root as it gropes from the edge.
+                self.pushFlare(a, bright * 0.8, 12.0 + bright * 10.0);
             }
         }
 
@@ -798,6 +829,8 @@ pub const Context = struct {
             self.loc_beat_phase = c.glGetUniformLocation(prog.program, "iBeatPhase");
             self.loc_flash = c.glGetUniformLocation(prog.program, "iFlash");
             self.loc_ghost_start = c.glGetUniformLocation(prog.program, "iGhostStart");
+            self.loc_flares = c.glGetUniformLocation(prog.program, "iFlares[0]");
+            self.loc_flarecount = c.glGetUniformLocation(prog.program, "iFlareCount");
         }
 
         const n = self.seg_count;
@@ -821,6 +854,10 @@ pub const Context = struct {
         if (self.loc_beat_phase >= 0) c.glUniform1f(self.loc_beat_phase, self.beat_phase);
         if (self.loc_flash >= 0) c.glUniform1f(self.loc_flash, self.flash);
         if (self.loc_ghost_start >= 0) c.glUniform1i(self.loc_ghost_start, @intCast(self.ghost_start_idx));
+        if (self.loc_flares >= 0 and self.flare_count > 0) {
+            c.glUniform4fv(self.loc_flares, @intCast(self.flare_count), @ptrCast(&self.flares[0]));
+        }
+        if (self.loc_flarecount >= 0) c.glUniform1i(self.loc_flarecount, @intCast(self.flare_count));
     }
 
     pub fn deinit(self: *Context) void {
