@@ -124,14 +124,6 @@ pub const Context = struct {
     stir: bool,
     stir_radius: f32,
     wall_inset: f32,
-    /// Ticks of reverse time per kick (config: kick_depth, 0 disables).
-    /// A kick rewinds the field this many ticks (continuous backward
-    /// glide via phase relabels — the one "reverse" a non-invertible CA
-    /// can fake, visually exact for wave trains), then real forward
-    /// evolution swings it back through: a pendulum in time, per beat.
-    kick_depth: u8,
-    /// Backward ticks still owed from the last kick.
-    back_left: u8 = 0,
     /// Palette slots for the two phosphor colors; -1 = theme foreground.
     /// Fronts carrying states from the lower half of the ring glow in
     /// `accent`, upper half in `accent2` — successive waves trade colors.
@@ -287,7 +279,6 @@ pub const Context = struct {
             .stir = params.getBool("stir", false),
             .stir_radius = std.math.clamp(params.getFloat("stir_radius", 2.2), 0.5, 8.0),
             .wall_inset = std.math.clamp(params.getFloat("wall_inset", 2.0), 0.0, 32.0),
-            .kick_depth = @intCast(std.math.clamp(params.getInt("kick_depth", 3), 0, 8)),
             .kick_thresh = std.math.clamp(params.getFloat("kick_threshold", 1.0), 0.3, 4.0),
             .accent = @floatFromInt(std.math.clamp(params.getInt("accent", 1), -1, 15)),
             .accent2 = @floatFromInt(std.math.clamp(params.getInt("accent2", 2), -1, 15)),
@@ -442,34 +433,6 @@ pub const Context = struct {
         }
     }
 
-    /// Shift every non-wall cell's phase by `step` states — one tick of
-    /// fake time, through the rule's shift symmetry. Double-buffered like
-    /// step() so the shader's crossfade renders each shift as a glide.
-    /// Glow travels WITH the shift: cells landing in a marker band
-    /// re-mint full freshness, but only if they were already part of
-    /// active structure — frozen domains stay dark instead of flashing.
-    fn shiftPhase(self: *Context, shift: i16) void {
-        @memcpy(self.fresh_prev, self.fresh);
-        const curr = self.cells[self.cur];
-        const next = self.cells[self.cur ^ 1];
-        const opp = self.n_states / 2;
-        for (curr, next, self.wall, self.fresh) |s, *n, w, *fr| {
-            if (w == 1) {
-                n.* = s;
-                continue;
-            }
-            const ns: u8 = @intCast(@mod(@as(i16, s) + shift, @as(i16, self.n_states)));
-            n.* = ns;
-            const in_marker = ns < 2 or (ns >= opp and ns < opp + 2);
-            if (in_marker and fr.* > 10) {
-                fr.* = 230;
-            } else {
-                fr.* -|= self.fresh_decay;
-            }
-        }
-        self.cur ^= 1;
-    }
-
     fn seedRandomPinwheel(self: *Context) void {
         const r = self.rng.random();
         self.seedPinwheel(
@@ -568,10 +531,10 @@ pub const Context = struct {
             }
 
             // Kick onset: log-compressed positive spectral flux over the
-            // kick bins (~60-480Hz), thresholded at mean + k*sigma of the
-            // trailing window. Adapts to the passage — no fixed multiplier
-            // that's jumpy on busy mixes and deaf on quiet ones. A kick
-            // owes the sim kick_depth backward ticks (the time pendulum).
+            // kick bins, thresholded at mean + k*sigma of the trailing
+            // window. Adapts to the passage — no fixed multiplier that's
+            // jumpy on busy mixes and deaf on quiet ones. A kick drives
+            // the tube flash (display side) and nothing in the sim.
             // Sub bins carry the kick; 180-300Hz gets half weight, and the
             // snare-body range (300Hz+) is excluded so backbeats don't
             // double the count.
@@ -605,7 +568,6 @@ pub const Context = struct {
                 self.beat_cooldown = 0.18;
                 self.beat = 1.0;
                 self.beat_count += 1;
-                if (self.warmed) self.back_left = self.kick_depth;
             }
             self.beat *= @exp(-5.0 * dt);
             if (self.beat < 0.01) self.beat = 0;
@@ -651,26 +613,20 @@ pub const Context = struct {
         while (self.acc >= self.sim_dt and steps < max_catchup) : (steps += 1) {
             self.acc -= self.sim_dt;
             self.rasterizeWalls(state.windows);
-            if (self.back_left > 0) {
-                // Reverse leg of the kick pendulum: one backward tick.
-                self.back_left -= 1;
-                self.shiftPhase(-1);
+            const flips = self.step();
+            // Burnout watch: a healthy culture flips >1% of cells per
+            // tick; a few near-still ticks in a row means the waves
+            // died out. Gated stillness (quiet music) doesn't count.
+            var gsum: f32 = 0;
+            for (self.gates) |g| gsum += g;
+            if (flips * 400 < self.gw * self.gh and gsum > 3.6) {
+                self.calm_ticks +|= 1;
             } else {
-                const flips = self.step();
-                // Burnout watch: a healthy culture flips >1% of cells per
-                // tick; a few near-still ticks in a row means the waves
-                // died out. Gated stillness (quiet music) doesn't count.
-                var gsum: f32 = 0;
-                for (self.gates) |g| gsum += g;
-                if (flips * 400 < self.gw * self.gh and gsum > 3.6) {
-                    self.calm_ticks +|= 1;
-                } else {
-                    self.calm_ticks = 0;
-                }
-                if (self.calm_ticks >= 3) {
-                    self.calm_ticks = 0;
-                    self.seedRandomPinwheel();
-                }
+                self.calm_ticks = 0;
+            }
+            if (self.calm_ticks >= 3) {
+                self.calm_ticks = 0;
+                self.seedRandomPinwheel();
             }
             if (self.stir) self.stirAt(state.cursor);
             self.buildRgba();
