@@ -27,6 +27,7 @@ const swarm = @import("effects/swarm/context.zig");
 const voltaic = @import("effects/voltaic.zig");
 const moire = @import("effects/moire.zig");
 const fable = @import("effects/fable.zig");
+const ivy = @import("effects/ivy.zig");
 
 pub const WindowInfo = struct {
     class: [64]u8 = undefined,
@@ -70,6 +71,7 @@ pub const Effect = union(enum) {
     voltaic: voltaic.Context,
     moire: moire.Context,
     fable: fable.Context,
+    ivy: ivy.Context,
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
         if (std.mem.eql(u8, name, "particles")) {
@@ -123,6 +125,9 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "fable")) {
             const params = config_mod.effectParams(cfg, "fable");
             return .{ .fable = try fable.Context.init(allocator, width, height, params) };
+        } else if (std.mem.eql(u8, name, "ivy")) {
+            const params = config_mod.effectParams(cfg, "ivy");
+            return .{ .ivy = try ivy.Context.init(allocator, width, height, params) };
         }
         log.err("unknown effect: '{s}'. Available: {s}", .{ name, effect_names_csv });
         return error.UnknownEffect;
@@ -167,6 +172,7 @@ pub const Effect = union(enum) {
             .voltaic => "shaders/voltaic.frag",
             .moire => "shaders/moire.frag",
             .fable => "shaders/fable.frag",
+            .ivy => "shaders/ivy.frag",
         };
     }
 };
