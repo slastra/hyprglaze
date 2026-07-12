@@ -39,36 +39,49 @@ float hash21(vec2 p) {
 
 // ---------- palette ----------
 
-// Foliage: ANSI green slots when the theme has them, moss-teal fallback.
+// Foliage: theme greens pulled toward true ivy green — themes like Rosé
+// Pine have teal ANSI greens, and leaves should still read as a plant.
 vec3 leafColor() {
-    if (iPaletteSize > 10) return mix(iPalette[2], iPalette[10], 0.45);
-    return vec3(0.25, 0.65, 0.42);
+    vec3 theme_green = (iPaletteSize > 10) ? mix(iPalette[2], iPalette[10], 0.35) : vec3(0.25, 0.65, 0.42);
+    return mix(theme_green, vec3(0.16, 0.45, 0.18), 0.55);
 }
 
 vec3 stemColor() {
     vec3 leaf = leafColor();
     vec3 fg = (iPaletteSize > 0) ? iPaletteFg : vec3(0.85);
-    return mix(leaf, fg, 0.25);
+    // Woody green-brown, only faintly lifted toward fg.
+    return mix(mix(leaf, vec3(0.35, 0.30, 0.16), 0.35), fg, 0.12);
 }
 
 // ---------- leaf ----------
 
 // Ivy (hedera) leaf in its local frame: +x toward the tip, origin at the
-// petiole attachment. Polar radius modulated to give a pointed main lobe,
-// two side lobes, and a narrow base — returns (fill, vein highlight).
+// petiole attachment. Classic juvenile hedera silhouette: five lobes —
+// a long pointed central lobe, two mid side lobes at ~72°, two small
+// basal flanges at ~144° — with deep sinuses between them and a base
+// that narrows to a notch where the petiole enters. Returns
+// (fill, vein highlight).
 vec2 leafShape(vec2 q, float size) {
-    // Shift so the shape sits ahead of the attachment point.
-    vec2 p = q - vec2(size * 0.62, 0.0);
+    // Shift so the blade sits ahead of the attachment point.
+    vec2 p = q - vec2(size * 0.55, 0.0);
     float r = length(p);
-    if (r > size * 1.6) return vec2(0.0);
+    if (r > size * 1.75) return vec2(0.0);
     float th = atan(p.y, p.x);
-    float lobes = 0.60 + 0.40 * pow(abs(cos(th * 1.5)), 0.35);
-    float taper = 0.58 + 0.42 * cos(th);
-    float target = size * lobes * taper * 1.45;
+    // Five lobes from |cos(2.5θ)|: peaks at 0, ±72°, ±144°. The floor
+    // sets sinus depth between lobes.
+    float lb = pow(abs(cos(th * 2.5)), 0.42);
+    float lobes = 0.52 + 0.48 * lb;
+    // Broad blade tapering toward the base; the ±144° peaks become the
+    // small basal flanges, and cos(2.5π)=0 notches the very base.
+    float taper = 0.62 + 0.38 * cos(th);
+    // The central lobe reaches farther and comes to a point; a whisper of
+    // edge ripple keeps the margin from reading machine-perfect.
+    float elong = 1.0 + 0.25 * exp(-th * th * 2.6);
+    float target = size * lobes * taper * elong * 1.25 * (1.0 + 0.02 * sin(th * 9.0));
     float d = r - target;
-    float fill = smoothstep(1.3, -1.3, d);
-    // Light veins fanning to each lobe tip, fading toward the rim.
-    float vein = pow(abs(cos(th * 1.5)), 24.0) * fill * (1.0 - smoothstep(0.0, target, r) * 0.7);
+    float fill = smoothstep(1.1, -1.1, d);
+    // Palmate veins: one ray into each lobe, fading toward the rim.
+    float vein = pow(abs(cos(th * 2.5)), 18.0) * fill * (1.0 - smoothstep(0.0, target, r) * 0.72);
     return vec2(fill, vein);
 }
 
@@ -112,11 +125,13 @@ void main() {
         float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
         float d = length(pa - ba * h);
 
-        float w = 1.1 + iBass * 0.4;
+        // Width follows brightness (voltaic pattern): dim child shoots and
+        // fading vines are also thinner, so generations taper naturally.
+        float w = (0.55 + 0.65 * min(b, 1.0)) * (1.0 + iBass * 0.35);
         // Bias-subtracted so the reject box never shows as a square edge.
         float cut = exp(-40.0 * 0.35 / w);
-        light += stem_c * (exp(-d * 0.35 / w) - cut) * b * 0.62;
-        light += mix(stem_c, fg, 0.4) * exp(-d * d * 0.6 / (w * w)) * b * 0.95;
+        light += stem_c * (exp(-d * 0.35 / w) - cut) * b * 0.45;
+        light += mix(stem_c, fg, 0.22) * exp(-d * d * 0.6 / (w * w)) * b * 0.70;
     }
 
     // ---- leaves: lobed hedera shapes on petioles, treble shimmer ----
@@ -131,9 +146,17 @@ void main() {
         vec2 lf = leafShape(q, L.w);
         float tw = 0.85 + 0.15 * sin(iIvyTime * 2.6 + float(i) * 1.7);
         float shine = tw * (0.55 + iTreble * 0.6);
-        // Body shaded darker at the rim, light veins, faint stalk.
-        light += leaf_c * lf.x * 0.62 * shine;
-        light += mix(leaf_c, fg, 0.45) * lf.y * 0.55 * shine;
+        // Age varies the green: young (small) leaves lighter yellow-green,
+        // mature blades deep and solid — like the reference photo.
+        float young = clamp(1.3 - L.w / 9.0, 0.0, 0.8);
+        vec3 lc = mix(leaf_c * 0.8, mix(leaf_c, vec3(0.55, 0.68, 0.24), 0.55), young);
+        // Individual variation: no two leaves share the exact same green
+        // or brightness.
+        float lh = hash21(vec2(float(i) * 3.7, float(i) * 1.3));
+        lc = mix(lc, vec3(0.50, 0.60, 0.20), lh * 0.20);
+        shine *= 0.80 + 0.40 * lh;
+        light += lc * lf.x * 0.85 * shine;
+        light += mix(lc, fg, 0.35) * lf.y * 0.40 * shine;
         light += stem_c * petiole(q, L.w) * 0.30 * shine;
     }
 

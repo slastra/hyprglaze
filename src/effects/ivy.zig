@@ -16,7 +16,7 @@ const max_windows = 32;
 // geometry is recomputed from the *current* window rect every frame
 // (perimeter-parameterized, voltaic crawl pattern), so vines ride their
 // window through moves and resizes.
-const max_vines = 18;
+const max_vines = 20;
 const seg_step: f32 = 16.0; // arc length per uploaded stem segment
 const max_segs = 360;
 const seg_b_vec4s = max_segs / 4;
@@ -41,13 +41,18 @@ const Vine = struct {
     /// Screen-border vines grow lifted toward the workspace interior
     /// (the outward perimeter normal would point off-screen).
     inward: bool = false,
-    /// Branches: index of the trunk vine this tendril forked from (-1 for
-    /// trunks), the trunk arc offset it roots at, and the trunk's seed so a
-    /// recycled slot can't silently become a different parent.
+    /// Branches: index of the vine this tendril forked from (-1 for
+    /// trunks), the parent arc offset it roots at, and the parent's seed so
+    /// a recycled slot can't silently become a different parent. For
+    /// branches, `dir` is repurposed as the departure side (±1) and
+    /// `inward` is inherited as the "prefer growing toward screen center"
+    /// hint (set for border creepers).
     parent: i16 = -1,
     ps: f32 = 0,
     parent_seed: f32 = 0,
-    /// How many branches this trunk has forked so far.
+    /// 0 = trunk, 1 = branch, 2 = sub-branch (forking stops at 2).
+    depth: u8 = 0,
+    /// How many branches this vine has forked so far.
     branches: u8 = 0,
 };
 
@@ -62,6 +67,13 @@ const FallingLeaf = struct {
     life: f32 = 1,
     size: f32 = 6,
 };
+
+/// Cheap deterministic per-node hash — stable across frames so jittered
+/// leaves don't crawl.
+fn fhash(a: f32, b: f32) f32 {
+    const x = @sin(a * 12.9898 + b * 78.233) * 43758.5453;
+    return x - @floor(x);
+}
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
     const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
@@ -195,9 +207,13 @@ pub const Context = struct {
     fn trunkPoint(self: *const Context, rect: shader_mod.ShaderProgram.WindowRect, v: *const Vine, s: f32) [2]f32 {
         const hit = perimeterAt(rect, v.t0 + v.dir * s);
         const sway_amp = (1.5 + self.energy * 7.0) * @min(s / 140.0, 1.0);
+        // Three incommensurate meander frequencies with a per-vine
+        // amplitude so no two vines wander with the same rhythm.
+        const amp_v = 0.8 + fhash(v.seed, 0.29) * 0.5;
         const lift = 4.0 +
-            @sin(s * 0.11 + v.seed) * 4.0 +
-            @sin(s * 0.045 + v.seed * 1.7) * 7.0 +
+            (@sin(s * 0.11 + v.seed) * 4.0 +
+                @sin(s * 0.045 + v.seed * 1.7) * 7.0 +
+                @sin(s * 0.021 + v.seed * 3.1) * 3.5) * amp_v +
             @sin(self.now * 1.2 + s * 0.05 + v.seed) * sway_amp;
         const l = if (v.inward) -@max(lift, 1.5) else @max(lift, 1.5);
         return .{ hit.pos[0] + hit.normal[0] * l, hit.pos[1] + hit.normal[1] * l };
@@ -212,17 +228,18 @@ pub const Context = struct {
         if (v.parent < 0) return self.trunkPoint(rect, v, s);
 
         const p = &self.vines[@intCast(v.parent)];
-        const attach = self.trunkPoint(rect, p, v.ps);
-        const a = self.trunkPoint(rect, p, @max(v.ps - 5.0, 0.0));
-        const b = self.trunkPoint(rect, p, v.ps + 5.0);
+        const attach = self.vinePoint(rect, p, v.ps);
+        const a = self.vinePoint(rect, p, @max(v.ps - 5.0, 0.0));
+        const b = self.vinePoint(rect, p, v.ps + 5.0);
         var tx = b[0] - a[0];
         var ty = b[1] - a[1];
         const tl = @max(@sqrt(tx * tx + ty * ty), 1e-4);
         tx /= tl;
         ty /= tl;
-        // Depart the trunk at a seeded angle off its local tangent, biased
-        // away from the frame like a real shoot reaching for light.
-        const side: f32 = if (@mod(v.seed, 2.0) < 1.0) 1.0 else -1.0;
+        // Depart the parent at a seeded angle off its local tangent, on the
+        // side chosen at spawn (away from the frame, like a shoot reaching
+        // for light).
+        const side = v.dir;
         const ang = std.math.atan2(ty, tx) + side * (0.55 + @mod(v.seed * 0.61, 1.0) * 0.6);
         const ux = @cos(ang);
         const uy = @sin(ang);
@@ -237,7 +254,7 @@ pub const Context = struct {
         return .{ attach[0] + ux * s + px * off, attach[1] + uy * s + py * off };
     }
 
-    fn spawnBranch(self: *Context, trunk_idx: usize) void {
+    fn spawnBranch(self: *Context, parent_idx: usize) void {
         const r = self.rng.random();
         // Keep slots in reserve so windows and the border can always root.
         var free: u32 = 0;
@@ -245,24 +262,53 @@ pub const Context = struct {
             if (!v.active) free += 1;
         }
         if (free < 5) return;
-        const trunk = &self.vines[trunk_idx];
+        const parent = &self.vines[parent_idx];
+        const rect = self.vineRect(parent) orelse return;
+
+        // Root somewhere in the grown span, shy of the very tip. Shoots
+        // lower on the parent grow longer (they're older).
+        const frac = 0.2 + r.float(f32) * 0.65;
+        const ps = frac * parent.dl;
+        var target = 50.0 + r.float(f32) * 80.0 + (1.0 - frac) * 90.0;
+        if (parent.depth > 0) target *= 0.6; // sub-branches stay short
+
+        // Phototropism: depart on the side that reaches away from the
+        // frame — or toward screen center for border creepers (inward).
+        const attach = self.vinePoint(rect, parent, ps);
+        const a = self.vinePoint(rect, parent, @max(ps - 5.0, 0.0));
+        const b = self.vinePoint(rect, parent, ps + 5.0);
+        const tang = std.math.atan2(b[1] - a[1], b[0] - a[0]);
+        const cx = rect.x + rect.w * 0.5;
+        const cy = rect.y + rect.h * 0.5;
+        var out_x = attach[0] - cx;
+        var out_y = attach[1] - cy;
+        if (parent.inward) {
+            out_x = -out_x;
+            out_y = -out_y;
+        }
+        const ang_p = tang + 0.85;
+        const ang_m = tang - 0.85;
+        const dot_p = @cos(ang_p) * out_x + @sin(ang_p) * out_y;
+        const dot_m = @cos(ang_m) * out_x + @sin(ang_m) * out_y;
+        const side: f32 = if (dot_p >= dot_m) 1.0 else -1.0;
+
         for (&self.vines) |*v| {
             if (v.active) continue;
             v.* = .{
                 .active = true,
-                .addr = trunk.addr,
+                .addr = parent.addr,
                 .t0 = 0,
-                .dir = 1,
+                .dir = side,
                 .dl = 0,
-                .target = 60.0 + r.float(f32) * 120.0,
+                .target = target,
                 .seed = r.float(f32) * 100.0,
-                .inward = false,
-                .parent = @intCast(trunk_idx),
-                // Root somewhere in the grown span, shy of the very tip.
-                .ps = (0.25 + r.float(f32) * 0.6) * trunk.dl,
-                .parent_seed = trunk.seed,
+                .inward = parent.inward,
+                .parent = @intCast(parent_idx),
+                .ps = ps,
+                .parent_seed = parent.seed,
+                .depth = parent.depth + 1,
             };
-            trunk.branches += 1;
+            parent.branches += 1;
             return;
         }
     }
@@ -446,13 +492,19 @@ pub const Context = struct {
             const cy = rect.y + rect.h * 0.5;
             const is_focused = @abs(cx - self.focused_center[0]) < 40.0 and @abs(cy - self.focused_center[1]) < 40.0;
             const tend: f32 = if (is_focused) 1.8 else 1.0;
-            // Silence -> a slow creep; music feeds the garden.
-            v.dl = @min(v.dl + dt * self.growth * tend * (16.0 + self.energy * 90.0), v.target);
+            // Silence -> a slow creep; music feeds the garden. Each vine has
+            // its own vigor so the canopy fills in unevenly, like a plant.
+            const vigor = 0.75 + fhash(v.seed, 0.53) * 0.5;
+            v.dl = @min(v.dl + dt * self.growth * tend * vigor * (16.0 + self.energy * 90.0), v.target);
 
-            // Organic forking: once a trunk has grown past each fork
-            // threshold, a branch tendril peels off into free space.
-            if (v.parent < 0 and v.branches < 3) {
-                const next_fork = 90.0 + @as(f32, @floatFromInt(v.branches)) * 110.0 + @mod(v.seed * 0.83, 1.0) * 60.0;
+            // Organic forking: once a vine has grown past each fork
+            // threshold, a shoot peels off into free space. Trunks fork up
+            // to 4 branches; branches fork up to 2 short sub-branches.
+            if (v.depth == 0 and v.branches < 4) {
+                const next_fork = 80.0 + @as(f32, @floatFromInt(v.branches)) * 95.0 + @mod(v.seed * 0.83, 1.0) * 60.0;
+                if (v.dl > next_fork) self.spawnBranch(vi);
+            } else if (v.depth == 1 and v.branches < 2) {
+                const next_fork = 45.0 + @as(f32, @floatFromInt(v.branches)) * 75.0 + @mod(v.seed * 0.83, 1.0) * 30.0;
                 if (v.dl > next_fork) self.spawnBranch(vi);
             }
         }
@@ -516,34 +568,43 @@ pub const Context = struct {
                 const a = self.vinePoint(rect, v, s);
                 const b = self.vinePoint(rect, v, s1);
                 const tip = smoothstep(v.dl - 70.0, v.dl, s1);
+                // Child stems render dimmer — the shader derives width from
+                // brightness, so shoots also read thinner than their parent.
+                const gen = 1.0 - 0.16 * @as(f32, @floatFromInt(v.depth));
                 self.segs[self.seg_count] = .{ a[0], a[1], b[0], b[1] };
-                self.seg_b[self.seg_count] = (0.4 + tip * 0.6) * fade;
+                self.seg_b[self.seg_count] = (0.4 + tip * 0.6) * fade * gen;
                 self.seg_count += 1;
             }
 
-            // Leaves at fixed offsets, alternating sides, easing in as the
-            // vine grows past each node.
+            // Leaf nodes: nominally alternate, but with seeded jitter in
+            // spacing, angle, and size — and the occasional bare node — so
+            // the canopy fills in like a plant, not a rivet line.
             var li: u32 = 0;
             var ls: f32 = 22.0;
             while (ls < v.dl and self.leaf_count < max_leaves) : (ls += leaf_spacing) {
-                const p0 = self.vinePoint(rect, v, ls);
-                const pa = self.vinePoint(rect, v, @max(ls - 5.0, 0.0));
-                const pb = self.vinePoint(rect, v, ls + 5.0);
+                const fi = @as(f32, @floatFromInt(li));
+                li += 1;
+                if (fhash(v.seed * 1.7, fi) < 0.16) continue; // bare patch
+                const jit = fhash(v.seed, fi);
+                const ls_e = std.math.clamp(ls + (jit * 2.0 - 1.0) * 9.0, 2.0, v.dl);
+                const p0 = self.vinePoint(rect, v, ls_e);
+                const pa = self.vinePoint(rect, v, @max(ls_e - 5.0, 0.0));
+                const pb = self.vinePoint(rect, v, ls_e + 5.0);
                 const tang = std.math.atan2(pb[1] - pa[1], pb[0] - pa[0]);
                 const side: f32 = if (li % 2 == 0) 1.0 else -1.0;
-                const flutter = @sin(self.now * 1.6 + ls * 0.3 + v.seed) * (0.08 + self.treble * 0.25);
-                const angle = tang + side * (0.95 + @sin(v.seed + ls) * 0.2) + flutter;
-                const grow_in = smoothstep(0.0, 35.0, v.dl - ls);
+                const flutter = @sin(self.now * 1.6 + ls_e * 0.3 + v.seed) * (0.08 + self.treble * 0.25);
+                const angle = tang + side * (0.75 + fhash(v.seed + 3.0, fi) * 0.55) + (jit - 0.5) * 0.5 + flutter;
+                const grow_in = smoothstep(0.0, 35.0, v.dl - ls_e);
                 // Real ivy: young leaves near the growing tip stay small,
                 // older nodes carry big mature leaves.
-                const mature = 0.5 + 0.5 * smoothstep(0.0, 140.0, v.dl - ls);
-                const band = self.bands[@as(usize, @intFromFloat(ls)) % 6];
-                const size = (8.5 + @sin(v.seed * 3.0 + ls * 0.7) * 3.0) * mature * grow_in * (1.0 + band * 0.15) * fade;
+                const mature = 0.5 + 0.5 * smoothstep(0.0, 140.0, v.dl - ls_e);
+                const vary = 0.75 + fhash(v.seed + 7.0, fi) * 0.5;
+                const band = self.bands[@as(usize, @intFromFloat(ls_e)) % 6];
+                const size = (11.5 + @sin(v.seed * 3.0 + ls_e * 0.7) * 3.5) * vary * mature * grow_in * (1.0 + band * 0.15) * fade;
                 if (size > 0.5) {
                     self.leaves[self.leaf_count] = .{ p0[0], p0[1], angle, size };
                     self.leaf_count += 1;
                 }
-                li += 1;
             }
         }
     }
