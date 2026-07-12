@@ -8,6 +8,74 @@ const c = @cImport({
     @cInclude("GLES3/gl3.h");
 });
 
+const log = std.log.scoped(.whorl);
+
+// ---- spectral front-end ----
+// AudioCapture ships TIME-DOMAIN samples (128/channel, box-averaged from a
+// 1/60s window — effective rate ~7.7kHz, Nyquist ~3.8kHz). The house
+// "6-band split" other effects use just slices that window in TIME, so its
+// "bands" are correlated loudness envelopes, not frequencies. Whorl runs a
+// real 128-point FFT per frame instead: true bands for the conduction
+// gates, and honest spectral flux for the kick detector.
+
+const fft_n = 128;
+
+const hann_win: [fft_n]f32 = blk: {
+    @setEvalBranchQuota(10000);
+    var w: [fft_n]f32 = undefined;
+    for (0..fft_n) |i| {
+        const x = @as(f32, i) / @as(f32, fft_n - 1);
+        w[i] = 0.5 - 0.5 * @cos(2.0 * std.math.pi * x);
+    }
+    break :blk w;
+};
+
+/// In-place radix-2 FFT.
+fn fft(re: *[fft_n]f32, im: *[fft_n]f32) void {
+    var j: usize = 0;
+    for (1..fft_n) |i| {
+        var bit: usize = fft_n >> 1;
+        while (j & bit != 0) : (bit >>= 1) j ^= bit;
+        j |= bit;
+        if (i < j) {
+            std.mem.swap(f32, &re[i], &re[j]);
+            std.mem.swap(f32, &im[i], &im[j]);
+        }
+    }
+    var len: usize = 2;
+    while (len <= fft_n) : (len <<= 1) {
+        const ang = -2.0 * std.math.pi / @as(f32, @floatFromInt(len));
+        const wr = @cos(ang);
+        const wi = @sin(ang);
+        var i: usize = 0;
+        while (i < fft_n) : (i += len) {
+            var cr: f32 = 1.0;
+            var ci: f32 = 0.0;
+            for (0..len / 2) |k| {
+                const ur = re[i + k];
+                const ui = im[i + k];
+                const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+                const vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+                re[i + k] = ur + vr;
+                im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr;
+                im[i + k + len / 2] = ui - vi;
+                const nr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = nr;
+            }
+        }
+    }
+}
+
+/// Log-spaced band edges in FFT bins (~60Hz each): sub, bass, low-mid,
+/// mid, high-mid, treble. The capture's box-averaging shaves real treble;
+/// per-band AGC in the analysis compensates for the level differences.
+const band_edges = [7]usize{ 1, 3, 5, 9, 17, 33, 64 };
+
+/// Trailing flux window for the adaptive onset threshold (~1.6s at 60fps).
+const flux_hist_len = 96;
+
 // Cyclic cellular automaton (the classic "demons"). N states form a ring;
 // a cell in state s flips to s+1 when enough neighbors already carry s+1.
 // From random noise the grid self-organizes: debris -> droplets -> traveling
@@ -86,8 +154,21 @@ pub const Context = struct {
     bass_smooth: f32 = 0,
     treble_smooth: f32 = 0,
     energy_ema: f32 = 0,
-    bass_prev: f32 = 0,
-    flux_avg: f32 = 0,
+    /// Kick strictness multiplier (config: kick_threshold, higher =
+    /// fewer detections). Scales the adaptive sigma threshold.
+    kick_thresh: f32,
+    /// Previous frame's magnitude spectrum, for spectral flux.
+    spec_prev: [65]f32 = [_]f32{0} ** 65,
+    /// Slow per-band peaks for auto-gain (volume independence).
+    band_peak: [6]f32 = [_]f32{0} ** 6,
+    /// Trailing onset-strength window for the mean + k*sigma threshold.
+    flux_hist: [flux_hist_len]f32 = [_]f32{0} ** flux_hist_len,
+    flux_pos: usize = 0,
+    /// Previous frame's onset strength, for rising-edge peak-picking.
+    flux_last: f32 = 0,
+    /// Detector telemetry: kicks since the last 20s log line.
+    beat_count: u32 = 0,
+    log_timer: f32 = 0,
     beat_cooldown: f32 = 0,
     /// Beat envelope: snaps to 1 on a detected downbeat, decays fast.
     beat: f32 = 0,
@@ -207,6 +288,7 @@ pub const Context = struct {
             .stir_radius = std.math.clamp(params.getFloat("stir_radius", 2.2), 0.5, 8.0),
             .wall_inset = std.math.clamp(params.getFloat("wall_inset", 2.0), 0.0, 32.0),
             .kick_depth = @intCast(std.math.clamp(params.getInt("kick_depth", 3), 0, 8)),
+            .kick_thresh = std.math.clamp(params.getFloat("kick_threshold", 1.0), 0.3, 4.0),
             .accent = @floatFromInt(std.math.clamp(params.getInt("accent", 1), -1, 15)),
             .accent2 = @floatFromInt(std.math.clamp(params.getInt("accent2", 2), -1, 15)),
             .misconv = std.math.clamp(params.getFloat("misconverge", 1.5), 0.0, 8.0),
@@ -452,22 +534,27 @@ pub const Context = struct {
         const dt = std.math.clamp(state.dt, 0.0, 0.05);
         self.now += dt;
 
-        // ---- audio analysis (glitch/voltaic band split) ----
+        // ---- audio analysis: real FFT bands + spectral-flux onset ----
         if (self.audio) |audio| {
             const wave = audio.getWaveform();
-            const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
-            for (0..6) |bi| {
-                var energy: f32 = 0;
-                const lo = ranges[bi][0];
-                const hi = ranges[bi][1];
-                for (lo..hi) |j| {
-                    energy += @abs(wave[j]) + @abs(wave[128 + j]);
-                }
-                energy /= @as(f32, @floatFromInt((hi - lo) * 2));
-                const raw = energy * 6.0;
+            var re: [fft_n]f32 = undefined;
+            var im = [_]f32{0} ** fft_n;
+            for (0..fft_n) |i| re[i] = (wave[i] + wave[fft_n + i]) * 0.5 * hann_win[i];
+            fft(&re, &im);
+            var mags: [65]f32 = undefined;
+            for (0..65) |k| mags[k] = @sqrt(re[k] * re[k] + im[k] * im[k]);
+
+            // True frequency bands, auto-gained against a slow peak so the
+            // conduction gates behave the same at any playback volume.
+            for (0..6) |b| {
+                var p: f32 = 0;
+                for (band_edges[b]..band_edges[b + 1]) |k| p += mags[k];
+                p /= @as(f32, @floatFromInt(band_edges[b + 1] - band_edges[b]));
+                self.band_peak[b] = @max(self.band_peak[b] * @exp(-dt / 4.0), p);
+                const raw = if (self.band_peak[b] > 0.003) p / self.band_peak[b] else 0.0;
                 const attack = @min(1.0, 25.0 * dt);
                 const decay = @min(1.0, 5.0 * dt);
-                self.bands[bi] += (raw - self.bands[bi]) * (if (raw > self.bands[bi]) attack else decay);
+                self.bands[b] += (raw - self.bands[b]) * (if (raw > self.bands[b]) attack else decay);
             }
             self.bass = (self.bands[0] + self.bands[1]) * 0.5;
             self.treble = (self.bands[4] + self.bands[5]) * 0.5;
@@ -480,20 +567,57 @@ pub const Context = struct {
                 self.bands_smooth[k] += (self.bands[k] - self.bands_smooth[k]) * @min(1.0, 8.0 * dt);
             }
 
-            // Kick = time pendulum: owe the sim kick_depth backward ticks;
-            // the tick loop pays them as reverse phase glides, then real
-            // forward evolution swings back through.
-            const flux = @max(0.0, self.bass - self.bass_prev);
-            self.bass_prev = self.bass;
-            self.flux_avg += (flux - self.flux_avg) * @min(1.0, 1.5 * dt);
+            // Kick onset: log-compressed positive spectral flux over the
+            // kick bins (~60-480Hz), thresholded at mean + k*sigma of the
+            // trailing window. Adapts to the passage — no fixed multiplier
+            // that's jumpy on busy mixes and deaf on quiet ones. A kick
+            // owes the sim kick_depth backward ticks (the time pendulum).
+            // Sub bins carry the kick; 180-300Hz gets half weight, and the
+            // snare-body range (300Hz+) is excluded so backbeats don't
+            // double the count.
+            var flux: f32 = 0;
+            for (1..5) |k| {
+                const d = std.math.log1p(mags[k]) - std.math.log1p(self.spec_prev[k]);
+                if (d > 0) flux += d * (if (k < 3) @as(f32, 1.0) else 0.5);
+            }
+            for (0..65) |k| self.spec_prev[k] = mags[k];
+
+            var mean: f32 = 0;
+            for (self.flux_hist) |v| mean += v;
+            mean /= @as(f32, flux_hist_len);
+            var variance: f32 = 0;
+            for (self.flux_hist) |v| variance += (v - mean) * (v - mean);
+            const sigma = @sqrt(variance / @as(f32, flux_hist_len));
+            self.flux_hist[self.flux_pos] = flux;
+            self.flux_pos = (self.flux_pos + 1) % flux_hist_len;
+
+            // Fire on a rising edge that clears BOTH the sigma test and a
+            // relative floor — the floor holds when a loud steady passage
+            // collapses sigma and the mean+k*sigma line hugs the mean.
             self.beat_cooldown -= dt;
-            if (flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0) {
-                self.beat_cooldown = 0.25;
+            const rising = flux > self.flux_last;
+            self.flux_last = flux;
+            if (self.beat_cooldown <= 0 and rising and
+                flux > mean + 2.0 * self.kick_thresh * sigma and
+                flux > mean * 1.5 and
+                flux > 0.015 and self.bands[0] > 0.25)
+            {
+                self.beat_cooldown = 0.18;
                 self.beat = 1.0;
+                self.beat_count += 1;
                 if (self.warmed) self.back_left = self.kick_depth;
             }
             self.beat *= @exp(-5.0 * dt);
             if (self.beat < 0.01) self.beat = 0;
+
+            // Detector telemetry, one line per 20s in the daemon log.
+            self.log_timer += dt;
+            if (self.log_timer >= 20.0) {
+                const bpm = @as(f32, @floatFromInt(self.beat_count)) * 60.0 / self.log_timer;
+                log.info("kick detector: {d} kicks / 20s (~{d:.0} bpm)", .{ self.beat_count, bpm });
+                self.log_timer = 0;
+                self.beat_count = 0;
+            }
 
             // One rule element per spectrum region: each band gates its
             // ring segment; mid density softens the threshold; overall
