@@ -28,6 +28,12 @@ uniform float iTickFrac;
 uniform float iWhorlTime;
 uniform float iWhorlAccent;
 uniform float iWhorlAccent2;
+uniform float iWhorlMisconv;
+uniform float iWhorlHalation;
+uniform float iWhorlVignette;
+uniform float iWhorlScanbar;
+uniform float iWhorlBass;
+uniform float iWhorlTreble;
 
 out vec4 fragColor;
 
@@ -86,26 +92,55 @@ void main() {
     // Flat two-color phosphor: the whole field is the surface background
     // (walls included — windows sit on the same tone), and only the traces
     // light up. Crisp cells, thin shadow-mask seams between blocks.
-    vec3 gunA = phosphor(iWhorlAccent, vec3(0.55, 1.0, 0.65));
-    vec3 gunB = phosphor(iWhorlAccent2, vec3(1.0, 0.75, 0.35));
-    vec2 tr = cellTrace(ci);
+    // Each gun rides its band: bass swells the accent arms, treble the
+    // accent2 arms — smoothed CPU-side so nothing pumps or strobes.
+    vec3 gunA = phosphor(iWhorlAccent, vec3(0.55, 1.0, 0.65)) * (0.85 + iWhorlBass * 0.5);
+    vec3 gunB = phosphor(iWhorlAccent2, vec3(1.0, 0.75, 0.35)) * (0.85 + iWhorlTreble * 0.5);
     vec3 col = bgColor();
     vec2 seam = smoothstep(0.0, 0.10, f) * smoothstep(1.0, 0.90, f);
     float mask = 0.86 + 0.14 * seam.x * seam.y;
-    col += (gunA * tr.x + gunB * tr.y) * 0.85 * mask;
+
+    // Gun misconvergence: the red and blue guns land a couple pixels apart,
+    // fringing arm edges the way a slightly out-of-tune tube does. Color
+    // sampling offset only — geometry (and wall alignment) never moves.
+    vec2 mis = vec2(iWhorlMisconv / iCellPx, 0.0);
+    vec2 trC = cellTrace(ci);
+    vec2 trR = cellTrace(ivec2(floor(g + mis)));
+    vec2 trB = cellTrace(ivec2(floor(g - mis)));
+    vec3 lit = vec3(
+        (gunA * trR.x + gunB * trR.y).r,
+        (gunA * trC.x + gunB * trC.y).g,
+        (gunA * trB.x + gunB * trB.y).b);
+    col += lit * 0.85 * mask;
     col *= mix(1.0, mask, 0.35);
 
-    // Phosphor bloom: the traces leak a round halo over neighboring cells,
-    // additive on top of the crisp base so edges stay sharp underneath.
+    // Phosphor bloom + halation: a tight lobe hugs the trace, a second wide
+    // lobe breathes through the glass. Additive on top of the crisp base so
+    // edges stay sharp underneath.
     vec2 bloom = vec2(0.0);
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
+    vec2 halo = vec2(0.0);
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
             ivec2 p = ci + ivec2(dx, dy);
             vec2 d = g - (vec2(p) + 0.5);
-            bloom += cellTrace(p) * exp(-dot(d, d) * 2.2);
+            vec2 t = cellTrace(p);
+            bloom += t * exp(-dot(d, d) * 2.2);
+            halo += t * exp(-dot(d, d) * 0.45);
         }
     }
     col += (gunA * bloom.x + gunB * bloom.y) * 0.14;
+    col += (gunA * halo.x + gunB * halo.y) * 0.05 * iWhorlHalation;
+
+    // Rolling scan bar: one slow bright band drifting down the tube.
+    if (iWhorlScanbar > 0.0) {
+        float ybar = (1.0 - fract(iWhorlTime / 9.0)) * iResolution.y * 1.3 - iResolution.y * 0.15;
+        float dbar = (fc.y - ybar) / 90.0;
+        col *= 1.0 + iWhorlScanbar * exp(-dbar * dbar);
+    }
+
+    // Curved-glass vignette — corners fall away without bending anything.
+    vec2 q = (fc - 0.5 * iResolution.xy) / iResolution.y;
+    col *= 1.0 - iWhorlVignette * smoothstep(0.35, 0.95, length(q));
 
     // Scanlines and a gentle aperture-grille mask. Deliberately no barrel
     // distortion — walls must stay aligned with real window rects.

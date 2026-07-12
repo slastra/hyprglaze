@@ -2,6 +2,7 @@ const std = @import("std");
 const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
+const audio_mod = @import("visualizer/audio.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -29,6 +30,8 @@ const max_catchup = 3;
 pub const Context = struct {
     allocator: std.mem.Allocator,
     rng: std.Random.DefaultPrng,
+    /// Optional system-audio capture (music = false skips it entirely).
+    audio: ?*audio_mod.AudioCapture,
 
     width: f32,
     height: f32,
@@ -58,6 +61,24 @@ pub const Context = struct {
     /// Consecutive near-still ticks; threshold >= 2 can burn out, so a few
     /// calm ticks in a row trigger a defect blob to reignite the culture.
     calm_ticks: u8 = 0,
+
+    // -- CRT filter dials (all safe: no geometry warp, nothing strobes) --
+    misconv: f32,
+    halation: f32,
+    vignette: f32,
+    scanbar: f32,
+
+    // -- audio analysis (glitch.zig band split) --
+    bands: [6]f32 = [_]f32{0} ** 6,
+    bass: f32 = 0,
+    treble: f32 = 0,
+    bass_smooth: f32 = 0,
+    treble_smooth: f32 = 0,
+    energy_ema: f32 = 0,
+    bass_prev: f32 = 0,
+    flux_avg: f32 = 0,
+    beat_cooldown: f32 = 0,
+    seed_cooldown: f32 = 0,
 
     // -- grid --
     gw: usize,
@@ -92,6 +113,12 @@ pub const Context = struct {
     loc_time: c.GLint = -1,
     loc_accent: c.GLint = -1,
     loc_accent2: c.GLint = -1,
+    loc_misconv: c.GLint = -1,
+    loc_halation: c.GLint = -1,
+    loc_vignette: c.GLint = -1,
+    loc_scanbar: c.GLint = -1,
+    loc_bass: c.GLint = -1,
+    loc_treble: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const cell_px = std.math.clamp(params.getFloat("cell_px", 10.0), 4.0, 64.0);
@@ -127,9 +154,19 @@ pub const Context = struct {
         @memset(old_wall, 0);
 
         const sim_hz = std.math.clamp(params.getFloat("sim_hz", 14.0), 1.0, 60.0);
+
+        var audio: ?*audio_mod.AudioCapture = null;
+        if (params.getBool("music", true)) {
+            const cap = try allocator.create(audio_mod.AudioCapture);
+            cap.* = audio_mod.AudioCapture.init(params.getString("sink", null));
+            cap.start();
+            audio = cap;
+        }
+
         return .{
             .allocator = allocator,
             .rng = rng,
+            .audio = audio,
             .width = width,
             .height = height,
             .cell_px = cell_px,
@@ -144,6 +181,10 @@ pub const Context = struct {
             .wall_inset = std.math.clamp(params.getFloat("wall_inset", 2.0), 0.0, 32.0),
             .accent = @floatFromInt(std.math.clamp(params.getInt("accent", 1), -1, 15)),
             .accent2 = @floatFromInt(std.math.clamp(params.getInt("accent2", 2), -1, 15)),
+            .misconv = std.math.clamp(params.getFloat("misconverge", 1.5), 0.0, 8.0),
+            .halation = std.math.clamp(params.getFloat("halation", 0.6), 0.0, 3.0),
+            .vignette = std.math.clamp(params.getFloat("vignette", 0.22), 0.0, 0.8),
+            .scanbar = std.math.clamp(params.getFloat("scanbar", 0.05), 0.0, 0.5),
             .gw = gw,
             .gh = gh,
             .cells = .{ a, b },
@@ -345,6 +386,46 @@ pub const Context = struct {
         const dt = std.math.clamp(state.dt, 0.0, 0.05);
         self.now += dt;
 
+        // ---- audio analysis (glitch/voltaic band split) ----
+        if (self.audio) |audio| {
+            const wave = audio.getWaveform();
+            const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
+            for (0..6) |bi| {
+                var energy: f32 = 0;
+                const lo = ranges[bi][0];
+                const hi = ranges[bi][1];
+                for (lo..hi) |j| {
+                    energy += @abs(wave[j]) + @abs(wave[128 + j]);
+                }
+                energy /= @as(f32, @floatFromInt((hi - lo) * 2));
+                const raw = energy * 6.0;
+                const attack = @min(1.0, 25.0 * dt);
+                const decay = @min(1.0, 5.0 * dt);
+                self.bands[bi] += (raw - self.bands[bi]) * (if (raw > self.bands[bi]) attack else decay);
+            }
+            self.bass = (self.bands[0] + self.bands[1]) * 0.5;
+            self.treble = (self.bands[4] + self.bands[5]) * 0.5;
+            const energy = (self.bands[0] + self.bands[1] + self.bands[2] +
+                self.bands[3] + self.bands[4] + self.bands[5]) / 6.0;
+            self.energy_ema += (energy - self.energy_ema) * @min(1.0, 2.0 * dt);
+            self.bass_smooth += (self.bass - self.bass_smooth) * @min(1.0, 8.0 * dt);
+            self.treble_smooth += (self.treble - self.treble_smooth) * @min(1.0, 8.0 * dt);
+
+            // Downbeats plant new spiral cores: a song populates the dish.
+            const flux = @max(0.0, self.bass - self.bass_prev);
+            self.bass_prev = self.bass;
+            self.flux_avg += (flux - self.flux_avg) * @min(1.0, 1.5 * dt);
+            self.beat_cooldown -= dt;
+            self.seed_cooldown -= dt;
+            if (flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0) {
+                self.beat_cooldown = 0.25;
+                if (self.seed_cooldown <= 0) {
+                    self.seed_cooldown = 1.2;
+                    self.seedRandomPinwheel();
+                }
+            }
+        }
+
         // First frame with real window geometry: burn through the boring
         // pure-noise phase so launch reveals droplets already organizing,
         // with walls in place from tick zero.
@@ -359,10 +440,16 @@ pub const Context = struct {
             self.dirty = true;
         }
 
+        // Metabolism: music energy speeds the culture up (~0.6x at rest,
+        // ~2x in a loud chorus). tick_frac interpolation keeps the display
+        // smooth across the changing rate.
+        const speed = 0.6 + 2.0 * std.math.clamp(self.energy_ema, 0.0, 0.8);
+        const eff_dt = if (self.audio != null) self.sim_dt / speed else self.sim_dt;
+
         self.acc += dt;
         var steps: u8 = 0;
-        while (self.acc >= self.sim_dt and steps < max_catchup) : (steps += 1) {
-            self.acc -= self.sim_dt;
+        while (self.acc >= eff_dt and steps < max_catchup) : (steps += 1) {
+            self.acc -= eff_dt;
             self.rasterizeWalls(state.windows);
             const flips = self.step();
             // Burnout watch: a healthy culture flips >1% of cells per tick;
@@ -380,8 +467,8 @@ pub const Context = struct {
             self.buildRgba();
             self.dirty = true;
         }
-        if (self.acc >= self.sim_dt) self.acc = 0; // stalled; drop the backlog
-        self.tick_frac = std.math.clamp(self.acc / self.sim_dt, 0.0, 1.0);
+        if (self.acc >= eff_dt) self.acc = 0; // stalled; drop the backlog
+        self.tick_frac = std.math.clamp(self.acc / eff_dt, 0.0, 1.0);
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
@@ -413,6 +500,12 @@ pub const Context = struct {
             self.loc_time = c.glGetUniformLocation(prog.program, "iWhorlTime");
             self.loc_accent = c.glGetUniformLocation(prog.program, "iWhorlAccent");
             self.loc_accent2 = c.glGetUniformLocation(prog.program, "iWhorlAccent2");
+            self.loc_misconv = c.glGetUniformLocation(prog.program, "iWhorlMisconv");
+            self.loc_halation = c.glGetUniformLocation(prog.program, "iWhorlHalation");
+            self.loc_vignette = c.glGetUniformLocation(prog.program, "iWhorlVignette");
+            self.loc_scanbar = c.glGetUniformLocation(prog.program, "iWhorlScanbar");
+            self.loc_bass = c.glGetUniformLocation(prog.program, "iWhorlBass");
+            self.loc_treble = c.glGetUniformLocation(prog.program, "iWhorlTreble");
         }
 
         if (self.loc_grid >= 0) c.glUniform1i(self.loc_grid, 0);
@@ -423,9 +516,19 @@ pub const Context = struct {
         if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
         if (self.loc_accent >= 0) c.glUniform1f(self.loc_accent, self.accent);
         if (self.loc_accent2 >= 0) c.glUniform1f(self.loc_accent2, self.accent2);
+        if (self.loc_misconv >= 0) c.glUniform1f(self.loc_misconv, self.misconv);
+        if (self.loc_halation >= 0) c.glUniform1f(self.loc_halation, self.halation);
+        if (self.loc_vignette >= 0) c.glUniform1f(self.loc_vignette, self.vignette);
+        if (self.loc_scanbar >= 0) c.glUniform1f(self.loc_scanbar, self.scanbar);
+        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass_smooth);
+        if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble_smooth);
     }
 
     pub fn deinit(self: *Context) void {
+        if (self.audio) |audio| {
+            audio.stop();
+            self.allocator.destroy(audio);
+        }
         if (self.tex != 0) c.glDeleteTextures(1, &self.tex);
         self.allocator.free(self.cells[0]);
         self.allocator.free(self.cells[1]);
