@@ -16,41 +16,43 @@ const max_windows = 32;
 // geometry is recomputed from the *current* window rect every frame
 // (perimeter-parameterized, voltaic crawl pattern), so vines ride their
 // window through moves and resizes.
-const max_vines = 8;
+const max_vines = 18;
 const seg_step: f32 = 16.0; // arc length per uploaded stem segment
-const max_segs = 200;
+const max_segs = 360;
 const seg_b_vec4s = max_segs / 4;
-const max_leaves = 80;
-const leaf_spacing: f32 = 40.0;
-const max_blooms = 16;
-const max_petals = 40;
+const max_leaves = 200;
+const leaf_spacing: f32 = 26.0;
+const max_fall = 40;
 
 const vine_die_secs: f32 = 1.2;
-const bloom_life: f32 = 7.0;
 
 const Vine = struct {
     active: bool = false,
     /// Seconds spent dying (window closed); fades out, then frees the slot.
     dying: f32 = 0,
-    /// 0 = screen-bottom garden vine (empty workspace).
+    /// 0 = garden trellis post (empty workspace); 1 = the screen border
+    /// itself; anything else is a window address.
     addr: u64 = 0,
     t0: f32 = 0,
     dir: f32 = 1,
     dl: f32 = 0,
     target: f32 = 300,
     seed: f32 = 0,
+    /// Screen-border vines grow lifted toward the workspace interior
+    /// (the outward perimeter normal would point off-screen).
+    inward: bool = false,
+    /// Branches: index of the trunk vine this tendril forked from (-1 for
+    /// trunks), the trunk arc offset it roots at, and the trunk's seed so a
+    /// recycled slot can't silently become a different parent.
+    parent: i16 = -1,
+    ps: f32 = 0,
+    parent_seed: f32 = 0,
+    /// How many branches this trunk has forked so far.
+    branches: u8 = 0,
 };
 
-const Bloom = struct {
-    active: bool = false,
-    vine: u8 = 0,
-    s: f32 = 0,
-    age: f32 = 0,
-    phase: f32 = 0,
-    color_idx: f32 = 5,
-};
-
-const Petal = struct {
+/// A leaf shaken loose, tumbling down on the breeze.
+const FallingLeaf = struct {
     active: bool = false,
     pos: [2]f32 = .{ 0, 0 },
     vel: [2]f32 = .{ 0, 0 },
@@ -58,8 +60,7 @@ const Petal = struct {
     spin: f32 = 0,
     age: f32 = 0,
     life: f32 = 1,
-    size: f32 = 4,
-    color_idx: f32 = 5,
+    size: f32 = 6,
 };
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
@@ -99,9 +100,8 @@ pub const Context = struct {
     vines: [max_vines]Vine = [_]Vine{.{}} ** max_vines,
     spawn_timer: f32 = 0,
 
-    blooms: [max_blooms]Bloom = [_]Bloom{.{}} ** max_blooms,
-    petals: [max_petals]Petal = [_]Petal{.{}} ** max_petals,
-    next_petal: u8 = 0,
+    fall: [max_fall]FallingLeaf = [_]FallingLeaf{.{}} ** max_fall,
+    next_fall: u8 = 0,
 
     // Frame geometry, rebuilt every update.
     segs: [max_segs][4]f32 = undefined,
@@ -137,8 +137,7 @@ pub const Context = struct {
     loc_segcount: c.GLint = -1,
     loc_leaf: c.GLint = -1,
     loc_leafcount: c.GLint = -1,
-    loc_bloom: c.GLint = -1,
-    loc_petal: c.GLint = -1,
+    loc_fall: c.GLint = -1,
     loc_time: c.GLint = -1,
     loc_bass: c.GLint = -1,
     loc_treble: c.GLint = -1,
@@ -174,40 +173,115 @@ pub const Context = struct {
         return .{ .x = x, .y = -10.0, .w = 3.0, .h = h, .address = 0 };
     }
 
-    /// The rect a vine is rooted on: its window (by address), or a garden
-    /// trellis post for addr == 0. Returns null if the window is gone this
-    /// frame.
+    /// The desktop border as a trellis for addr == 1 vines.
+    fn screenRect(self: *const Context) shader_mod.ShaderProgram.WindowRect {
+        return .{ .x = 2.0, .y = 2.0, .w = self.width - 4.0, .h = self.height - 4.0, .address = 1 };
+    }
+
+    /// The rect a vine is rooted on: its window (by address), a garden
+    /// trellis post (addr 0), or the screen border (addr 1). Returns null
+    /// if the window is gone this frame.
     fn vineRect(self: *const Context, v: *const Vine) ?shader_mod.ShaderProgram.WindowRect {
         if (v.addr == 0) return self.gardenPost(v.seed);
+        if (v.addr == 1) return self.screenRect();
         for (self.win_cache[0..self.win_cache_count]) |w| {
             if (w.address == v.addr) return w;
         }
         return null;
     }
 
-    /// A vine node at arc offset `s`: perimeter point lifted off the frame
+    /// A trunk node at arc offset `s`: perimeter point lifted off the frame
     /// by an organic meander, swaying more toward the free tip.
-    fn vinePoint(self: *const Context, rect: shader_mod.ShaderProgram.WindowRect, v: *const Vine, s: f32) [2]f32 {
+    fn trunkPoint(self: *const Context, rect: shader_mod.ShaderProgram.WindowRect, v: *const Vine, s: f32) [2]f32 {
         const hit = perimeterAt(rect, v.t0 + v.dir * s);
         const sway_amp = (1.5 + self.energy * 7.0) * @min(s / 140.0, 1.0);
         const lift = 4.0 +
             @sin(s * 0.11 + v.seed) * 4.0 +
             @sin(s * 0.045 + v.seed * 1.7) * 7.0 +
             @sin(self.now * 1.2 + s * 0.05 + v.seed) * sway_amp;
-        const l = @max(lift, 1.5);
+        const l = if (v.inward) -@max(lift, 1.5) else @max(lift, 1.5);
         return .{ hit.pos[0] + hit.normal[0] * l, hit.pos[1] + hit.normal[1] * l };
+    }
+
+    /// A vine node at arc offset `s`. Trunks follow their rect's perimeter;
+    /// branches leave the frame from their attachment point on the trunk,
+    /// arcing into free space with a seeded bend and meander. The curve is
+    /// closed-form relative to the attach frame, so branches ride window
+    /// moves exactly like their trunks.
+    fn vinePoint(self: *const Context, rect: shader_mod.ShaderProgram.WindowRect, v: *const Vine, s: f32) [2]f32 {
+        if (v.parent < 0) return self.trunkPoint(rect, v, s);
+
+        const p = &self.vines[@intCast(v.parent)];
+        const attach = self.trunkPoint(rect, p, v.ps);
+        const a = self.trunkPoint(rect, p, @max(v.ps - 5.0, 0.0));
+        const b = self.trunkPoint(rect, p, v.ps + 5.0);
+        var tx = b[0] - a[0];
+        var ty = b[1] - a[1];
+        const tl = @max(@sqrt(tx * tx + ty * ty), 1e-4);
+        tx /= tl;
+        ty /= tl;
+        // Depart the trunk at a seeded angle off its local tangent, biased
+        // away from the frame like a real shoot reaching for light.
+        const side: f32 = if (@mod(v.seed, 2.0) < 1.0) 1.0 else -1.0;
+        const ang = std.math.atan2(ty, tx) + side * (0.55 + @mod(v.seed * 0.61, 1.0) * 0.6);
+        const ux = @cos(ang);
+        const uy = @sin(ang);
+        const px = -uy;
+        const py = ux;
+        const bend = (@mod(v.seed * 0.37, 1.0) - 0.5) * 2.0 * 0.0032;
+        const sway_amp = (1.5 + self.energy * 7.0) * @min(s / 90.0, 1.0);
+        const off = @sin(s * 0.05 + v.seed * 3.0) * 7.0 +
+            @sin(s * 0.013 + v.seed * 1.3) * 16.0 * (s / @max(v.target, 1.0)) +
+            bend * s * s +
+            @sin(self.now * 1.4 + s * 0.06 + v.seed) * sway_amp;
+        return .{ attach[0] + ux * s + px * off, attach[1] + uy * s + py * off };
+    }
+
+    fn spawnBranch(self: *Context, trunk_idx: usize) void {
+        const r = self.rng.random();
+        // Keep slots in reserve so windows and the border can always root.
+        var free: u32 = 0;
+        for (self.vines) |v| {
+            if (!v.active) free += 1;
+        }
+        if (free < 5) return;
+        const trunk = &self.vines[trunk_idx];
+        for (&self.vines) |*v| {
+            if (v.active) continue;
+            v.* = .{
+                .active = true,
+                .addr = trunk.addr,
+                .t0 = 0,
+                .dir = 1,
+                .dl = 0,
+                .target = 60.0 + r.float(f32) * 120.0,
+                .seed = r.float(f32) * 100.0,
+                .inward = false,
+                .parent = @intCast(trunk_idx),
+                // Root somewhere in the grown span, shy of the very tip.
+                .ps = (0.25 + r.float(f32) * 0.6) * trunk.dl,
+                .parent_seed = trunk.seed,
+            };
+            trunk.branches += 1;
+            return;
+        }
     }
 
     fn spawnVine(self: *Context, addr: u64, rect_in: ?shader_mod.ShaderProgram.WindowRect) void {
         const r = self.rng.random();
         const seed = r.float(f32) * 100.0;
-        const rect = rect_in orelse self.gardenPost(seed);
+        const rect = rect_in orelse (if (addr == 1) self.screenRect() else self.gardenPost(seed));
         for (&self.vines) |*v| {
             if (v.active) continue;
             const per = 2.0 * (rect.w + rect.h);
             var t0 = r.float(f32) * per;
             var dir: f32 = if (r.boolean()) 1.0 else -1.0;
             var target = @min(120.0 + r.float(f32) * 260.0, per * 0.55);
+            if (addr == 1) {
+                // Border creepers reach farther than window vines, but stay
+                // capped so they can't starve the shared segment budget.
+                target = @min(280.0 + r.float(f32) * 300.0, per * 0.12);
+            }
             if (addr == 0) {
                 // Root near the base of the post and climb one side upward,
                 // stopping shy of the top so the tendril never crests the
@@ -230,26 +304,26 @@ pub const Context = struct {
                 .dl = 0,
                 .target = target,
                 .seed = seed,
+                .inward = addr == 1,
             };
             return;
         }
     }
 
-    fn spawnPetalBurst(self: *Context, pos: [2]f32, color_idx: f32, n: u32) void {
+    fn shedLeaves(self: *Context, pos: [2]f32, n: u32) void {
         const r = self.rng.random();
         for (0..n) |_| {
-            const slot = self.next_petal;
-            self.next_petal = (self.next_petal + 1) % max_petals;
-            self.petals[slot] = .{
+            const slot = self.next_fall;
+            self.next_fall = (self.next_fall + 1) % max_fall;
+            self.fall[slot] = .{
                 .active = true,
                 .pos = pos,
-                .vel = .{ (r.float(f32) * 2.0 - 1.0) * 45.0, 10.0 + r.float(f32) * 30.0 },
+                .vel = .{ (r.float(f32) * 2.0 - 1.0) * 40.0, 5.0 + r.float(f32) * 20.0 },
                 .angle = r.float(f32) * std.math.tau,
-                .spin = (r.float(f32) * 2.0 - 1.0) * 2.5,
+                .spin = (r.float(f32) * 2.0 - 1.0) * 3.0,
                 .age = 0,
-                .life = 2.2 + r.float(f32) * 1.8,
-                .size = 3.0 + r.float(f32) * 2.5,
-                .color_idx = color_idx,
+                .life = 2.5 + r.float(f32) * 2.0,
+                .size = 5.0 + r.float(f32) * 4.0,
             };
         }
     }
@@ -311,17 +385,30 @@ pub const Context = struct {
         // plants the garden over a second or two, not all at once).
         self.spawn_timer -= dt;
         if (self.spawn_timer <= 0) {
-            self.spawn_timer = 0.6;
-            if (self.win_cache_count == 0) {
-                var garden: u32 = 0;
-                for (self.vines) |v| {
-                    if (v.active and v.addr == 0 and v.dying == 0) garden += 1;
-                }
-                if (garden < 3) self.spawnVine(0, null);
+            self.spawn_timer = 0.45;
+            var frame_n: u32 = 0;
+            var garden_n: u32 = 0;
+            for (self.vines) |v| {
+                if (!v.active or v.dying > 0) continue;
+                if (v.addr == 1) frame_n += 1;
+                if (v.addr == 0) garden_n += 1;
+            }
+            if (frame_n < 3) {
+                // The desktop border always hosts a few long creepers.
+                self.spawnVine(1, null);
+            } else if (self.win_cache_count == 0) {
+                if (garden_n < 3) self.spawnVine(0, null);
             } else outer: for (self.win_cache[0..self.win_cache_count]) |w| {
+                // Bigger frames host more vines.
+                const per = 2.0 * (w.w + w.h);
+                var want: u32 = 1;
+                if (per > 2200.0) want += 1;
+                if (per > 3800.0) want += 1;
+                var have: u32 = 0;
                 for (self.vines) |v| {
-                    if (v.active and v.addr == w.address and v.dying == 0) continue :outer;
+                    if (v.active and v.addr == w.address and v.dying == 0) have += 1;
                 }
+                if (have >= want) continue :outer;
                 self.spawnVine(w.address, w);
                 break;
             }
@@ -331,26 +418,25 @@ pub const Context = struct {
             if (!v.active) continue;
 
             const rect_opt = self.vineRect(v);
-            const orphaned = rect_opt == null or (v.addr == 0 and self.win_cache_count > 0);
+            var orphaned = rect_opt == null or (v.addr == 0 and self.win_cache_count > 0);
+            // Branches die with their trunk. The seed check guards against a
+            // recycled slot silently becoming a different parent.
+            if (v.parent >= 0) {
+                const p = &self.vines[@intCast(v.parent)];
+                if (!p.active or p.dying > 0 or p.seed != v.parent_seed) orphaned = true;
+            }
             if (orphaned and v.dying == 0) {
                 v.dying = 0.0001;
-                // The trellis fell: blossoms on this vine burst into petals.
-                for (&self.blooms) |*b| {
-                    if (!b.active or b.vine != vi) continue;
-                    if (rect_opt) |rect| {
-                        self.spawnPetalBurst(self.vinePoint(rect, v, b.s), b.color_idx, 4);
-                    }
-                    b.active = false;
+                // The trellis fell: this vine's leaves scatter.
+                if (rect_opt != null and v.parent < 0) {
+                    const rect = rect_opt.?;
+                    self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.5), 2);
+                    self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.9), 2);
                 }
             }
             if (v.dying > 0) {
                 v.dying += dt;
-                if (v.dying >= vine_die_secs or rect_opt == null) {
-                    v.active = false;
-                    for (&self.blooms) |*b| {
-                        if (b.active and b.vine == vi) b.active = false;
-                    }
-                }
+                if (v.dying >= vine_die_secs or rect_opt == null) v.active = false;
                 continue;
             }
 
@@ -361,53 +447,42 @@ pub const Context = struct {
             const is_focused = @abs(cx - self.focused_center[0]) < 40.0 and @abs(cy - self.focused_center[1]) < 40.0;
             const tend: f32 = if (is_focused) 1.8 else 1.0;
             // Silence -> a slow creep; music feeds the garden.
-            v.dl = @min(v.dl + dt * self.growth * tend * (12.0 + self.energy * 70.0), v.target);
+            v.dl = @min(v.dl + dt * self.growth * tend * (16.0 + self.energy * 90.0), v.target);
+
+            // Organic forking: once a trunk has grown past each fork
+            // threshold, a branch tendril peels off into free space.
+            if (v.parent < 0 and v.branches < 3) {
+                const next_fork = 90.0 + @as(f32, @floatFromInt(v.branches)) * 110.0 + @mod(v.seed * 0.83, 1.0) * 60.0;
+                if (v.dl > next_fork) self.spawnBranch(vi);
+            }
         }
 
-        // ---- blossoms ----
-        for (&self.blooms) |*b| {
-            if (!b.active) continue;
-            b.age += dt;
-            if (b.age >= bloom_life) {
-                b.active = false;
-                continue;
-            }
-            // An aging blossom sheds a petal now and then.
-            if (b.age > 2.0 and r.float(f32) < dt * 0.5) {
-                const v = &self.vines[b.vine];
-                if (self.vineRect(v)) |rect| {
-                    self.spawnPetalBurst(self.vinePoint(rect, v, b.s), b.color_idx, 1);
+        // ---- beats: growth spurts, and a leaf shaken loose ----
+        if (beat_hit) {
+            const punch = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
+            for (0..2) |_| {
+                const vi = r.intRangeLessThan(usize, 0, max_vines);
+                const v = &self.vines[vi];
+                if (v.active and v.dying == 0) {
+                    v.dl = @min(v.dl + 3.0 + punch * 4.0, v.target);
                 }
             }
-        }
-        if (beat_hit) {
-            const bloom_colors = [_]f32{ 1, 3, 5, 9, 11, 13 };
-            var spawned: u32 = 0;
-            for (&self.blooms) |*b| {
-                if (b.active or spawned >= 2) continue;
-                // Pick a random grown vine to flower on.
+            if (r.float(f32) < 0.45 * punch) {
                 var tries: u8 = 0;
                 while (tries < 8) : (tries += 1) {
                     const vi = r.intRangeLessThan(usize, 0, max_vines);
                     const v = &self.vines[vi];
-                    if (!v.active or v.dying > 0 or v.dl < 80.0) continue;
-                    b.* = .{
-                        .active = true,
-                        .vine = @intCast(vi),
-                        .s = (0.35 + r.float(f32) * 0.6) * v.dl,
-                        .age = 0,
-                        .phase = r.float(f32) * std.math.tau,
-                        .color_idx = bloom_colors[r.intRangeLessThan(usize, 0, bloom_colors.len)],
-                    };
-                    spawned += 1;
+                    if (!v.active or v.dying > 0 or v.dl < 60.0) continue;
+                    if (self.vineRect(v)) |rect| {
+                        self.shedLeaves(self.vinePoint(rect, v, (0.3 + r.float(f32) * 0.6) * v.dl), 1);
+                    }
                     break;
                 }
-                if (tries >= 8) break;
             }
         }
 
-        // ---- petals ----
-        for (&self.petals) |*p| {
+        // ---- falling leaves ----
+        for (&self.fall) |*p| {
             if (!p.active) continue;
             p.age += dt;
             if (p.age >= p.life or p.pos[1] < -30.0) {
@@ -417,8 +492,8 @@ pub const Context = struct {
             const damp = @exp(-0.8 * dt);
             p.vel[0] *= damp;
             p.vel[1] *= damp;
-            p.vel[1] -= 55.0 * dt; // y-up: petals fall
-            p.vel[0] += @sin(self.now * 0.9 + p.pos[1] * 0.012) * 40.0 * dt; // breeze
+            p.vel[1] -= 50.0 * dt; // y-up: leaves fall
+            p.vel[0] += @sin(self.now * 0.9 + p.pos[1] * 0.012) * 45.0 * dt; // breeze
             p.pos[0] += p.vel[0] * dt;
             p.pos[1] += p.vel[1] * dt;
             p.angle += p.spin * dt;
@@ -459,8 +534,11 @@ pub const Context = struct {
                 const flutter = @sin(self.now * 1.6 + ls * 0.3 + v.seed) * (0.08 + self.treble * 0.25);
                 const angle = tang + side * (0.95 + @sin(v.seed + ls) * 0.2) + flutter;
                 const grow_in = smoothstep(0.0, 35.0, v.dl - ls);
+                // Real ivy: young leaves near the growing tip stay small,
+                // older nodes carry big mature leaves.
+                const mature = 0.5 + 0.5 * smoothstep(0.0, 140.0, v.dl - ls);
                 const band = self.bands[@as(usize, @intFromFloat(ls)) % 6];
-                const size = (6.5 + @sin(v.seed * 3.0 + ls * 0.7) * 2.0) * grow_in * (1.0 + band * 0.2) * fade;
+                const size = (8.5 + @sin(v.seed * 3.0 + ls * 0.7) * 3.0) * mature * grow_in * (1.0 + band * 0.15) * fade;
                 if (size > 0.5) {
                     self.leaves[self.leaf_count] = .{ p0[0], p0[1], angle, size };
                     self.leaf_count += 1;
@@ -480,8 +558,7 @@ pub const Context = struct {
             self.loc_segcount = c.glGetUniformLocation(prog.program, "iSegCount");
             self.loc_leaf = c.glGetUniformLocation(prog.program, "iLeaf[0]");
             self.loc_leafcount = c.glGetUniformLocation(prog.program, "iLeafCount");
-            self.loc_bloom = c.glGetUniformLocation(prog.program, "iBloom[0]");
-            self.loc_petal = c.glGetUniformLocation(prog.program, "iPetal[0]");
+            self.loc_fall = c.glGetUniformLocation(prog.program, "iFall[0]");
             self.loc_time = c.glGetUniformLocation(prog.program, "iIvyTime");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iBass");
             self.loc_treble = c.glGetUniformLocation(prog.program, "iTreble");
@@ -506,34 +583,16 @@ pub const Context = struct {
         }
         if (self.loc_leafcount >= 0) c.glUniform1i(self.loc_leafcount, @intCast(self.leaf_count));
 
-        if (self.loc_bloom >= 0) {
-            // (x, y, size, color_idx + phase/10): phase in [0, tau) packs
-            // into the fraction; the shader unpacks with floor/fract.
-            var bv: [max_blooms][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** max_blooms;
-            for (self.blooms, 0..) |b, i| {
-                if (!b.active) continue;
-                const v = &self.vines[b.vine];
-                const rect = self.vineRect(v) orelse continue;
-                const fade = 1.0 - v.dying / vine_die_secs;
-                const pos = self.vinePoint(rect, v, b.s);
-                // Elastic open, hold, wilt.
-                const open = smoothstep(0.0, 0.45, b.age) * (1.0 + 0.3 * @exp(-3.0 * b.age) * @sin(11.0 * b.age));
-                const wilt = 1.0 - smoothstep(bloom_life - 1.2, bloom_life, b.age);
-                const size = (9.0 + self.bass * 3.5) * open * wilt * @max(fade, 0.0);
-                bv[i] = .{ pos[0], pos[1], size, b.color_idx + b.phase / 10.0 };
-            }
-            c.glUniform4fv(self.loc_bloom, max_blooms, @ptrCast(&bv[0]));
-        }
-
-        if (self.loc_petal >= 0) {
-            // (x, y, angle + color_idx*10, size): angle < tau < 10.
-            var pv: [max_petals][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** max_petals;
-            for (self.petals, 0..) |p, i| {
+        if (self.loc_fall >= 0) {
+            // (x, y, angle, size) — size folds in a sine envelope so leaves
+            // flutter in and fade out.
+            var pv: [max_fall][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** max_fall;
+            for (self.fall, 0..) |p, i| {
                 if (!p.active) continue;
                 const env = @sin(std.math.pi * p.age / p.life);
-                pv[i] = .{ p.pos[0], p.pos[1], @mod(p.angle, std.math.tau) + p.color_idx * 10.0, p.size * env };
+                pv[i] = .{ p.pos[0], p.pos[1], @mod(p.angle, std.math.tau), p.size * env };
             }
-            c.glUniform4fv(self.loc_petal, max_petals, @ptrCast(&pv[0]));
+            c.glUniform4fv(self.loc_fall, max_fall, @ptrCast(&pv[0]));
         }
 
         // Effect-local time (fire.zig pattern) — keeps shader noise
