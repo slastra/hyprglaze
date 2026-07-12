@@ -52,6 +52,8 @@ pub const Context = struct {
     rot_vel: f32 = 0,
     spin_sign: f32 = 1,
     flare: f32 = 0,
+    /// Smoothed cursor-proximity envelope — the star brightens when noticed.
+    curiosity: f32 = 0,
 
     /// Per-arm length envelopes, smoothed so the equalizer sways rather
     /// than jitters. Opposing arms share a band (the star stays symmetric).
@@ -111,7 +113,7 @@ pub const Context = struct {
     /// Body radius this frame: breath, music, and beat flare folded in.
     fn radius(self: *const Context) f32 {
         return 44.0 * self.scale *
-            (1.0 + 0.05 * @sin(self.now * 0.9) + self.energy * 0.10 + self.flare * 0.35);
+            (1.0 + 0.05 * @sin(self.now * 0.9) + self.energy * 0.10 + self.flare * 0.35 + self.curiosity * 0.07);
     }
 
     fn shedSpark(self: *Context) void {
@@ -226,9 +228,24 @@ pub const Context = struct {
         if (beat_hit) {
             const punch = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
             self.flare = @max(self.flare, 0.20 + punch * 0.28);
-            self.spin_sign = -self.spin_sign;
-            self.rot_vel += self.spin_sign * (0.7 + punch * 0.9);
+            // Reverse spin only occasionally — momentum builds across a few
+            // beats instead of twitching direction on every hit.
+            if (r.float(f32) < 0.25) self.spin_sign = -self.spin_sign;
+            self.rot_vel += self.spin_sign * (0.55 + punch * 0.7);
         }
+
+        // ---- curiosity: notice the cursor when it comes close ----
+        // The star leans toward a nearby pointer and brightens a touch —
+        // attention isn't only windows; it's you.
+        const cdx = state.cursor[0] - self.pos[0];
+        const cdy = state.cursor[1] - self.pos[1];
+        const cdist = @sqrt(cdx * cdx + cdy * cdy);
+        const notice = smoothstep(420.0, 120.0, cdist);
+        if (notice > 0.001 and cdist > 1.0) {
+            self.vel[0] += cdx / cdist * notice * 60.0 * dt;
+            self.vel[1] += cdy / cdist * notice * 60.0 * dt;
+        }
+        self.curiosity += (notice - self.curiosity) * @min(1.0, 4.0 * dt);
 
         // ---- thoughts ----
         for (&self.sparks) |*s| {
@@ -313,7 +330,8 @@ pub const Context = struct {
         if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble);
         if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.energy);
         if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
-        if (self.loc_bright >= 0) c.glUniform1f(self.loc_bright, self.brightness);
+        // Curiosity brightens the whole body a touch when the cursor is near.
+        if (self.loc_bright >= 0) c.glUniform1f(self.loc_bright, self.brightness * (1.0 + self.curiosity * 0.25));
     }
 
     pub fn deinit(self: *Context) void {
