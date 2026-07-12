@@ -23,10 +23,6 @@ const c = @cImport({
 // through the pattern (freed cells reseed as noise and get reabsorbed).
 // The cursor injects a slowly-cycling state, stirring new defects into being.
 
-/// Freshness lost per tick for cells that didn't flip (~13 ticks to fade).
-/// Keep in sync with the 0.078 (= 20/255) decay constant in whorl.frag.
-const fresh_decay = 20;
-
 /// Cap on catch-up sim steps after a frame stall.
 const max_catchup = 3;
 
@@ -42,11 +38,26 @@ pub const Context = struct {
     cell_px: f32,
     n_states: u8,
     threshold: u8,
+    /// Neighborhood radius. Range 2 (24 neighbors) with threshold ~3 is the
+    /// sustained-spiral regime: settled cells stay frozen (invisible), fronts
+    /// sweep through once per ring period, spiral cores never die. Range 1
+    /// with threshold 1 is full turbulence; threshold 2+ at range 1 burns out.
+    range: i64,
+    /// Freshness lost per tick (255 / trail ticks).
+    fresh_decay: u8,
     sim_dt: f32,
     warmup: u32,
     stir: bool,
     stir_radius: f32,
     wall_inset: f32,
+    /// Palette slots for the two phosphor colors; -1 = theme foreground.
+    /// Fronts carrying states from the lower half of the ring glow in
+    /// `accent`, upper half in `accent2` — successive waves trade colors.
+    accent: f32,
+    accent2: f32,
+    /// Consecutive near-still ticks; threshold >= 2 can burn out, so a few
+    /// calm ticks in a row trigger a defect blob to reignite the culture.
+    calm_ticks: u8 = 0,
 
     // -- grid --
     gw: usize,
@@ -55,6 +66,7 @@ pub const Context = struct {
     cells: [2][]u8,
     cur: u1 = 0,
     fresh: []u8,
+    fresh_prev: []u8,
     wall: []u8,
     old_wall: []u8,
     rgba: []u8,
@@ -78,6 +90,8 @@ pub const Context = struct {
     loc_states: c.GLint = -1,
     loc_tick_frac: c.GLint = -1,
     loc_time: c.GLint = -1,
+    loc_accent: c.GLint = -1,
+    loc_accent2: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const cell_px = std.math.clamp(params.getFloat("cell_px", 10.0), 4.0, 64.0);
@@ -91,6 +105,8 @@ pub const Context = struct {
         errdefer allocator.free(b);
         const fresh = try allocator.alloc(u8, n);
         errdefer allocator.free(fresh);
+        const fresh_prev = try allocator.alloc(u8, n);
+        errdefer allocator.free(fresh_prev);
         const wall = try allocator.alloc(u8, n);
         errdefer allocator.free(wall);
         const old_wall = try allocator.alloc(u8, n);
@@ -98,7 +114,7 @@ pub const Context = struct {
         const rgba = try allocator.alloc(u8, n * 4);
         errdefer allocator.free(rgba);
 
-        const n_states: u8 = @intCast(std.math.clamp(params.getInt("states", 14), 3, 32));
+        const n_states: u8 = @intCast(std.math.clamp(params.getInt("states", 16), 3, 32));
         var rng = std.Random.DefaultPrng.init(0xC0FFEE5EED);
         const r = rng.random();
         for (a, b) |*ca, *cb| {
@@ -106,6 +122,7 @@ pub const Context = struct {
             cb.* = ca.*;
         }
         @memset(fresh, 0);
+        @memset(fresh_prev, 0);
         @memset(wall, 0);
         @memset(old_wall, 0);
 
@@ -117,16 +134,21 @@ pub const Context = struct {
             .height = height,
             .cell_px = cell_px,
             .n_states = n_states,
-            .threshold = @intCast(std.math.clamp(params.getInt("threshold", 1), 1, 4)),
+            .threshold = @intCast(std.math.clamp(params.getInt("threshold", 3), 1, 12)),
+            .range = std.math.clamp(params.getInt("range", 2), 1, 3),
+            .fresh_decay = @intFromFloat(255.0 / std.math.clamp(params.getFloat("trail", 2.5), 1.0, 20.0)),
             .sim_dt = 1.0 / sim_hz,
             .warmup = @intCast(std.math.clamp(params.getInt("warmup", 140), 0, 2000)),
-            .stir = params.getBool("stir", true),
+            .stir = params.getBool("stir", false),
             .stir_radius = std.math.clamp(params.getFloat("stir_radius", 2.2), 0.5, 8.0),
             .wall_inset = std.math.clamp(params.getFloat("wall_inset", 2.0), 0.0, 32.0),
+            .accent = @floatFromInt(std.math.clamp(params.getInt("accent", 1), -1, 15)),
+            .accent2 = @floatFromInt(std.math.clamp(params.getInt("accent2", 2), -1, 15)),
             .gw = gw,
             .gh = gh,
             .cells = .{ a, b },
             .fresh = fresh,
+            .fresh_prev = fresh_prev,
             .wall = wall,
             .old_wall = old_wall,
             .rgba = rgba,
@@ -179,12 +201,15 @@ pub const Context = struct {
 
     /// One CA tick: each non-wall cell flips to its successor state when at
     /// least `threshold` Moore neighbors already carry it. Screen edges and
-    /// walls contribute nothing (the screen is a closed dish).
-    fn step(self: *Context) void {
+    /// walls contribute nothing (the screen is a closed dish). Returns the
+    /// number of cells that flipped, so the caller can spot a burnout.
+    fn step(self: *Context) u32 {
+        @memcpy(self.fresh_prev, self.fresh);
         const curr = self.cells[self.cur];
         const next = self.cells[self.cur ^ 1];
         const gw = self.gw;
         const gh = self.gh;
+        var flips: u32 = 0;
 
         for (0..gh) |y| {
             const row = y * gw;
@@ -199,10 +224,11 @@ pub const Context = struct {
                 const t = if (s + 1 == self.n_states) 0 else s + 1;
 
                 var cnt: u8 = 0;
-                const y0 = if (y > 0) y - 1 else y;
-                const y1 = if (y + 1 < gh) y + 1 else y;
-                const x0 = if (x > 0) x - 1 else x;
-                const x1 = if (x + 1 < gw) x + 1 else x;
+                const rr: usize = @intCast(self.range);
+                const y0 = y -| rr;
+                const y1 = @min(y + rr, gh - 1);
+                const x0 = x -| rr;
+                const x1 = @min(x + rr, gw - 1);
                 outer: for (y0..y1 + 1) |ny| {
                     const nrow = ny * gw;
                     for (x0..x1 + 1) |nx| {
@@ -218,14 +244,50 @@ pub const Context = struct {
                 if (cnt >= self.threshold) {
                     next[i] = t;
                     self.fresh[i] = 255;
+                    flips += 1;
                 } else {
                     next[i] = s;
-                    self.fresh[i] -|= fresh_decay;
+                    self.fresh[i] -|= self.fresh_decay;
                 }
             }
         }
         self.cur ^= 1;
         self.tick_count += 1;
+        return flips;
+    }
+
+    /// Plant a spiral core: angular sectors of sequential states around a
+    /// point. Each sector is eaten by the next, so the pinwheel is
+    /// guaranteed to rotate and shed waves at any workable threshold —
+    /// unlike a random blob, which can fizzle before organizing.
+    fn seedPinwheel(self: *Context, cx: usize, cy: usize) void {
+        const curr = self.cells[self.cur];
+        const rad: usize = @max(self.gh / 12, 8);
+        const x0 = cx -| rad;
+        const y0 = cy -| rad;
+        const x1 = @min(cx + rad, self.gw - 1);
+        const y1 = @min(cy + rad, self.gh - 1);
+        const n_f: f32 = @floatFromInt(self.n_states);
+        for (y0..y1 + 1) |y| {
+            for (x0..x1 + 1) |x| {
+                const dx = @as(f32, @floatFromInt(x)) - @as(f32, @floatFromInt(cx));
+                const dy = @as(f32, @floatFromInt(y)) - @as(f32, @floatFromInt(cy));
+                if (dx * dx + dy * dy > @as(f32, @floatFromInt(rad * rad))) continue;
+                const i = y * self.gw + x;
+                if (self.wall[i] == 1) continue;
+                const ang = (std.math.atan2(dy, dx) + std.math.pi) / (2.0 * std.math.pi);
+                const s: u8 = @intFromFloat(@min(ang * n_f, n_f - 1.0));
+                curr[i] = s;
+            }
+        }
+    }
+
+    fn seedRandomPinwheel(self: *Context) void {
+        const r = self.rng.random();
+        self.seedPinwheel(
+            r.intRangeLessThan(usize, 0, self.gw),
+            r.intRangeLessThan(usize, 0, self.gh),
+        );
     }
 
     /// Paint a disc of the (slowly cycling) stir state under the cursor.
@@ -257,16 +319,25 @@ pub const Context = struct {
         }
     }
 
-    /// Pack the grid into the upload buffer. G carries the pre-tick state so
-    /// the shader can crossfade between ticks instead of snapping.
+    /// Pack the grid into the upload buffer. Both state AND freshness ship
+    /// as (previous, current) pairs so every displayed quantity is a single
+    /// continuous lerp over the tick — any per-tick snap reads as strobe.
+    /// Walls are the reserved state 255 in R, freeing A for prev freshness.
     fn buildRgba(self: *Context) void {
         const curr = self.cells[self.cur];
         const prev = self.cells[self.cur ^ 1];
         for (0..curr.len) |i| {
-            self.rgba[i * 4 + 0] = curr[i];
-            self.rgba[i * 4 + 1] = prev[i];
-            self.rgba[i * 4 + 2] = self.fresh[i];
-            self.rgba[i * 4 + 3] = if (self.wall[i] == 1) 255 else 0;
+            if (self.wall[i] == 1) {
+                self.rgba[i * 4 + 0] = 255;
+                self.rgba[i * 4 + 1] = 255;
+                self.rgba[i * 4 + 2] = 0;
+                self.rgba[i * 4 + 3] = 0;
+            } else {
+                self.rgba[i * 4 + 0] = curr[i];
+                self.rgba[i * 4 + 1] = prev[i];
+                self.rgba[i * 4 + 2] = self.fresh[i];
+                self.rgba[i * 4 + 3] = self.fresh_prev[i];
+            }
         }
     }
 
@@ -280,7 +351,10 @@ pub const Context = struct {
         if (!self.warmed) {
             self.warmed = true;
             self.rasterizeWalls(state.windows);
-            for (0..self.warmup) |_| self.step();
+            // A few planted spiral cores guarantee waves from the first
+            // frame; the noise between them adds natural irregularity.
+            for (0..3) |_| self.seedRandomPinwheel();
+            for (0..self.warmup) |_| _ = self.step();
             self.buildRgba();
             self.dirty = true;
         }
@@ -290,7 +364,18 @@ pub const Context = struct {
         while (self.acc >= self.sim_dt and steps < max_catchup) : (steps += 1) {
             self.acc -= self.sim_dt;
             self.rasterizeWalls(state.windows);
-            self.step();
+            const flips = self.step();
+            // Burnout watch: a healthy culture flips >1% of cells per tick;
+            // a few near-still ticks in a row means the waves died out.
+            if (flips * 400 < self.gw * self.gh) {
+                self.calm_ticks +|= 1;
+            } else {
+                self.calm_ticks = 0;
+            }
+            if (self.calm_ticks >= 3) {
+                self.calm_ticks = 0;
+                self.seedRandomPinwheel();
+            }
             if (self.stir) self.stirAt(state.cursor);
             self.buildRgba();
             self.dirty = true;
@@ -326,6 +411,8 @@ pub const Context = struct {
             self.loc_states = c.glGetUniformLocation(prog.program, "iStates");
             self.loc_tick_frac = c.glGetUniformLocation(prog.program, "iTickFrac");
             self.loc_time = c.glGetUniformLocation(prog.program, "iWhorlTime");
+            self.loc_accent = c.glGetUniformLocation(prog.program, "iWhorlAccent");
+            self.loc_accent2 = c.glGetUniformLocation(prog.program, "iWhorlAccent2");
         }
 
         if (self.loc_grid >= 0) c.glUniform1i(self.loc_grid, 0);
@@ -334,6 +421,8 @@ pub const Context = struct {
         if (self.loc_states >= 0) c.glUniform1f(self.loc_states, @floatFromInt(self.n_states));
         if (self.loc_tick_frac >= 0) c.glUniform1f(self.loc_tick_frac, self.tick_frac);
         if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
+        if (self.loc_accent >= 0) c.glUniform1f(self.loc_accent, self.accent);
+        if (self.loc_accent2 >= 0) c.glUniform1f(self.loc_accent2, self.accent2);
     }
 
     pub fn deinit(self: *Context) void {
@@ -341,6 +430,7 @@ pub const Context = struct {
         self.allocator.free(self.cells[0]);
         self.allocator.free(self.cells[1]);
         self.allocator.free(self.fresh);
+        self.allocator.free(self.fresh_prev);
         self.allocator.free(self.wall);
         self.allocator.free(self.old_wall);
         self.allocator.free(self.rgba);

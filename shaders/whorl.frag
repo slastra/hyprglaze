@@ -26,6 +26,8 @@ uniform float iCellPx;
 uniform float iStates;
 uniform float iTickFrac;
 uniform float iWhorlTime;
+uniform float iWhorlAccent;
+uniform float iWhorlAccent2;
 
 out vec4 fragColor;
 
@@ -37,57 +39,42 @@ float hash21(vec2 p) {
     return fract(p.x * p.y);
 }
 
-// Hue around the state ring. Terminal palettes aren't stored in hue order,
-// but the ANSI slots are known — red(1) yellow(3) green(2) cyan(6) blue(4)
-// magenta(5) walks a hue circle in the theme's own tones. Fallback is an
-// iridescent wheel.
-vec3 ringColor(float t) {
-    if (iPaletteSize >= 8) {
-        int ring[6] = int[6](1, 3, 2, 6, 4, 5);
-        float f = t * 6.0;
-        int i0 = int(f) % 6;
-        int i1 = (i0 + 1) % 6;
-        return mix(iPalette[ring[i0]], iPalette[ring[i1]], fract(f));
-    }
-    return 0.5 + 0.5 * cos(TAU * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 vec3 bgColor() {
     return iPaletteSize > 0 ? iPaletteBg : vec3(0.05, 0.05, 0.08);
 }
 
-// A wave train carries consecutive states, so a sawtooth luminance ramp
-// around the ring gives every wave a dark tail and a bright head — that
-// gradient is what makes spiral arms read as rotating. The body of the
-// effect stays in the surface background color (embossed relief); only a
-// whisper of the theme's hue ring keeps the arms traceable.
-vec3 stateColor(float s) {
-    float t = fract((s + 0.5) / iStates);
-    float ramp = pow(t, 2.2);
-    vec3 col = bgColor() * (0.66 + 1.40 * ramp);
-    return mix(col, ringColor(t) * (0.30 + 0.65 * ramp), 0.14);
+// The two phosphor colors. Each picks a palette slot; anything out of
+// range falls back to the theme foreground, and with no palette at all
+// this is a green/amber two-gun tube.
+vec3 phosphor(float slot, vec3 fallback) {
+    if (iPaletteSize > 0) {
+        int idx = int(slot);
+        if (idx >= 0 && idx < iPaletteSize) return iPalette[idx];
+        return iPaletteFg;
+    }
+    return fallback;
 }
 
-// One cell resolved to a display color. rgb = lit color, a = wallness.
-// Motion smoothness comes from here, not from spatial blur: each cell
-// crossfades linearly from its pre-tick color (G) to its current one (R),
-// and the wavefront glow decays continuously between ticks.
-vec4 cellColor(ivec2 p) {
+// Phosphor persistence for one cell, split by color gun. In a developed
+// wave train every cell flips every tick, so lighting every flip floods
+// the field solid. Instead only two marker crossings per ring cycle glow:
+// entering state 0 fires gun x (accent), entering the opposite state
+// fires gun y (accent2) — each spiral renders as two thin interleaved
+// arms over a mostly-background field. The state itself ages the trace
+// (0 = at the crossing, 1 = one tick past), stacking with persistence
+// so packet edges and frozen zones stay dark. Persistence lerps from its
+// pre-tick value (A) to its current one (B) so nothing snaps at ticks.
+vec2 cellTrace(ivec2 p) {
     p = clamp(p, ivec2(0), ivec2(iGridDim) - 1);
     vec4 d = texelFetch(iGrid, p, 0);
-    if (d.a > 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
-
+    if (d.r > 0.999) return vec2(0.0);
+    float fresh = mix(d.a, d.b, iTickFrac);
+    float glow = pow(fresh, 1.7);
     float sc = floor(d.r * 255.0 + 0.5);
-    float sp = floor(d.g * 255.0 + 0.5);
-    vec3 col = mix(stateColor(sp), stateColor(sc), iTickFrac);
-
-    // Anti-flicker: glow eases IN across the tick on a flip (never pops),
-    // and between flips it decays at exactly the CPU rate (20/255 per tick,
-    // keep in sync with fresh_decay in whorl.zig) so there is no luminance
-    // discontinuity at tick boundaries.
-    float fresh = (sc != sp) ? d.b * iTickFrac
-                             : max(d.b - 0.078 * iTickFrac, 0.0);
-    return vec4(col * (1.0 + 0.5 * fresh * fresh), 0.0);
+    float opp = floor(iStates * 0.5);
+    if (sc < 2.0) return vec2(glow * (1.0 - sc * 0.5), 0.0);
+    if (sc >= opp && sc < opp + 2.0) return vec2(0.0, glow * (1.0 - (sc - opp) * 0.5));
+    return vec2(0.0);
 }
 
 void main() {
@@ -96,25 +83,29 @@ void main() {
     ivec2 ci = ivec2(floor(g));
     vec2 f = fract(g);
 
-    // Crisp cells — one phosphor block each, no spatial blending. Thin
-    // seams between blocks read as the CRT's shadow-mask structure.
-    vec4 s = cellColor(ci);
-    vec3 col = mix(s.rgb, bgColor(), s.a);
+    // Flat two-color phosphor: the whole field is the surface background
+    // (walls included — windows sit on the same tone), and only the traces
+    // light up. Crisp cells, thin shadow-mask seams between blocks.
+    vec3 gunA = phosphor(iWhorlAccent, vec3(0.55, 1.0, 0.65));
+    vec3 gunB = phosphor(iWhorlAccent2, vec3(1.0, 0.75, 0.35));
+    vec2 tr = cellTrace(ci);
+    vec3 col = bgColor();
     vec2 seam = smoothstep(0.0, 0.10, f) * smoothstep(1.0, 0.90, f);
-    col *= 0.74 + 0.26 * seam.x * seam.y;
+    float mask = 0.86 + 0.14 * seam.x * seam.y;
+    col += (gunA * tr.x + gunB * tr.y) * 0.85 * mask;
+    col *= mix(1.0, mask, 0.35);
 
-    // Phosphor bloom: bright cells leak a round halo over their neighbors,
+    // Phosphor bloom: the traces leak a round halo over neighboring cells,
     // additive on top of the crisp base so edges stay sharp underneath.
-    vec3 bloom = vec3(0.0);
+    vec2 bloom = vec2(0.0);
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             ivec2 p = ci + ivec2(dx, dy);
-            vec4 nb = cellColor(p);
             vec2 d = g - (vec2(p) + 0.5);
-            bloom += nb.rgb * (1.0 - nb.a) * exp(-dot(d, d) * 2.2);
+            bloom += cellTrace(p) * exp(-dot(d, d) * 2.2);
         }
     }
-    col += bloom * 0.16;
+    col += (gunA * bloom.x + gunB * bloom.y) * 0.14;
 
     // Scanlines and a gentle aperture-grille mask. Deliberately no barrel
     // distortion — walls must stay aligned with real window rects.
