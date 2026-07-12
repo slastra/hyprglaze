@@ -368,7 +368,7 @@ pub const Context = struct {
         const wcount = @min(state.windows.len, max_windows);
         const focused = state.focused_win;
 
-        for (self.threads[0..self.thread_count]) |*t| {
+        for (self.threads[0..self.thread_count], 0..) |*t, ti| {
             const flow = self.curl(.{ t.pos[0] + t.phase * 13.0, t.pos[1] - t.phase * 7.0 });
             var desired = [2]f32{ flow[0] * base_speed, flow[1] * base_speed };
 
@@ -410,15 +410,58 @@ pub const Context = struct {
                 }
             }
 
-            // Soft screen bounds — no wrap: wrapping a head would rubber-band
-            // a trail segment across the whole screen. Wide margin and a
-            // strong gain so threads arc back well before the edge instead
-            // of finding an equilibrium pinned against it.
+            // Screen edges are page margins too — no wrap (wrapping a head
+            // would rubber-band a trail segment across the whole screen).
+            // Like the window hug, steer along the border rather than
+            // springing against it: a hard spring here just oscillates into
+            // tight coils pinned at the edge.
             const bm: f32 = 140.0;
-            if (t.pos[0] < bm) desired[0] += (bm - t.pos[0]) * 5.0;
-            if (t.pos[0] > self.width - bm) desired[0] -= (t.pos[0] - (self.width - bm)) * 5.0;
-            if (t.pos[1] < bm) desired[1] += (bm - t.pos[1]) * 5.0;
-            if (t.pos[1] > self.height - bm) desired[1] -= (t.pos[1] - (self.height - bm)) * 5.0;
+            var edge_n = [2]f32{ 0, 0 }; // inward normal of the nearest edge
+            var edge_depth: f32 = 0; // 0 at margin start → 1 at the edge
+            if (t.pos[0] < bm and 1.0 - t.pos[0] / bm > edge_depth) {
+                edge_depth = 1.0 - t.pos[0] / bm;
+                edge_n = .{ 1, 0 };
+            }
+            if (self.width - t.pos[0] < bm and 1.0 - (self.width - t.pos[0]) / bm > edge_depth) {
+                edge_depth = 1.0 - (self.width - t.pos[0]) / bm;
+                edge_n = .{ -1, 0 };
+            }
+            if (t.pos[1] < bm and 1.0 - t.pos[1] / bm > edge_depth) {
+                edge_depth = 1.0 - t.pos[1] / bm;
+                edge_n = .{ 0, 1 };
+            }
+            if (self.height - t.pos[1] < bm and 1.0 - (self.height - t.pos[1]) / bm > edge_depth) {
+                edge_depth = 1.0 - (self.height - t.pos[1]) / bm;
+                edge_n = .{ 0, -1 };
+            }
+            if (edge_depth > 0) {
+                const tang = [2]f32{ -edge_n[1], edge_n[0] };
+                const sgn: f32 = if (t.vel[0] * tang[0] + t.vel[1] * tang[1] >= 0) 1.0 else -1.0;
+                const dmag = @sqrt(desired[0] * desired[0] + desired[1] * desired[1]);
+                const w = edge_depth * 0.85;
+                desired[0] = desired[0] * (1.0 - w) + tang[0] * sgn * dmag * w;
+                desired[1] = desired[1] * (1.0 - w) + tang[1] * sgn * dmag * w;
+                // Gentle inward drift so the glide peels back off the margin.
+                desired[0] += edge_n[0] * edge_depth * edge_depth * 130.0;
+                desired[1] += edge_n[1] * edge_depth * edge_depth * 130.0;
+            }
+
+            // Coil escape: when opposing forces trap a head, it wiggles in
+            // place and inks a knot. If net travel over the last ~2.5 s has
+            // stalled, kick it along its heading to break the balance.
+            const back_idx = (self.history_idx -% 150) % history_len;
+            const old_pos = self.history[ti][back_idx];
+            const net_dx = t.pos[0] - old_pos[0];
+            const net_dy = t.pos[1] - old_pos[1];
+            const net = @sqrt(net_dx * net_dx + net_dy * net_dy);
+            if (net < 60.0) {
+                const sp = @sqrt(t.vel[0] * t.vel[0] + t.vel[1] * t.vel[1]);
+                if (sp > 1e-3) {
+                    const kick = (1.0 - net / 60.0) * 220.0;
+                    desired[0] += t.vel[0] / sp * kick;
+                    desired[1] += t.vel[1] / sp * kick;
+                }
+            }
 
             // Velocity relaxation: eases toward the desired heading so the
             // path reads as graceful ink, not a twitchy particle.
