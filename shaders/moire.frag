@@ -34,9 +34,10 @@ uniform vec2 iVel[60];
 
 out vec4 fragColor;
 
-// Wave-packet ring frequency — higher packs more concentric rings into each
-// body, so overlaps moiré into denser kaleidoscopic interference.
-const float RING_FREQ = 0.13;
+// Wave-packet ring frequency (rad/px) — set from the `wavelength` config
+// param (2*pi / wavelength). Lower packs the rings looser, opening larger
+// gaps of plain surface between fringes.
+uniform float iRingFreq;
 
 // ---------- gravitational deflection ----------
 
@@ -81,11 +82,9 @@ void main() {
     // through the lens, so its rings bend and magnify toward heavy windows.
     vec2 wfc = fc + D * 1.4;
 
-    // Backdrop aligned to the theme's surface tone — the base lifted slightly
-    // toward the foreground — so the wallpaper sits cohesively with the window
-    // surfaces instead of reading as a separate darker void.
-    vec3 surface = mix(bg, fg, 0.06);
-    vec3 col = surface;
+    // Backdrop is the theme's surface tone itself, so the field rests as
+    // plain background and only the fringes rise out of it.
+    vec3 col = bg;
 
     if (iFuzz > 0.5) {
         // PURE INTERFERENCE: nothing renders but the wave-packet interference
@@ -112,7 +111,7 @@ void main() {
             // ring spacing, so bass bodies pulse on kicks, treble on hats.
             // The beat punch pops every ring outward briefly.
             float be = min(iBands[cid % 6], 1.4);
-            float rf = RING_FREQ * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.18);
+            float rf = iRingFreq * (1.0 - be * 0.30 - min(iBeat, 1.6) * 0.18);
             float sigma = P.z * 26.0;
             float r = length(d);
 
@@ -151,11 +150,13 @@ void main() {
         // theme accent instead of falling to murky dark — so both fringe
         // families read as on-palette colour. The nodes (field ~ 0) stay dark
         // between them naturally.
+        // Cubed falloff narrows both fringe families, so wide bands of the
+        // plain surface tone survive between them.
         float bc = max(field, 0.0);
         float neg = max(-field, 0.0);
         vec3 accent2 = (iPaletteSize > 12) ? iPalette[12] : vec3(0.4, 0.55, 0.95);
         vec3 troughCol = mix(avg, accent2, 0.6);
-        vec3 mono = avg * bc * bc * 1.6 + troughCol * neg * neg * 1.1;
+        vec3 mono = avg * bc * bc * bc * 1.1 + troughCol * neg * neg * neg * 0.55;
 
         // Chromatic dispersion disabled — just the palette-colored interference.
         vec3 inter = max(mono, vec3(0.0));
@@ -169,19 +170,20 @@ void main() {
         float di = abs(g - floor(g + 0.5));
         float aa = fwidth(g) + 1e-4;
         float contour = (1.0 - smoothstep(0.0, aa * 1.5, di)) * smoothstep(0.05, 0.45, env_sum);
-        inter += mix(avg, vec3(1.0), 0.25) * contour * 0.6;
+        inter += mix(avg, vec3(1.0), 0.25) * contour * 0.35;
 
         // Antinodes: only the very strongest constructive peaks flare into
         // bright near-white focal sparks (sharp cubic so the field stays calm
         // elsewhere) — gives the kaleidoscope sparkle and depth.
         float anti = bc * bc * bc;
-        inter += mix(avg, vec3(1.0), 0.4) * anti * 1.1;
+        inter += mix(avg, vec3(1.0), 0.2) * anti * 0.45;
 
         // Beat punch: the whole field flares brighter on the hit.
-        inter *= 1.0 + min(iBeat, 1.6) * 0.75;
+        inter *= 1.0 + min(iBeat, 1.6) * 0.5;
 
-        // Soft Reinhard so dense overlaps stay colored instead of clipping.
-        col += inter / (1.0 + 0.35 * inter);
+        // Firmer Reinhard ceiling keeps dense overlaps in palette tones
+        // instead of blowing toward white lagoons.
+        col += inter / (1.0 + 0.55 * inter);
 
         // Fringe duality: dark nodal lines where the waves cancel (field ~ 0),
         // so bright fringes alternate with dark minima — the Young's-
@@ -189,7 +191,7 @@ void main() {
         // background tone (not a murky multiplicative darken) so the dark
         // fringes stay on-palette. Gated by wave presence.
         float node = exp(-field * field * 10.0) * smoothstep(0.1, 0.5, env_sum);
-        col = mix(col, bg * 0.7, node * 0.45);
+        col = mix(col, bg, node * 0.45);
     } else {
         // Comet mode: tight additive dots with fading trails.
         for (int i = 0; i < iParticleCount && i < 300; i++) {
