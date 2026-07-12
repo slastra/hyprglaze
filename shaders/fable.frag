@@ -14,21 +14,19 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
-// Story threads from fable.zig. Trail points are packed two per vec4
-// (x1, y1, x2, y2), indexed thread*M + k with k=0 at the head.
-const int NT = 8;   // max threads   — keep in sync with fable.zig max_threads
-const int M  = 24;  // points/thread — keep in sync with fable.zig trail_points
-uniform vec4 iFablePts[96];
-uniform vec4 iThreadMeta[8];  // (color_idx, half_width, brightness, _)
-uniform vec4 iMotes[24];      // (x, y, size*env, color_idx) — size 0 = inactive
-uniform vec4 iFlPts[8];       // flourish swash, 2 points per vec4
-uniform vec4 iFlMeta;         // (color_idx, env, _, _)
-uniform int iThreadCount;
+// The spark from fable.zig: body (x, y, radius, rotation), eight arm-length
+// multipliers, and shed thought-sparks (12 arcs of 6 points, 2 per vec4).
+uniform vec4 iFableBody;
+uniform vec2 iFableVel;
+uniform vec4 iArm[2];
+uniform vec4 iSparkPts[36];
+uniform vec4 iSparkMeta[3];
 uniform float iBass;
 uniform float iMid;
 uniform float iTreble;
+uniform float iEnergy;
 uniform float iBeat;
-uniform float iSwell;
+uniform float iBright;
 
 out vec4 fragColor;
 
@@ -40,50 +38,27 @@ float hash21(vec2 p) {
     return fract(p.x * p.y);
 }
 
-float vnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i);
-    float b = hash21(i + vec2(1.0, 0.0));
-    float c = hash21(i + vec2(0.0, 1.0));
-    float d = hash21(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-float fbm(vec2 p) {
-    return vnoise(p) + 0.5 * vnoise(p * 2.13 + 7.7);
-}
-
 // ---------- palette ----------
 
-vec3 paletteColor(int cid) {
-    return (iPaletteSize > cid) ? iPalette[cid] : vec3(0.62, 0.68, 0.95);
-}
-
-// Ambient accent for the background shimmer and beat swell.
-vec3 accentColor() {
-    if (iPaletteSize > 12) return mix(iPalette[4], iPalette[12], 0.5);
-    return vec3(0.35, 0.40, 0.75);
+// Claude coral, warmed toward the theme so the familiar belongs here.
+vec3 coral() {
+    vec3 base = vec3(0.85, 0.47, 0.34);
+    vec3 accent = (iPaletteSize > 1) ? iPalette[1] : base;
+    return mix(base, accent, 0.22);
 }
 
 // ---------- geometry ----------
 
-vec2 pt(int i) {
-    vec4 v = iFablePts[i >> 1];
-    return ((i & 1) == 0) ? v.xy : v.zw;
-}
-
-vec2 flpt(int i) {
-    vec4 v = iFlPts[i >> 1];
-    return ((i & 1) == 0) ? v.xy : v.zw;
-}
-
-float segDist(vec2 fc, vec2 a, vec2 b) {
-    vec2 pa = fc - a;
+float segDist(vec2 p, vec2 a, vec2 b, out float h) {
+    vec2 pa = p - a;
     vec2 ba = b - a;
-    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
+    h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
     return length(pa - ba * h);
+}
+
+vec2 sparkPt(int i) {
+    vec4 v = iSparkPts[i >> 1];
+    return ((i & 1) == 0) ? v.xy : v.zw;
 }
 
 // ---------- main ----------
@@ -92,92 +67,107 @@ void main() {
     vec2 fc = gl_FragCoord.xy;
     vec2 uv = fc / iResolution.xy;
 
-    vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.012, 0.014, 0.028);
+    vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.012, 0.014, 0.024);
     vec3 fg = (iPaletteSize > 0) ? iPaletteFg : vec3(0.88);
-    vec3 accent = accentColor();
+    vec3 cc = coral();
 
-    // Calm parchment-dark backdrop: vignette, a slow accent shimmer like
-    // candlelight on a page, and a faint breath from the bass.
+    // Quiet room for the spark to live in.
     float vig = 1.0 - 0.35 * length(uv - 0.5);
-    vec3 col = bg * (0.85 * vig + iBass * 0.05);
-    float wash = fbm(uv * 2.2 + vec2(iFableTime * 0.015, -iFableTime * 0.011));
-    col += mix(bg, accent, 0.35) * wash * 0.10 * vig;
+    vec3 col = bg * (0.85 * vig + iBass * 0.04);
 
-    // ---- story threads ----
-    // Glowing polylines via capsule SDFs: a colored halo plus a bright
-    // near-fg core, tapering thick head -> thin tail. Reject box padded to
-    // where the widest halo falls below the grain floor (~180 px).
-    vec3 thread_light = vec3(0.0);
-    for (int t = 0; t < iThreadCount && t < NT; t++) {
-        vec4 meta = iThreadMeta[t];
-        if (meta.z < 0.01) continue;
-        vec3 tc = paletteColor(int(meta.x));
-        float glow = 0.0;
-        float core = 0.0;
-        for (int k = 0; k < M - 1; k++) {
-            vec2 a = pt(t * M + k);
-            vec2 b = pt(t * M + k + 1);
-            vec2 lo = min(a, b) - 100.0;
-            vec2 hi = max(a, b) + 100.0;
-            if (fc.x < lo.x || fc.x > hi.x || fc.y < lo.y || fc.y > hi.y) continue;
-            float d = segDist(fc, a, b);
-            float taper = 1.0 - float(k) / float(M);
-            // Width thins toward the tail; brightness keeps a floor so the
-            // ribbon reads as a full stroke, not a comet with a stub.
-            float w = max(meta.y * (0.35 + 0.65 * taper), 0.4);
-            float amp = 0.30 + 0.70 * taper;
-            // Subtract the falloff's value at the reject-box edge so the
-            // glow lands on exactly zero there — no visible square cutoff.
-            float cut = exp(-100.0 * 0.30 / w);
-            glow = max(glow, (exp(-d * 0.30 / w) - cut) * amp);
-            core = max(core, exp(-d * d * 0.5 / (w * w)) * amp);
+    vec3 light = vec3(0.0);
+
+    vec2 body = iFableBody.xy;
+    float R = iFableBody.z;
+    float rot = iFableBody.w;
+    vec2 dp = fc - body;
+    float body_r2 = dot(dp, dp);
+    float reach = R * 4.2;
+
+    if (body_r2 < reach * reach) {
+        // Warm halo: presence before form. Bias-subtracted so it lands on
+        // exactly zero at the reach boundary (reach/R is fixed, so the
+        // kernel's edge value is the constant exp(-4.2²/6.5) ≈ 0.0662).
+        light += cc * max(exp(-body_r2 / (R * R * 6.5)) - 0.0662, 0.0) * 0.24;
+
+        // Motion wisp: gliding leaves a comet trail behind the body,
+        // stretched opposite the velocity and fading with distance.
+        float speed = length(iFableVel);
+        if (speed > 30.0) {
+            vec2 back = -iFableVel / speed;
+            float wisp_len = min(speed * 0.35, R * 3.0);
+            float h;
+            float d = segDist(fc, body, body + back * wisp_len, h);
+            float ww = R * 0.5 * (1.0 - h * 0.7);
+            float amt = smoothstep(30.0, 220.0, speed);
+            light += cc * exp(-d * d / (ww * ww * 2.0)) * (1.0 - h) * amt * 0.35;
         }
-        thread_light += tc * glow * meta.z * 0.85;
-        thread_light += mix(tc, fg, 0.35) * core * meta.z * 1.15;
-    }
 
-    // ---- beat flourish: a calligraphic swash curling off one thread ----
-    if (iFlMeta.y > 0.01) {
-        vec3 flc = mix(paletteColor(int(iFlMeta.x)), fg, 0.35);
-        float fglow = 0.0;
-        float fcore = 0.0;
-        for (int k = 0; k < 15; k++) {
-            vec2 a = flpt(k);
-            vec2 b = flpt(k + 1);
-            vec2 lo = min(a, b) - 60.0;
-            vec2 hi = max(a, b) + 60.0;
-            if (fc.x < lo.x || fc.x > hi.x || fc.y < lo.y || fc.y > hi.y) continue;
-            float d = segDist(fc, a, b);
-            // Thin toward the tip of the swash.
-            float w = max(1.7 * (1.0 - float(k) / 15.0 * 0.6), 0.5);
-            float cut = exp(-60.0 * 0.30 / w);
-            fglow = max(fglow, exp(-d * 0.30 / w) - cut);
-            fcore = max(fcore, exp(-d * d * 0.5 / (w * w)));
+        // Eight tapered arms — the asterisk. Opposing pairs share a band,
+        // so with music this is a radial equalizer breathing in coral.
+        float d_min = 1e5;
+        float h_min = 0.0;
+        for (int k = 0; k < 8; k++) {
+            float ang = rot + float(k) * 0.78539816; // tau/8
+            vec2 dir = vec2(cos(ang), sin(ang));
+            float len = R * iArm[k >> 2][k & 3];
+            float h;
+            float d = segDist(fc, body + dir * R * 0.20, body + dir * len, h);
+            // Tapered to a sharp point, like the asterisk's rays.
+            float w = R * 0.105 * (1.0 - h * 0.78) + 0.6;
+            float sd = d - w;
+            if (sd < d_min) {
+                d_min = sd;
+                h_min = h;
+            }
         }
-        thread_light += flc * (fglow * 0.9 + fcore * 1.6) * iFlMeta.y;
+        float fill = smoothstep(1.4, -1.4, d_min);
+        // Arms brighten toward the tips; the star breathes on beats.
+        vec3 arm_c = mix(cc, mix(cc, fg, 0.55), h_min * 0.45);
+        light += arm_c * fill * (0.95 + iBeat * 0.4);
+        light += cc * exp(-max(d_min, 0.0) * 0.10) * 0.30;
+
+        // A near-white heart.
+        light += mix(fg, vec3(1.0), 0.5) * exp(-body_r2 / (R * R * 0.045)) * 1.3;
+
+        // Ideas in orbit: six faint motes circling, quicker with the mids.
+        float osp = iFableTime * (0.45 + iMid * 1.3);
+        for (int i = 0; i < 6; i++) {
+            float oa = osp + float(i) * 1.0471976; // tau/6
+            float orad = R * (1.75 + 0.12 * sin(iFableTime * 0.8 + float(i) * 2.3));
+            vec2 op = body + vec2(cos(oa), sin(oa)) * orad;
+            vec2 od = fc - op;
+            float or2 = dot(od, od);
+            float tw = 0.7 + 0.3 * sin(iFableTime * 5.0 + float(i) * 1.9);
+            light += cc * exp(-or2 / 26.0) * tw * (0.35 + iTreble * 0.6);
+        }
     }
 
-    // ---- sparkle motes shed on treble ----
-    for (int i = 0; i < 24; i++) {
-        vec4 m = iMotes[i];
-        if (m.z < 0.05) continue;
-        vec2 dm = fc - m.xy;
-        float r2 = dot(dm, dm);
-        float sz = m.z * 2.2;
-        if (r2 > sz * sz * 30.0) continue;
-        // Bias-subtracted so the gaussian hits zero at the reject radius.
-        float dot_env = max(exp(-r2 / (sz * sz * 3.0)) - 4.54e-5, 0.0);
-        // Gentle twinkle so sparks feel alive.
-        float tw = 0.8 + 0.2 * sin(iFableTime * 9.0 + float(i) * 2.7);
-        thread_light += mix(paletteColor(int(m.w)), fg, 0.5) * dot_env * tw * 0.9;
+    // Thought-sparks: shed arcs, bright at birth, dissolving as they drift.
+    for (int s = 0; s < 12; s++) {
+        float env = iSparkMeta[s >> 2][s & 3];
+        if (env < 0.02) continue;
+        for (int j = 0; j < 5; j++) {
+            vec2 a = sparkPt(s * 6 + j);
+            vec2 b = sparkPt(s * 6 + j + 1);
+            vec2 lo = min(a, b) - 26.0;
+            vec2 hi = max(a, b) + 26.0;
+            if (fc.x < lo.x || fc.x > hi.x || fc.y < lo.y || fc.y > hi.y) continue;
+            float h;
+            float d = segDist(fc, a, b, h);
+            // Thin toward the trailing end of the thought.
+            float t = (float(j) + h) / 5.0;
+            float w = 1.6 * (1.0 - t * 0.6);
+            float cut = exp(-26.0 * 0.30 / w);
+            light += mix(cc, fg, 0.4) * (exp(-d * 0.30 / w) - cut) * env * (1.0 - t * 0.5) * 0.9;
+        }
     }
 
-    // Soft Reinhard on the accumulated thread light so overlapping ribbons
-    // stay colored instead of clipping to white.
-    col += thread_light / (1.0 + 0.35 * thread_light);
+    // Soft Reinhard keeps the coral warm where the glow stacks.
+    col += light * iBright / (1.0 + 0.30 * light * iBright);
 
-    // Beat swell: the whole page brightens a breath on the downbeat.
-    col += accent * iSwell * 0.05 * vig;
+    // Beats warm the whole room, faintly.
+    col += cc * iBeat * 0.03 * vig;
 
     // Fine grain so the dark field never looks flat.
     col += (hash21(fc + fract(iFableTime) * 100.0) - 0.5) * 0.012;
