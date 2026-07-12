@@ -34,6 +34,8 @@ uniform float iWhorlVignette;
 uniform float iWhorlScanbar;
 uniform float iWhorlBass;
 uniform float iWhorlTreble;
+uniform float iWhorlBeat;
+uniform float iWhorlZoom;
 
 out vec4 fragColor;
 
@@ -70,32 +72,48 @@ vec3 phosphor(float slot, vec3 fallback) {
 // (0 = at the crossing, 1 = one tick past), stacking with persistence
 // so packet edges and frozen zones stay dark. Persistence lerps from its
 // pre-tick value (A) to its current one (B) so nothing snaps at ticks.
+// Marker-band weight for a state: gun x lights entries into state 0,
+// gun y entries into the opposite state, each with a one-state tail.
+vec2 markerWeight(float s) {
+    float opp = floor(iStates * 0.5);
+    if (s < 2.0) return vec2(1.0 - s * 0.5, 0.0);
+    if (s >= opp && s < opp + 2.0) return vec2(0.0, 1.0 - (s - opp) * 0.5);
+    return vec2(0.0);
+}
+
 vec2 cellTrace(ivec2 p) {
     p = clamp(p, ivec2(0), ivec2(iGridDim) - 1);
     vec4 d = texelFetch(iGrid, p, 0);
     if (d.r > 0.999) return vec2(0.0);
-    float fresh = mix(d.a, d.b, iTickFrac);
-    float glow = pow(fresh, 1.7);
+    // Full (state, freshness) crossfade: the pre-tick trace fades into the
+    // current one, so bands leaving a marker fade out instead of cutting —
+    // continuous through ordinary ticks AND multi-state kick ratchets.
     float sc = floor(d.r * 255.0 + 0.5);
-    float opp = floor(iStates * 0.5);
-    if (sc < 2.0) return vec2(glow * (1.0 - sc * 0.5), 0.0);
-    if (sc >= opp && sc < opp + 2.0) return vec2(0.0, glow * (1.0 - (sc - opp) * 0.5));
-    return vec2(0.0);
+    float sp = floor(d.g * 255.0 + 0.5);
+    vec2 a = markerWeight(sp) * pow(d.a, 1.7);
+    vec2 b = markerWeight(sc) * pow(d.b, 1.7);
+    return mix(a, b, iTickFrac);
 }
 
 void main() {
     vec2 fc = gl_FragCoord.xy;
-    vec2 g = fc / iCellPx;
+    // Kick zoom hits the culture's plane only — the glass (scanlines,
+    // grille, vignette) and the windows hold still, so the pump reads as
+    // parallax depth, and wall slip hides in the shared background color.
+    vec2 ctr = 0.5 * iResolution.xy;
+    vec2 fz = (fc - ctr) / iWhorlZoom + ctr;
+    vec2 g = fz / iCellPx;
     ivec2 ci = ivec2(floor(g));
     vec2 f = fract(g);
 
     // Flat two-color phosphor: the whole field is the surface background
     // (walls included — windows sit on the same tone), and only the traces
     // light up. Crisp cells, thin shadow-mask seams between blocks.
-    // Each gun rides its band: bass swells the accent arms, treble the
-    // accent2 arms — smoothed CPU-side so nothing pumps or strobes.
-    vec3 gunA = phosphor(iWhorlAccent, vec3(0.55, 1.0, 0.65)) * (0.85 + iWhorlBass * 0.5);
-    vec3 gunB = phosphor(iWhorlAccent2, vec3(1.0, 0.75, 0.35)) * (0.85 + iWhorlTreble * 0.5);
+    // Gentle band tint on the guns — the real music coupling lives in the
+    // CA rule (conduction gates); this just underlines which instrument
+    // owns which color.
+    vec3 gunA = phosphor(iWhorlAccent, vec3(0.55, 1.0, 0.65)) * (0.75 + 0.6 * min(iWhorlBass, 1.0));
+    vec3 gunB = phosphor(iWhorlAccent2, vec3(1.0, 0.75, 0.35)) * (0.75 + 0.6 * min(iWhorlTreble, 1.0));
     vec3 col = bgColor();
     vec2 seam = smoothstep(0.0, 0.10, f) * smoothstep(1.0, 0.90, f);
     float mask = 0.86 + 0.14 * seam.x * seam.y;
@@ -130,6 +148,9 @@ void main() {
     }
     col += (gunA * bloom.x + gunB * bloom.y) * 0.14;
     col += (gunA * halo.x + gunB * halo.y) * 0.05 * iWhorlHalation;
+
+    // Kick flash: a soft tube-wide lift with the ratchet, gone in ~200ms.
+    col *= 1.0 + iWhorlBeat * 0.10;
 
     // Rolling scan bar: one slow bright band drifting down the tube.
     if (iWhorlScanbar > 0.0) {

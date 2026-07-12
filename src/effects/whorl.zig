@@ -46,13 +46,24 @@ pub const Context = struct {
     /// sweep through once per ring period, spiral cores never die. Range 1
     /// with threshold 1 is full turbulence; threshold 2+ at range 1 burns out.
     range: i64,
-    /// Freshness lost per tick (255 / trail ticks).
+    /// Phosphor trail in ticks at neutral energy (config: trail).
+    trail_base: f32,
+    /// Freshness lost per tick (255 / effective trail ticks); music sustain
+    /// stretches the effective trail each tick.
     fresh_decay: u8,
     sim_dt: f32,
     warmup: u32,
     stir: bool,
     stir_radius: f32,
     wall_inset: f32,
+    /// Ticks of reverse time per kick (config: kick_depth, 0 disables).
+    /// A kick rewinds the field this many ticks (continuous backward
+    /// glide via phase relabels — the one "reverse" a non-invertible CA
+    /// can fake, visually exact for wave trains), then real forward
+    /// evolution swings it back through: a pendulum in time, per beat.
+    kick_depth: u8,
+    /// Backward ticks still owed from the last kick.
+    back_left: u8 = 0,
     /// Palette slots for the two phosphor colors; -1 = theme foreground.
     /// Fronts carrying states from the lower half of the ring glow in
     /// `accent`, upper half in `accent2` — successive waves trade colors.
@@ -63,6 +74,10 @@ pub const Context = struct {
     calm_ticks: u8 = 0,
 
     // -- CRT filter dials (all safe: no geometry warp, nothing strobes) --
+    /// Peak kick zoom (fraction, e.g. 0.025 = 2.5%). Applied to grid
+    /// sampling only — the glass (scanlines/grille) and walls hold still,
+    /// so it reads as the culture's plane pumping behind the windows.
+    zoom_amt: f32,
     misconv: f32,
     halation: f32,
     vignette: f32,
@@ -78,7 +93,24 @@ pub const Context = struct {
     bass_prev: f32 = 0,
     flux_avg: f32 = 0,
     beat_cooldown: f32 = 0,
-    seed_cooldown: f32 = 0,
+    /// Beat envelope: snaps to 1 on a detected downbeat, decays fast.
+    beat: f32 = 0,
+    /// Zoom envelope: same trigger, faster release — the zoom punches
+    /// and snaps back while the flash is still fading around it.
+    zoom_env: f32 = 0,
+    /// Conduction gates — music wired into the CA rule itself. The state
+    /// ring is split into six segments, one per frequency band in order
+    /// (sub-bass owns the first states, high treble the last): a flip INTO
+    /// a state only fires with its owner band's gate probability, so a
+    /// wavefront must conduct through the whole spectrum to complete one
+    /// rotation and stalls at the ring phase whose instrument is missing.
+    /// Beats briefly open every gate (one surge in rhythm). 1.0 = open
+    /// (music off), 0.10 floor = ambient drift in silence.
+    gates: [6]f32 = [_]f32{1.0} ** 6,
+    bands_smooth: [6]f32 = [_]f32{0} ** 6,
+    /// Mid-density excitability: probability that a near-miss cell
+    /// (threshold-1 neighbors) fires anyway. Thick mids fatten the waves.
+    soft: f32 = 0,
 
     // -- grid --
     gw: usize,
@@ -119,6 +151,8 @@ pub const Context = struct {
     loc_scanbar: c.GLint = -1,
     loc_bass: c.GLint = -1,
     loc_treble: c.GLint = -1,
+    loc_beat: c.GLint = -1,
+    loc_zoom: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const cell_px = std.math.clamp(params.getFloat("cell_px", 10.0), 4.0, 64.0);
@@ -173,14 +207,17 @@ pub const Context = struct {
             .n_states = n_states,
             .threshold = @intCast(std.math.clamp(params.getInt("threshold", 3), 1, 12)),
             .range = std.math.clamp(params.getInt("range", 2), 1, 3),
+            .trail_base = std.math.clamp(params.getFloat("trail", 2.5), 1.0, 20.0),
             .fresh_decay = @intFromFloat(255.0 / std.math.clamp(params.getFloat("trail", 2.5), 1.0, 20.0)),
             .sim_dt = 1.0 / sim_hz,
             .warmup = @intCast(std.math.clamp(params.getInt("warmup", 140), 0, 2000)),
             .stir = params.getBool("stir", false),
             .stir_radius = std.math.clamp(params.getFloat("stir_radius", 2.2), 0.5, 8.0),
             .wall_inset = std.math.clamp(params.getFloat("wall_inset", 2.0), 0.0, 32.0),
+            .kick_depth = @intCast(std.math.clamp(params.getInt("kick_depth", 3), 0, 8)),
             .accent = @floatFromInt(std.math.clamp(params.getInt("accent", 1), -1, 15)),
             .accent2 = @floatFromInt(std.math.clamp(params.getInt("accent2", 2), -1, 15)),
+            .zoom_amt = std.math.clamp(params.getFloat("zoom", 0.035), 0.0, 0.15),
             .misconv = std.math.clamp(params.getFloat("misconverge", 1.5), 0.0, 8.0),
             .halation = std.math.clamp(params.getFloat("halation", 0.6), 0.0, 3.0),
             .vignette = std.math.clamp(params.getFloat("vignette", 0.22), 0.0, 0.8),
@@ -250,6 +287,7 @@ pub const Context = struct {
         const next = self.cells[self.cur ^ 1];
         const gw = self.gw;
         const gh = self.gh;
+        const r = self.rng.random();
         var flips: u32 = 0;
 
         for (0..gh) |y| {
@@ -282,7 +320,15 @@ pub const Context = struct {
                     }
                 }
 
-                if (cnt >= self.threshold) {
+                // Conduction gate: the flip only fires if the band owning
+                // the target state's ring segment is playing. A stalled
+                // front holds its shape (state kept) and dims as freshness
+                // decays, then thaws when its instrument returns. Mid
+                // density lets near-miss cells (threshold-1) fire too.
+                const gate = self.gates[(@as(usize, t) * 6) / self.n_states];
+                const fires = cnt >= self.threshold or
+                    (self.soft > 0 and cnt + 1 == self.threshold and r.float(f32) < self.soft);
+                if (fires and (gate >= 1.0 or r.float(f32) < gate)) {
                     next[i] = t;
                     self.fresh[i] = 255;
                     flips += 1;
@@ -323,6 +369,34 @@ pub const Context = struct {
         }
     }
 
+    /// Shift every non-wall cell's phase by `step` states — one tick of
+    /// fake time, through the rule's shift symmetry. Double-buffered like
+    /// step() so the shader's crossfade renders each shift as a glide.
+    /// Glow travels WITH the shift: cells landing in a marker band
+    /// re-mint full freshness, but only if they were already part of
+    /// active structure — frozen domains stay dark instead of flashing.
+    fn shiftPhase(self: *Context, shift: i16) void {
+        @memcpy(self.fresh_prev, self.fresh);
+        const curr = self.cells[self.cur];
+        const next = self.cells[self.cur ^ 1];
+        const opp = self.n_states / 2;
+        for (curr, next, self.wall, self.fresh) |s, *n, w, *fr| {
+            if (w == 1) {
+                n.* = s;
+                continue;
+            }
+            const ns: u8 = @intCast(@mod(@as(i16, s) + shift, @as(i16, self.n_states)));
+            n.* = ns;
+            const in_marker = ns < 2 or (ns >= opp and ns < opp + 2);
+            if (in_marker and fr.* > 10) {
+                fr.* = 230;
+            } else {
+                fr.* -|= self.fresh_decay;
+            }
+        }
+        self.cur ^= 1;
+    }
+
     fn seedRandomPinwheel(self: *Context) void {
         const r = self.rng.random();
         self.seedPinwheel(
@@ -330,6 +404,7 @@ pub const Context = struct {
             r.intRangeLessThan(usize, 0, self.gh),
         );
     }
+
 
     /// Paint a disc of the (slowly cycling) stir state under the cursor.
     /// A rotating pure-state source sheds fresh wavefronts continuously.
@@ -410,20 +485,39 @@ pub const Context = struct {
             self.energy_ema += (energy - self.energy_ema) * @min(1.0, 2.0 * dt);
             self.bass_smooth += (self.bass - self.bass_smooth) * @min(1.0, 8.0 * dt);
             self.treble_smooth += (self.treble - self.treble_smooth) * @min(1.0, 8.0 * dt);
+            for (0..6) |k| {
+                self.bands_smooth[k] += (self.bands[k] - self.bands_smooth[k]) * @min(1.0, 8.0 * dt);
+            }
 
-            // Downbeats plant new spiral cores: a song populates the dish.
+            // Kick = time pendulum: owe the sim kick_depth backward ticks;
+            // the tick loop pays them as reverse phase glides, then real
+            // forward evolution swings back through.
             const flux = @max(0.0, self.bass - self.bass_prev);
             self.bass_prev = self.bass;
             self.flux_avg += (flux - self.flux_avg) * @min(1.0, 1.5 * dt);
             self.beat_cooldown -= dt;
-            self.seed_cooldown -= dt;
             if (flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0) {
                 self.beat_cooldown = 0.25;
-                if (self.seed_cooldown <= 0) {
-                    self.seed_cooldown = 1.2;
-                    self.seedRandomPinwheel();
-                }
+                self.beat = 1.0;
+                self.zoom_env = 1.0;
+                if (self.warmed) self.back_left = self.kick_depth;
             }
+            self.beat *= @exp(-5.0 * dt);
+            if (self.beat < 0.01) self.beat = 0;
+            self.zoom_env *= @exp(-9.0 * dt);
+            if (self.zoom_env < 0.01) self.zoom_env = 0;
+
+            // One rule element per spectrum region: each band gates its
+            // ring segment; mid density softens the threshold; overall
+            // sustain stretches the phosphor memory. Gates are purely
+            // spectral — the kick's job belongs to the ratchet.
+            for (0..6) |k| {
+                self.gates[k] = std.math.clamp(0.10 + self.bands_smooth[k] * 2.0, 0.10, 1.0);
+            }
+            const mid = (self.bands_smooth[2] + self.bands_smooth[3]) * 0.5;
+            self.soft = std.math.clamp(mid * 1.2 - 0.1, 0.0, 0.65);
+            const trail_eff = std.math.clamp(self.trail_base * (0.6 + self.energy_ema * 2.5), 1.0, 20.0);
+            self.fresh_decay = @intFromFloat(255.0 / trail_eff);
         }
 
         // First frame with real window geometry: burn through the boring
@@ -440,35 +534,38 @@ pub const Context = struct {
             self.dirty = true;
         }
 
-        // Metabolism: music energy speeds the culture up (~0.6x at rest,
-        // ~2x in a loud chorus). tick_frac interpolation keeps the display
-        // smooth across the changing rate.
-        const speed = 0.6 + 2.0 * std.math.clamp(self.energy_ema, 0.0, 0.8);
-        const eff_dt = if (self.audio != null) self.sim_dt / speed else self.sim_dt;
-
         self.acc += dt;
         var steps: u8 = 0;
-        while (self.acc >= eff_dt and steps < max_catchup) : (steps += 1) {
-            self.acc -= eff_dt;
+        while (self.acc >= self.sim_dt and steps < max_catchup) : (steps += 1) {
+            self.acc -= self.sim_dt;
             self.rasterizeWalls(state.windows);
-            const flips = self.step();
-            // Burnout watch: a healthy culture flips >1% of cells per tick;
-            // a few near-still ticks in a row means the waves died out.
-            if (flips * 400 < self.gw * self.gh) {
-                self.calm_ticks +|= 1;
+            if (self.back_left > 0) {
+                // Reverse leg of the kick pendulum: one backward tick.
+                self.back_left -= 1;
+                self.shiftPhase(-1);
             } else {
-                self.calm_ticks = 0;
-            }
-            if (self.calm_ticks >= 3) {
-                self.calm_ticks = 0;
-                self.seedRandomPinwheel();
+                const flips = self.step();
+                // Burnout watch: a healthy culture flips >1% of cells per
+                // tick; a few near-still ticks in a row means the waves
+                // died out. Gated stillness (quiet music) doesn't count.
+                var gsum: f32 = 0;
+                for (self.gates) |g| gsum += g;
+                if (flips * 400 < self.gw * self.gh and gsum > 3.6) {
+                    self.calm_ticks +|= 1;
+                } else {
+                    self.calm_ticks = 0;
+                }
+                if (self.calm_ticks >= 3) {
+                    self.calm_ticks = 0;
+                    self.seedRandomPinwheel();
+                }
             }
             if (self.stir) self.stirAt(state.cursor);
             self.buildRgba();
             self.dirty = true;
         }
-        if (self.acc >= eff_dt) self.acc = 0; // stalled; drop the backlog
-        self.tick_frac = std.math.clamp(self.acc / eff_dt, 0.0, 1.0);
+        if (self.acc >= self.sim_dt) self.acc = 0; // stalled; drop the backlog
+        self.tick_frac = std.math.clamp(self.acc / self.sim_dt, 0.0, 1.0);
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
@@ -506,6 +603,8 @@ pub const Context = struct {
             self.loc_scanbar = c.glGetUniformLocation(prog.program, "iWhorlScanbar");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iWhorlBass");
             self.loc_treble = c.glGetUniformLocation(prog.program, "iWhorlTreble");
+            self.loc_beat = c.glGetUniformLocation(prog.program, "iWhorlBeat");
+            self.loc_zoom = c.glGetUniformLocation(prog.program, "iWhorlZoom");
         }
 
         if (self.loc_grid >= 0) c.glUniform1i(self.loc_grid, 0);
@@ -522,6 +621,8 @@ pub const Context = struct {
         if (self.loc_scanbar >= 0) c.glUniform1f(self.loc_scanbar, self.scanbar);
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass_smooth);
         if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble_smooth);
+        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
+        if (self.loc_zoom >= 0) c.glUniform1f(self.loc_zoom, 1.0 + self.zoom_env * self.zoom_env * self.zoom_amt);
     }
 
     pub fn deinit(self: *Context) void {
