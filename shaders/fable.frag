@@ -20,7 +20,7 @@ uniform vec4 iFableBody;
 uniform vec2 iFableVel;
 uniform vec4 iArm[2];
 uniform vec4 iSparkPts[36];
-uniform vec4 iSparkMeta[3];
+uniform vec4 iSparkMeta[12]; // per spark: (head, tail, env, glint)
 uniform float iBass;
 uniform float iMid;
 uniform float iTreble;
@@ -143,23 +143,42 @@ void main() {
         }
     }
 
-    // Thought-sparks: shed arcs, bright at birth, dissolving as they drift.
+    // Thought-sparks: each stroke writes itself outward from the arm tip
+    // (head advances), then dissolves tail-first while it drifts away —
+    // the thought forms, then lets go.
     for (int s = 0; s < 12; s++) {
-        float env = iSparkMeta[s >> 2][s & 3];
-        if (env < 0.02) continue;
+        vec4 M = iSparkMeta[s]; // (head, tail, env, glint)
+        if (M.z < 0.02) continue;
+
+        // Origin glint: a brief flash where the thought left the arm.
+        if (M.w > 0.02) {
+            vec2 o = sparkPt(s * 6);
+            vec2 od = fc - o;
+            float or2 = dot(od, od);
+            if (or2 < 400.0) {
+                light += mix(cc, vec3(1.0), 0.55) * exp(-or2 / 28.0) * M.w * 1.2;
+            }
+        }
+
         for (int j = 0; j < 5; j++) {
+            float vis = clamp(M.x - float(j), 0.0, 1.0);
+            if (vis <= 0.0) break; // head hasn't reached this segment
+            float tail_fade = clamp(1.0 - (M.y - float(j)), 0.0, 1.0);
+            if (tail_fade <= 0.0) continue; // already dissolved
             vec2 a = sparkPt(s * 6 + j);
-            vec2 b = sparkPt(s * 6 + j + 1);
+            vec2 b = mix(a, sparkPt(s * 6 + j + 1), vis);
             vec2 lo = min(a, b) - 26.0;
             vec2 hi = max(a, b) + 26.0;
             if (fc.x < lo.x || fc.x > hi.x || fc.y < lo.y || fc.y > hi.y) continue;
             float h;
             float d = segDist(fc, a, b, h);
-            // Thin toward the trailing end of the thought.
-            float t = (float(j) + h) / 5.0;
+            // Thin toward the trailing end; the writing head burns hotter.
+            float t = (float(j) + h * vis) / 5.0;
             float w = 1.6 * (1.0 - t * 0.6);
+            float head_hot = (vis < 1.0) ? 1.5 : 1.0;
             float cut = exp(-26.0 * 0.30 / w);
-            light += mix(cc, fg, 0.4) * (exp(-d * 0.30 / w) - cut) * env * (1.0 - t * 0.5) * 0.9;
+            light += mix(cc, fg, 0.4) * (exp(-d * 0.30 / w) - cut) *
+                M.z * tail_fade * head_hot * (1.0 - t * 0.4) * 0.9;
         }
     }
 

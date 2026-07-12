@@ -20,15 +20,20 @@ const arms = 8;
 const max_sparks = 12;
 const spark_pts = 6;
 const spark_vec4s = max_sparks * spark_pts / 2;
-const spark_meta_vec4s = max_sparks / 4;
 
-/// A thought: a short arc shed from an arm tip, drifting and dissolving.
+/// A thought: a stroke shed from an arm tip. It writes itself outward
+/// (head advances along the arc), then dissolves tail-first while
+/// drifting — the thought forms, then lets go.
 const Spark = struct {
     active: bool = false,
     pts: [spark_pts][2]f32 = undefined,
     vel: [2]f32 = .{ 0, 0 },
     age: f32 = 0,
     life: f32 = 1,
+    /// Seconds to fully draw the stroke.
+    grow: f32 = 0.3,
+    /// Beat-born thoughts burn brighter than idle musings.
+    intensity: f32 = 1,
 };
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
@@ -116,7 +121,7 @@ pub const Context = struct {
             (1.0 + 0.05 * @sin(self.now * 0.9) + self.energy * 0.10 + self.flare * 0.35 + self.curiosity * 0.07);
     }
 
-    fn shedSpark(self: *Context) void {
+    fn shedSpark(self: *Context, intensity: f32) void {
         const r = self.rng.random();
         const k = r.intRangeLessThan(u32, 0, arms);
         const ang0 = self.rot + @as(f32, @floatFromInt(k)) * (std.math.tau / @as(f32, arms));
@@ -124,21 +129,47 @@ pub const Context = struct {
         const slot = self.next_spark;
         self.next_spark = (self.next_spark + 1) % max_sparks;
         const s = &self.sparks[slot];
+
+        // Temperament: most thoughts are tight curls or lazy arcs; the
+        // occasional straight dart is a decision leaving in a hurry.
+        var curve: f32 = undefined;
+        var step_base: f32 = undefined;
+        var drift: f32 = undefined;
+        const roll = r.float(f32);
+        if (roll < 0.4) { // curl
+            curve = 0.55 + r.float(f32) * 0.4;
+            step_base = 8.0 + r.float(f32) * 4.0;
+            drift = 22.0;
+            s.life = 1.0 + r.float(f32) * 0.5;
+            s.grow = 0.38;
+        } else if (roll < 0.88) { // arc
+            curve = 0.18 + r.float(f32) * 0.28;
+            step_base = 13.0 + r.float(f32) * 7.0;
+            drift = 34.0;
+            s.life = 0.8 + r.float(f32) * 0.5;
+            s.grow = 0.30;
+        } else { // dart
+            curve = r.float(f32) * 0.07;
+            step_base = 20.0 + r.float(f32) * 10.0;
+            drift = 85.0;
+            s.life = 0.5 + r.float(f32) * 0.3;
+            s.grow = 0.18;
+        }
+        if (r.boolean()) curve = -curve;
+
         var ang = ang0;
-        const curve = (0.22 + r.float(f32) * 0.5) * (if (r.boolean()) @as(f32, 1.0) else -1.0);
         var p = [2]f32{
             self.pos[0] + @cos(ang0) * tip_r,
             self.pos[1] + @sin(ang0) * tip_r,
         };
         for (0..spark_pts) |j| {
             s.pts[j] = p;
-            const step = 13.0 + r.float(f32) * 8.0;
             ang += curve;
-            p = .{ p[0] + @cos(ang) * step, p[1] + @sin(ang) * step };
+            p = .{ p[0] + @cos(ang) * step_base, p[1] + @sin(ang) * step_base };
         }
-        s.vel = .{ @cos(ang0) * 34.0, @sin(ang0) * 34.0 };
+        s.vel = .{ @cos(ang0) * drift, @sin(ang0) * drift };
         s.age = 0;
-        s.life = 0.8 + r.float(f32) * 0.5;
+        s.intensity = intensity;
         s.active = true;
     }
 
@@ -264,14 +295,16 @@ pub const Context = struct {
             }
         }
         if (beat_hit) {
-            self.shedSpark();
-            self.shedSpark();
+            const punch = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
+            self.shedSpark(0.85 + punch * 0.35);
+            self.shedSpark(0.85 + punch * 0.35);
         }
-        // Idle musing: even in silence a thought escapes now and then.
+        // Idle musing: even in silence a thought escapes now and then,
+        // dimmer and unhurried.
         self.muse_timer -= dt;
         if (self.muse_timer <= 0) {
             self.muse_timer = 3.0 + r.float(f32) * 4.0;
-            self.shedSpark();
+            self.shedSpark(0.55);
         }
     }
 
@@ -307,11 +340,18 @@ pub const Context = struct {
         }
         if (self.loc_spark_pts >= 0 and self.loc_spark_meta >= 0) {
             var pts: [spark_vec4s][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** spark_vec4s;
-            var meta: [spark_meta_vec4s][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** spark_meta_vec4s;
+            // Per spark: (head, tail, env, glint). Head advances 0->5 as
+            // the stroke writes itself; tail follows 0->5 as it dissolves;
+            // glint flashes the origin tip at the moment of shedding.
+            var meta: [max_sparks][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** max_sparks;
             for (self.sparks, 0..) |s, i| {
                 if (!s.active) continue;
                 const p = s.age / s.life;
-                meta[i / 4][i % 4] = smoothstep(0.0, 0.10, p) * (1.0 - p) * (1.0 - p);
+                const head = @min(s.age / s.grow, 1.0) * 5.0;
+                const tail = std.math.clamp((p - 0.55) / 0.42, 0.0, 1.0) * 5.0;
+                const env = s.intensity * (1.0 - p * p * 0.45);
+                const glint = s.intensity * @max(1.0 - s.age / 0.25, 0.0);
+                meta[i] = .{ head, tail, env, glint };
                 for (0..spark_pts) |j| {
                     const gi = i * spark_pts + j;
                     pts[gi / 2][(gi % 2) * 2] = s.pts[j][0];
@@ -319,7 +359,7 @@ pub const Context = struct {
                 }
             }
             c.glUniform4fv(self.loc_spark_pts, spark_vec4s, @ptrCast(&pts[0]));
-            c.glUniform4fv(self.loc_spark_meta, spark_meta_vec4s, @ptrCast(&meta[0]));
+            c.glUniform4fv(self.loc_spark_meta, max_sparks, @ptrCast(&meta[0]));
         }
 
         // Effect-local time (fire.zig pattern) — keeps shader noise
