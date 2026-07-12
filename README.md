@@ -41,6 +41,9 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `fable` | Claude's self-portrait: a small warm coral starburst — the eight-armed asterisk — living on the desktop like a familiar. It attends (gliding to hover at the corner of the focused window, trailing a comet wisp between them, wandering when idle), listens (opposing arm pairs ride the audio bands, turning the star into a radial equalizer; beats flare it and flick its spin), and thinks (curved thought-sparks shed from arm tips, arcing away and dissolving — a few even in silence). Six idea-motes orbit, quickening with the mids |
 | `quill` | Story threads: luminous palette-tinted ink ribbons drift on an evolving curl-noise field over a candlelit parchment-dark wash. Windows are pages — threads never cross them, deflecting around rects and briefly tracing edges like ink hugging a margin — and the focused window is the current chapter they gather around. Bass fattens the strokes, mids quicken the flow, treble sheds sparkle motes, and each beat curls a calligraphic flourish off one thread with a soft page-wide swell. In silence they settle into slow, thin, elegant drift |
 | `ivy` | Bioluminescent night garden: glowing vines take root on window frames (windows are trellises) and climb them, sprouting soft-lit leaves as they grow — the focused window is the tended plant and grows fastest. Vines ride their window through moves and resizes; closing one bursts its blossoms into drifting petals. Music feeds the garden: energy accelerates growth, beats pop open five-petal palette blossoms that later shed petals onto the breeze, treble shimmers the foliage. Empty workspaces grow tendrils up invisible trellis posts from the bottom of the screen |
+| `sol` | A kinetic gravitational instrument: music restructures full-screen magnetic filaments, cursor gestures comb light into spectral wakes, and moving or focusing windows bends the field and launches pressure waves |
+| `mycelium` | A bioluminescent underground network: hierarchical hyphae wrap windows, nutrient bodies pulse to music, and cursor movement germinates fine exploratory growth |
+| `whorl` | A cyclic cellular automaton culture living behind your windows: perpetual wave trains and spiral defects rendered as embossed relief in the surface background color, with wavefronts briefly lifting out of the dark. Windows are walls in the dish — waves break and pinwheel around real window geometry, moving a window carves through the culture, and the cursor stirs a rotating wave source that sheds new spirals |
 
 ## Install (Arch Linux)
 
@@ -65,7 +68,7 @@ zig build run
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
 #          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire,
-#          meshflow, swarm, voltaic, moire, fable, quill, ivy
+#          meshflow, swarm, voltaic, moire, fable, quill, ivy, sol, mycelium, whorl
 effect = "fluid"
 theme = "Rosé Pine"
 

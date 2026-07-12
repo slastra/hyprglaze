@@ -29,6 +29,9 @@ const moire = @import("effects/moire.zig");
 const fable = @import("effects/fable.zig");
 const quill = @import("effects/quill.zig");
 const ivy = @import("effects/ivy.zig");
+const sol = @import("effects/sol.zig");
+const mycelium = @import("effects/mycelium.zig");
+const whorl = @import("effects/whorl.zig");
 
 pub const WindowInfo = struct {
     class: [64]u8 = undefined,
@@ -74,6 +77,9 @@ pub const Effect = union(enum) {
     fable: fable.Context,
     quill: quill.Context,
     ivy: ivy.Context,
+    sol: sol.Context,
+    mycelium: mycelium.Context,
+    whorl: whorl.Context,
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
         if (std.mem.eql(u8, name, "particles")) {
@@ -133,6 +139,15 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "ivy")) {
             const params = config_mod.effectParams(cfg, "ivy");
             return .{ .ivy = try ivy.Context.init(allocator, width, height, params) };
+        } else if (std.mem.eql(u8, name, "sol")) {
+            const params = config_mod.effectParams(cfg, "sol");
+            return .{ .sol = try sol.Context.init(allocator, width, height, params) };
+        } else if (std.mem.eql(u8, name, "mycelium")) {
+            const params = config_mod.effectParams(cfg, "mycelium");
+            return .{ .mycelium = try mycelium.Context.init(allocator, width, height, params) };
+        } else if (std.mem.eql(u8, name, "whorl")) {
+            const params = config_mod.effectParams(cfg, "whorl");
+            return .{ .whorl = try whorl.Context.init(allocator, width, height, params) };
         }
         log.err("unknown effect: '{s}'. Available: {s}", .{ name, effect_names_csv });
         return error.UnknownEffect;
@@ -179,6 +194,9 @@ pub const Effect = union(enum) {
             .fable => "shaders/fable.frag",
             .quill => "shaders/quill.frag",
             .ivy => "shaders/ivy.frag",
+            .sol => "shaders/sol.frag",
+            .mycelium => "shaders/mycelium.frag",
+            .whorl => "shaders/whorl.frag",
         };
     }
 };
