@@ -14,6 +14,11 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
+// Music (all zero in silence or with music = false, which makes every
+// modulation below collapse to exactly the classic fluid look).
+uniform float iFluidBands[6];
+uniform float iFluidEnergy;
+
 out vec4 fragColor;
 
 float sdRoundBox(vec2 p, vec2 center, vec2 half_size, float radius) {
@@ -71,20 +76,24 @@ void main() {
     field_color += muted * cursor_contrib;
     color_weight += cursor_contrib;
 
-    // Drifting ambient blobs
+    // Drifting ambient blobs — one per spectral band, low to high. A
+    // playing band inflates its blob and weighs it heavier in the field
+    // (bass swells fuse into neighboring contours; hats flutter the small
+    // ones). Amplitude-only modulation: silence renders identically.
     for (int i = 0; i < 6; i++) {
         float fi = float(i);
+        float be = min(iFluidBands[i], 1.2);
         float px = 0.5 + 0.35 * sin(t * (0.3 + fi * 0.07) + fi * 1.5);
         float py = 0.5 + 0.35 * cos(t * (0.2 + fi * 0.09) + fi * 2.1);
         vec2 dp = iResolution.xy * vec2(px, py);
         float dd = distance(fc, dp);
-        float dr = 100.0 + 30.0 * sin(t + fi);
+        float dr = (100.0 + 30.0 * sin(t + fi)) * (1.0 + be * 0.7);
         float contrib = (dr * dr) / (dd * dd + dr * dr);
-        field += contrib * 0.4;
+        field += contrib * (0.4 + be * 0.45);
 
         int ci = int(mod(fi + 2.0, 6.0));
-        field_color += pal[ci] * 0.3 * contrib;
-        color_weight += contrib * 0.3;
+        field_color += pal[ci] * (0.3 + be * 0.4) * contrib;
+        color_weight += contrib * (0.3 + be * 0.4);
     }
 
     // Normalize color
@@ -95,7 +104,10 @@ void main() {
     vec3 col = bg;
 
     // --- Isocontour lines with screen-space anti-aliasing ---
-    float contours = 6.0;
+    // Loud passages densify the topography (more iso levels between the
+    // same field extremes); the slow energy envelope keeps it a breath,
+    // not a flicker. Silence: exactly 6, the classic look.
+    float contours = 6.0 + iFluidEnergy * 7.0;
     float f_scaled = field * contours;
 
     // Distance to the nearest integer of f_scaled (= nearest isocontour).

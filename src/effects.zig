@@ -101,7 +101,8 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "concentric")) {
             return .{ .concentric = concentric.Context.init() };
         } else if (std.mem.eql(u8, name, "fluid")) {
-            return .{ .fluid = fluid.Context.init() };
+            const params = config_mod.effectParams(cfg, "fluid");
+            return .{ .fluid = try fluid.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "aurora")) {
             return .{ .aurora = aurora.Context.init() };
         } else if (std.mem.eql(u8, name, "starfield")) {

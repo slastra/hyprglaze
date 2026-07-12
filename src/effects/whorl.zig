@@ -10,68 +10,8 @@ const c = @cImport({
 
 const log = std.log.scoped(.whorl);
 
-// ---- spectral front-end ----
-// AudioCapture ships TIME-DOMAIN samples (128/channel, box-averaged from a
-// 1/60s window — effective rate ~7.7kHz, Nyquist ~3.8kHz). The house
-// "6-band split" other effects use just slices that window in TIME, so its
-// "bands" are correlated loudness envelopes, not frequencies. Whorl runs a
-// real 128-point FFT per frame instead: true bands for the conduction
-// gates, and honest spectral flux for the kick detector.
-
-const fft_n = 128;
-
-const hann_win: [fft_n]f32 = blk: {
-    @setEvalBranchQuota(10000);
-    var w: [fft_n]f32 = undefined;
-    for (0..fft_n) |i| {
-        const x = @as(f32, i) / @as(f32, fft_n - 1);
-        w[i] = 0.5 - 0.5 * @cos(2.0 * std.math.pi * x);
-    }
-    break :blk w;
-};
-
-/// In-place radix-2 FFT.
-fn fft(re: *[fft_n]f32, im: *[fft_n]f32) void {
-    var j: usize = 0;
-    for (1..fft_n) |i| {
-        var bit: usize = fft_n >> 1;
-        while (j & bit != 0) : (bit >>= 1) j ^= bit;
-        j |= bit;
-        if (i < j) {
-            std.mem.swap(f32, &re[i], &re[j]);
-            std.mem.swap(f32, &im[i], &im[j]);
-        }
-    }
-    var len: usize = 2;
-    while (len <= fft_n) : (len <<= 1) {
-        const ang = -2.0 * std.math.pi / @as(f32, @floatFromInt(len));
-        const wr = @cos(ang);
-        const wi = @sin(ang);
-        var i: usize = 0;
-        while (i < fft_n) : (i += len) {
-            var cr: f32 = 1.0;
-            var ci: f32 = 0.0;
-            for (0..len / 2) |k| {
-                const ur = re[i + k];
-                const ui = im[i + k];
-                const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
-                const vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
-                re[i + k] = ur + vr;
-                im[i + k] = ui + vi;
-                re[i + k + len / 2] = ur - vr;
-                im[i + k + len / 2] = ui - vi;
-                const nr = cr * wr - ci * wi;
-                ci = cr * wi + ci * wr;
-                cr = nr;
-            }
-        }
-    }
-}
-
-/// Log-spaced band edges in FFT bins (~60Hz each): sub, bass, low-mid,
-/// mid, high-mid, treble. The capture's box-averaging shaves real treble;
-/// per-band AGC in the analysis compensates for the level differences.
-const band_edges = [7]usize{ 1, 3, 5, 9, 17, 33, 64 };
+const spectral = @import("spectral.zig");
+const band_edges = spectral.band_edges;
 
 /// Trailing flux window for the adaptive onset threshold (~1.6s at 60fps).
 const flux_hist_len = 96;
@@ -500,12 +440,7 @@ pub const Context = struct {
         // ---- audio analysis: real FFT bands + spectral-flux onset ----
         if (self.audio) |audio| {
             const wave = audio.getWaveform();
-            var re: [fft_n]f32 = undefined;
-            var im = [_]f32{0} ** fft_n;
-            for (0..fft_n) |i| re[i] = (wave[i] + wave[fft_n + i]) * 0.5 * hann_win[i];
-            fft(&re, &im);
-            var mags: [65]f32 = undefined;
-            for (0..65) |k| mags[k] = @sqrt(re[k] * re[k] + im[k] * im[k]);
+            const mags = spectral.magnitudes(&wave);
 
             // True frequency bands, auto-gained against a slow peak so the
             // conduction gates behave the same at any playback volume.
