@@ -35,7 +35,6 @@ uniform float iWhorlScanbar;
 uniform float iWhorlBass;
 uniform float iWhorlTreble;
 uniform float iWhorlBeat;
-uniform float iWhorlZoom;
 
 out vec4 fragColor;
 
@@ -97,12 +96,7 @@ vec2 cellTrace(ivec2 p) {
 
 void main() {
     vec2 fc = gl_FragCoord.xy;
-    // Kick zoom hits the culture's plane only — the glass (scanlines,
-    // grille, vignette) and the windows hold still, so the pump reads as
-    // parallax depth, and wall slip hides in the shared background color.
-    vec2 ctr = 0.5 * iResolution.xy;
-    vec2 fz = (fc - ctr) / iWhorlZoom + ctr;
-    vec2 g = fz / iCellPx;
+    vec2 g = fc / iCellPx;
     ivec2 ci = ivec2(floor(g));
     vec2 f = fract(g);
 

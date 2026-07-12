@@ -74,10 +74,6 @@ pub const Context = struct {
     calm_ticks: u8 = 0,
 
     // -- CRT filter dials (all safe: no geometry warp, nothing strobes) --
-    /// Peak kick zoom (fraction, e.g. 0.025 = 2.5%). Applied to grid
-    /// sampling only — the glass (scanlines/grille) and walls hold still,
-    /// so it reads as the culture's plane pumping behind the windows.
-    zoom_amt: f32,
     misconv: f32,
     halation: f32,
     vignette: f32,
@@ -95,9 +91,6 @@ pub const Context = struct {
     beat_cooldown: f32 = 0,
     /// Beat envelope: snaps to 1 on a detected downbeat, decays fast.
     beat: f32 = 0,
-    /// Zoom envelope: same trigger, faster release — the zoom punches
-    /// and snaps back while the flash is still fading around it.
-    zoom_env: f32 = 0,
     /// Conduction gates — music wired into the CA rule itself. The state
     /// ring is split into six segments, one per frequency band in order
     /// (sub-bass owns the first states, high treble the last): a flip INTO
@@ -152,7 +145,6 @@ pub const Context = struct {
     loc_bass: c.GLint = -1,
     loc_treble: c.GLint = -1,
     loc_beat: c.GLint = -1,
-    loc_zoom: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
         const cell_px = std.math.clamp(params.getFloat("cell_px", 10.0), 4.0, 64.0);
@@ -217,7 +209,6 @@ pub const Context = struct {
             .kick_depth = @intCast(std.math.clamp(params.getInt("kick_depth", 3), 0, 8)),
             .accent = @floatFromInt(std.math.clamp(params.getInt("accent", 1), -1, 15)),
             .accent2 = @floatFromInt(std.math.clamp(params.getInt("accent2", 2), -1, 15)),
-            .zoom_amt = std.math.clamp(params.getFloat("zoom", 0.035), 0.0, 0.15),
             .misconv = std.math.clamp(params.getFloat("misconverge", 1.5), 0.0, 8.0),
             .halation = std.math.clamp(params.getFloat("halation", 0.6), 0.0, 3.0),
             .vignette = std.math.clamp(params.getFloat("vignette", 0.22), 0.0, 0.8),
@@ -499,13 +490,10 @@ pub const Context = struct {
             if (flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0) {
                 self.beat_cooldown = 0.25;
                 self.beat = 1.0;
-                self.zoom_env = 1.0;
                 if (self.warmed) self.back_left = self.kick_depth;
             }
             self.beat *= @exp(-5.0 * dt);
             if (self.beat < 0.01) self.beat = 0;
-            self.zoom_env *= @exp(-9.0 * dt);
-            if (self.zoom_env < 0.01) self.zoom_env = 0;
 
             // One rule element per spectrum region: each band gates its
             // ring segment; mid density softens the threshold; overall
@@ -604,7 +592,6 @@ pub const Context = struct {
             self.loc_bass = c.glGetUniformLocation(prog.program, "iWhorlBass");
             self.loc_treble = c.glGetUniformLocation(prog.program, "iWhorlTreble");
             self.loc_beat = c.glGetUniformLocation(prog.program, "iWhorlBeat");
-            self.loc_zoom = c.glGetUniformLocation(prog.program, "iWhorlZoom");
         }
 
         if (self.loc_grid >= 0) c.glUniform1i(self.loc_grid, 0);
@@ -622,7 +609,6 @@ pub const Context = struct {
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass_smooth);
         if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble_smooth);
         if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
-        if (self.loc_zoom >= 0) c.glUniform1f(self.loc_zoom, 1.0 + self.zoom_env * self.zoom_env * self.zoom_amt);
     }
 
     pub fn deinit(self: *Context) void {
