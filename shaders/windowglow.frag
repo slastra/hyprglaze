@@ -24,10 +24,18 @@ uniform float iGlowGrainT; // CPU reseed clock (treble quickens it)
 
 out vec4 fragColor;
 
-float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
+// Integer-lattice white noise (pcg3d-style). The usual fract-multiply
+// hashes have short periods on integer inputs — floor(fc/size) fed into
+// one lines the grain up into visible columns.
+float grainHash(vec2 cell, float seed) {
+    uvec3 v = uvec3(uvec2(ivec2(cell) + 8192), uint(seed));
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    return float(v.x & 0x00ffffffu) / 16777216.0;
 }
 
 float sdRoundBox(vec2 p, vec2 center, vec2 half_size, float radius) {
@@ -98,7 +106,7 @@ void main() {
     if (iGlowGrain > 0.0) {
         float seed = floor(iGlowGrainT);
         float size = 1.0 + floor(min(iGlowBass, 1.2) * 1.8);
-        float g = hash21(floor(fc / size) + seed * 17.31) - 0.5;
+        float g = grainHash(floor(fc / size), seed) - 0.5;
         float lift = length(col - bg);
         col += g * iGlowGrain * (0.045 + lift * 0.05) * (1.0 + min(iGlowEnergy, 1.0) * 0.8);
     }
