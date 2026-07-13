@@ -19,11 +19,15 @@ pub const Context = struct {
     an: spectral.Bands = .{},
     /// Film-grain amplitude (config: grain, 0 disables).
     grain: f32,
+    /// Grain reseed clock: ~10fps at rest, treble drives it toward 24fps.
+    /// Accumulated here so the rate change never stutters the sequence.
+    grain_clock: f32 = 0,
 
     cached_program: c.GLuint = 0,
     loc_energy: c.GLint = -1,
     loc_bass: c.GLint = -1,
     loc_grain: c.GLint = -1,
+    loc_grain_t: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) !Context {
         var audio: ?*audio_mod.AudioCapture = null;
@@ -47,6 +51,8 @@ pub const Context = struct {
             const mags = spectral.magnitudes(&wave);
             self.an.update(&mags, dt);
         }
+        const treble = (self.an.smooth[4] + self.an.smooth[5]) * 0.5;
+        self.grain_clock += dt * (10.0 + @min(treble, 1.0) * 14.0);
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
@@ -56,10 +62,12 @@ pub const Context = struct {
             self.loc_energy = c.glGetUniformLocation(prog.program, "iGlowEnergy");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iGlowBass");
             self.loc_grain = c.glGetUniformLocation(prog.program, "iGlowGrain");
+            self.loc_grain_t = c.glGetUniformLocation(prog.program, "iGlowGrainT");
         }
         if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.an.energy_ema);
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, (self.an.smooth[0] + self.an.smooth[1]) * 0.5);
         if (self.loc_grain >= 0) c.glUniform1f(self.loc_grain, self.grain);
+        if (self.loc_grain_t >= 0) c.glUniform1f(self.loc_grain_t, self.grain_clock);
     }
 
     pub fn deinit(self: *Context) void {

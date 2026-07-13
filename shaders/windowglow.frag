@@ -20,6 +20,7 @@ uniform vec3 iPaletteFg;
 uniform float iGlowEnergy; // slow full-mix envelope
 uniform float iGlowBass;   // smoothed low end
 uniform float iGlowGrain;  // film-grain amplitude (0 disables)
+uniform float iGlowGrainT; // CPU reseed clock (treble quickens it)
 
 out vec4 fragColor;
 
@@ -91,11 +92,15 @@ void main() {
     // rounds away to nothing, which is also why real stock noise shows
     // on dark footage. Slightly stronger where the glow lives so the
     // halo reads matte rather than airbrushed.
+    // Music in the stock itself: treble quickens the reseed dance (via
+    // the CPU clock), bass clumps the grain into coarser chunks, and
+    // overall energy makes it grittier. Silence: fine calm 10fps stock.
     if (iGlowGrain > 0.0) {
-        float seed = floor(iTime * 10.0);
-        float g = hash21(fc + seed * 17.31) - 0.5;
+        float seed = floor(iGlowGrainT);
+        float size = 1.0 + floor(min(iGlowBass, 1.2) * 1.8);
+        float g = hash21(floor(fc / size) + seed * 17.31) - 0.5;
         float lift = length(col - bg);
-        col += g * iGlowGrain * (0.045 + lift * 0.05);
+        col += g * iGlowGrain * (0.045 + lift * 0.05) * (1.0 + min(iGlowEnergy, 1.0) * 0.8);
     }
 
     fragColor = vec4(col, 1.0);
