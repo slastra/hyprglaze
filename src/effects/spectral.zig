@@ -77,6 +77,53 @@ pub fn magnitudes(wave: *const [256]f32) [n_bins]f32 {
     return mags;
 }
 
+/// Kick onset detector (whorl's design, generalized): log-compressed
+/// positive spectral flux over the kick bins (60-180Hz full weight,
+/// 180-300Hz half), fired on a rising edge that clears both an adaptive
+/// mean + 2*sigma threshold over the trailing ~1.6s and a 1.5x-mean
+/// relative floor (immune to sigma collapse in steady loud passages).
+/// `beat` snaps to 1 on a hit and decays ~200ms — zero in silence.
+pub const Onset = struct {
+    spec_prev: [n_bins]f32 = [_]f32{0} ** n_bins,
+    hist: [96]f32 = [_]f32{0} ** 96,
+    pos: usize = 0,
+    flux_last: f32 = 0,
+    cooldown: f32 = 0,
+    beat: f32 = 0,
+
+    pub fn update(self: *Onset, mags: *const [n_bins]f32, dt: f32, sub_level: f32) void {
+        var flux: f32 = 0;
+        for (1..5) |k| {
+            const d = std.math.log1p(mags[k]) - std.math.log1p(self.spec_prev[k]);
+            if (d > 0) flux += d * (if (k < 3) @as(f32, 1.0) else 0.5);
+        }
+        for (0..n_bins) |k| self.spec_prev[k] = mags[k];
+
+        var mean: f32 = 0;
+        for (self.hist) |v| mean += v;
+        mean /= @as(f32, self.hist.len);
+        var variance: f32 = 0;
+        for (self.hist) |v| variance += (v - mean) * (v - mean);
+        const sigma = @sqrt(variance / @as(f32, self.hist.len));
+        self.hist[self.pos] = flux;
+        self.pos = (self.pos + 1) % self.hist.len;
+
+        self.cooldown -= dt;
+        const rising = flux > self.flux_last;
+        self.flux_last = flux;
+        if (self.cooldown <= 0 and rising and
+            flux > mean + 2.0 * sigma and
+            flux > mean * 1.5 and
+            flux > 0.015 and sub_level > 0.25)
+        {
+            self.cooldown = 0.18;
+            self.beat = 1.0;
+        }
+        self.beat *= @exp(-5.0 * dt);
+        if (self.beat < 0.01) self.beat = 0;
+    }
+};
+
 /// Six auto-gained bands plus common aggregates. Silence-safe: with no
 /// signal every value decays to zero, so effects gating their music
 /// response on these fall back to their exact no-music look.

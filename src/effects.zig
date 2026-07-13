@@ -90,7 +90,8 @@ pub const Effect = union(enum) {
             const params = config_mod.effectParams(cfg, "buddy");
             return .{ .ai_buddy = ai_buddy.Context.init(allocator, width, height, params) };
         } else if (std.mem.eql(u8, name, "cellbloom")) {
-            return .{ .cellbloom = cellbloom.Context.init() };
+            const params = config_mod.effectParams(cfg, "cellbloom");
+            return .{ .cellbloom = try cellbloom.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "concentric")) {
             return .{ .concentric = concentric.Context.init() };
         } else if (std.mem.eql(u8, name, "fluid")) {
