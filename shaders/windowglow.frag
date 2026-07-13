@@ -16,6 +16,10 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
+// Music breath (both zero in silence / music = false → classic look).
+uniform float iGlowEnergy; // slow full-mix envelope
+uniform float iGlowBass;   // smoothed low end
+
 out vec4 fragColor;
 
 float sdRoundBox(vec2 p, vec2 center, vec2 half_size, float radius) {
@@ -51,13 +55,17 @@ void main() {
         if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
 
         // Focused glow: accent, wider radius, stronger at focus_amt=1.
+        // Music makes only this halo breathe — the energy envelope swells
+        // its reach and depth, a whisper of bass pulses it like a candle.
+        // Unfocused windows never react; silence renders the classic look.
+        float breathe = 1.0 + min(iGlowEnergy, 1.0) * 0.45 + min(iGlowBass, 1.2) * 0.2;
         vec3 focused_col = col;
         if (dist <= 0.0) {
             focused_col = mix(col, accent, 0.25);
         } else {
-            float glow_radius = 30.0 + focus_amt * 30.0;
+            float glow_radius = (30.0 + focus_amt * 30.0) * (1.0 + min(iGlowEnergy, 1.0) * 0.5);
             float glow = exp(-dist / glow_radius);
-            focused_col = mix(col, accent, glow * 0.3);
+            focused_col = mix(col, accent, min(glow * 0.3 * breathe, 0.5));
         }
 
         // Unfocused glow: surface tint, tight edge halo only.

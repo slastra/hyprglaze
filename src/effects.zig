@@ -78,7 +78,8 @@ pub const Effect = union(enum) {
             const params = config_mod.effectParams(cfg, "particles");
             return .{ .particles = particles.Context.init(allocator, width, height, params) };
         } else if (std.mem.eql(u8, name, "windowglow")) {
-            return .{ .windowglow = windowglow.Context.init() };
+            const params = config_mod.effectParams(cfg, "windowglow");
+            return .{ .windowglow = try windowglow.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "glitch")) {
             const params = config_mod.effectParams(cfg, "glitch");
             return .{ .glitch = try glitch.Context.init(allocator, params) };
