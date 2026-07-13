@@ -98,7 +98,8 @@ pub const Effect = union(enum) {
             const params = config_mod.effectParams(cfg, "fluid");
             return .{ .fluid = try fluid.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "aurora")) {
-            return .{ .aurora = aurora.Context.init() };
+            const params = config_mod.effectParams(cfg, "aurora");
+            return .{ .aurora = try aurora.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "starfield")) {
             const params = config_mod.effectParams(cfg, "visualizer");
             return .{ .starfield = try starfield.Context.init(allocator, params) };

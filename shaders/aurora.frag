@@ -16,6 +16,11 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
+// Music (zero in silence / music = false → the calm night).
+uniform float iAuroraFlow;      // CPU pace clock, quickens with energy
+uniform float iAuroraEnergy;    // slow full-mix envelope
+uniform float iAuroraLayers[3]; // band groups: lows, mids, highs
+
 out vec4 fragColor;
 
 // Smooth noise
@@ -59,14 +64,29 @@ void main() {
     vec2 uv = fc / iResolution.xy;
 
     vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.01, 0.01, 0.02);
+    vec3 fg = (iPaletteSize > 0) ? iPaletteFg : vec3(0.85);
     vec3 col = bg;
 
-    float t = iTime * 0.15;
+    float t = iAuroraFlow;
 
-    // Vertical gradient — aurora concentrated in upper 70%
-    float vert = smoothstep(0.0, 0.7, uv.y);
+    // Aurora ramp in theme tones: pine depths, foam body, iris ray tips,
+    // a whisper of love at the bottom fringe. Never averaged — a real
+    // emission gradient, applied additively over a dark sky.
+    vec3 deep = (iPaletteSize > 4) ? iPalette[4] : vec3(0.10, 0.35, 0.30);
+    vec3 body = (iPaletteSize > 2) ? iPalette[2] : vec3(0.35, 0.80, 0.65);
+    vec3 tips = (iPaletteSize > 5) ? iPalette[5] : vec3(0.55, 0.45, 0.85);
+    vec3 fringe = (iPaletteSize > 1) ? iPalette[1] : vec3(0.9, 0.4, 0.55);
 
-    // Window proximity — aurora brightens and bends near windows
+    // Sparse stars, twinkling far too slowly to flicker; the night the
+    // curtains hang in.
+    vec2 sc = floor(fc / 4.0);
+    float sh = fract(sin(dot(sc, vec2(12.9898, 78.233))) * 43758.5453);
+    if (sh > 0.9968) {
+        float tw = 0.7 + 0.3 * sin(t * 1.7 + sh * 60.0);
+        col += fg * ((sh - 0.9968) / 0.0032) * 0.14 * tw * smoothstep(0.3, 0.75, uv.y);
+    }
+
+    // Window proximity — curtains brighten and bend near windows
     float wd = windowSDF(fc);
     float win_influence = exp(-wd * 0.005);
 
@@ -74,59 +94,62 @@ void main() {
     float cursor_dist = length(fc - iMouse.xy);
     float cursor_warp = exp(-cursor_dist * 0.003) * 30.0;
 
-    // Build aurora curtains — multiple overlapping layers
-    float aurora_total = 0.0;
-    vec3 aurora_color = vec3(0.0);
-
-    for (int layer = 0; layer < 4; layer++) {
+    // Three curtain arcs, back to front. Each: a slowly wandering base
+    // line across the sky, tall vertical ray striations above it with a
+    // crisp lower edge, folded like fabric by a slow domain warp.
+    vec3 acc = vec3(0.0);
+    for (int layer = 0; layer < 3; layer++) {
         float fl = float(layer);
-        float speed = 0.3 + fl * 0.15;
-        float freq = 1.5 + fl * 0.7;
-        float phase = fl * 1.7;
+        float band = min(iAuroraLayers[layer], 1.2);
 
-        // Horizontal wave — the curtain shape
-        float wave_x = uv.x * freq + t * speed + phase;
-        wave_x += sin(uv.y * 3.0 + t * 0.5 + fl) * 0.3;
-        wave_x += cursor_warp * 0.003 * sin(uv.y * 2.0 + fl);
+        // Folded x: fabric folds travel slowly; windows and cursor bend them.
+        float xw = uv.x
+            + 0.10 * (fbm(uv.y * (1.8 + fl * 0.5) + t * (0.22 + fl * 0.07) + fl * 7.0) - 0.5) * 2.0
+            + win_influence * 0.05 * sin(uv.y * 5.0 + t + fl * 2.0)
+            + cursor_warp * 0.002 * sin(uv.y * 2.0 + fl);
 
-        // Window bending — aurora wraps around windows
-        wave_x += win_influence * sin(uv.y * 5.0 + t + fl * 2.0) * 0.4;
+        // Arc base height: back layers hang higher, all wander slowly.
+        float yb = 0.38 + fl * 0.16
+            + 0.11 * (fbm(xw * 1.4 + t * 0.12 + fl * 3.1) - 0.5) * 2.0;
+        float h = uv.y - yb;
 
-        // Curtain intensity from fbm
-        float curtain = fbm(wave_x * 3.0 + t * 0.2);
-        curtain = smoothstep(0.3, 0.7, curtain);
+        // Vertical ray striations along the curtain.
+        float rays = fbm(xw * (15.0 + fl * 6.0) + fl * 11.0);
+        rays = pow(smoothstep(0.28, 0.85, rays), 1.4);
 
-        // Vertical shimmer
-        float shimmer = fbm(uv.y * 8.0 + t * 1.5 + fl * 3.0);
-        shimmer = smoothstep(0.35, 0.65, shimmer);
+        // Slow luminous waves sweeping along the arc.
+        float sweep = 0.4 + 0.6 * (0.5 + 0.5 * sin(xw * 6.0 - t * (0.8 + fl * 0.25) + fl * 2.3));
 
-        float intensity = curtain * shimmer * vert;
+        // Profile: crisp bottom edge, ray-length fade above. Music energy
+        // and this layer's band group stretch the rays taller.
+        float raylen = (0.09 + 0.30 * rays) * (1.0 + iAuroraEnergy * 0.6 + band * 0.4);
+        float prof = smoothstep(-0.012, 0.012, h) * exp(-max(h, 0.0) / raylen);
 
-        // Brighter near windows
-        intensity *= 1.0 + win_influence * 1.5;
+        float inten = prof * (0.20 + 0.80 * rays) * sweep
+            * (1.0 + win_influence * 0.6) * (1.0 + band * 0.5);
 
-        // Focused window crown
+        // Focused window crown: the curtain gathers over the focused window.
         if (iWindow.z > 0.0) {
             vec2 fw_top = vec2(iWindow.x + iWindow.z * 0.5, iWindow.y + iWindow.w);
-            float crown_dist = length(fc - fw_top);
-            float crown = exp(-crown_dist * 0.003) * 0.5;
-            crown *= smoothstep(0.0, 1.0, iTransition);
-            intensity += crown * curtain;
+            float crown = exp(-length(fc - fw_top) * 0.003) * 0.5;
+            inten += crown * rays * smoothstep(0.0, 1.0, iTransition) * prof;
         }
 
-        // Color from palette — each layer picks a different chromatic color
-        int ci = 1 + (layer * 2) % 6;
-        vec3 layer_col = (iPaletteSize > ci) ? iPalette[ci] : vec3(0.2, 0.8, 0.4);
+        // Emission ramp: pine->foam body by ray strength, iris toward the
+        // fading tips, love only in the thin bottom fringe. Rosé Pine's
+        // pastels wash gray under additive blending, so the ramp leans on
+        // pine's saturation and the whole emission gets a chroma push.
+        float ht = clamp(h / max(raylen * 2.0, 1e-3), 0.0, 1.0);
+        vec3 cc = mix(mix(deep, body, 0.15 + 0.55 * rays), tips, ht * 0.5);
+        cc += fringe * smoothstep(-0.012, 0.008, h) * exp(-max(h, 0.0) / 0.025) * 0.4;
+        float lum = dot(cc, vec3(0.299, 0.587, 0.114));
+        cc = max(mix(vec3(lum), cc, 1.5), 0.0);
 
-        aurora_total += intensity * (0.7 - fl * 0.1);
-        aurora_color += layer_col * intensity * (0.7 - fl * 0.1);
+        acc += cc * inten * (1.0 - fl * 0.22);
     }
 
-    // Normalize and apply
-    if (aurora_total > 0.001) {
-        vec3 final_aurora = aurora_color / aurora_total;
-        col = mix(col, final_aurora, aurora_total * 0.6);
-    }
+    // Additive glow over the dark sky — never normalized, never fog.
+    col += acc * 0.70;
 
     // Subtle window outlines
     for (int i = 0; i < iWindowCount && i < 32; i++) {
