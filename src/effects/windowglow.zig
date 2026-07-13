@@ -17,10 +17,13 @@ pub const Context = struct {
     allocator: std.mem.Allocator,
     audio: ?*audio_mod.AudioCapture,
     an: spectral.Bands = .{},
+    /// Film-grain amplitude (config: grain, 0 disables).
+    grain: f32,
 
     cached_program: c.GLuint = 0,
     loc_energy: c.GLint = -1,
     loc_bass: c.GLint = -1,
+    loc_grain: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) !Context {
         var audio: ?*audio_mod.AudioCapture = null;
@@ -30,7 +33,11 @@ pub const Context = struct {
             cap.start();
             audio = cap;
         }
-        return .{ .allocator = allocator, .audio = audio };
+        return .{
+            .allocator = allocator,
+            .audio = audio,
+            .grain = std.math.clamp(params.getFloat("grain", 0.5), 0.0, 2.0),
+        };
     }
 
     pub fn update(self: *Context, state: effects.FrameState) void {
@@ -48,9 +55,11 @@ pub const Context = struct {
             self.cached_program = prog.program;
             self.loc_energy = c.glGetUniformLocation(prog.program, "iGlowEnergy");
             self.loc_bass = c.glGetUniformLocation(prog.program, "iGlowBass");
+            self.loc_grain = c.glGetUniformLocation(prog.program, "iGlowGrain");
         }
         if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.an.energy_ema);
         if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, (self.an.smooth[0] + self.an.smooth[1]) * 0.5);
+        if (self.loc_grain >= 0) c.glUniform1f(self.loc_grain, self.grain);
     }
 
     pub fn deinit(self: *Context) void {

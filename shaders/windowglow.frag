@@ -19,8 +19,15 @@ uniform vec3 iPaletteFg;
 // Music breath (both zero in silence / music = false → classic look).
 uniform float iGlowEnergy; // slow full-mix envelope
 uniform float iGlowBass;   // smoothed low end
+uniform float iGlowGrain;  // film-grain amplitude (0 disables)
 
 out vec4 fragColor;
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
 
 float sdRoundBox(vec2 p, vec2 center, vec2 half_size, float radius) {
     vec2 d = abs(p - center) - half_size + radius;
@@ -76,6 +83,16 @@ void main() {
         }
 
         col = mix(unfocused_col, focused_col, focus_amt);
+    }
+
+    // Film grain: fine luminance-only noise, reseeded at ~10fps like
+    // film stock — texture, not shimmer. Slightly stronger where the
+    // glow lives so the halo reads matte rather than airbrushed.
+    if (iGlowGrain > 0.0) {
+        float seed = floor(iTime * 10.0);
+        float g = hash21(fc + seed * 17.31) - 0.5;
+        float lift = length(col - bg);
+        col *= 1.0 + g * iGlowGrain * (0.035 + lift * 0.10);
     }
 
     fragColor = vec4(col, 1.0);
