@@ -51,16 +51,25 @@ void main() {
     // --- Voronoi with focus interaction ---
     // Every cell owner carries a spectral band; the winning cell's band
     // level drives its fill below (the dancefloor).
+    // Bubbly domain wobble: the Voronoi is sampled through a slow sine
+    // warp, so every cell wall undulates like a soap film. Paced by the
+    // music flow clock; a few px is enough.
+    vec2 wfc = fc + vec2(
+        sin(fc.y * 0.013 + iBloomFlow * 2.2),
+        cos(fc.x * 0.011 + iBloomFlow * 1.8)) * 5.0;
+
     float d1 = 1e9, d2 = 1e9;
     vec3 c1 = bg, c2 = bg;
     float nearest_focus_amt = 0.0;
     float cell_pulse = 0.0;
+    // Winning point's position for the gloss highlight; windows opt out.
+    vec2 p1 = vec2(-1e6);
 
     for (int i = 0; i < iWindowCount && i < 32; i++) {
         vec4 win = iWindows[i];
         if (win.z < 1.0 || win.w < 1.0) continue;
 
-        float d = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, 12.0);
+        float d = sdRoundBox(wfc, win.xy + win.zw * 0.5, win.zw * 0.5, 12.0);
 
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
@@ -77,18 +86,20 @@ void main() {
             d1 = d;  c1 = tint;
             nearest_focus_amt = focus_amt;
             cell_pulse = iBloomBands[ci];
+            p1 = vec2(-1e6);
         } else if (d < d2) {
             d2 = d;  c2 = tint;
         }
     }
 
     // Cursor control point
-    float cursor_d = distance(fc, iMouse.xy);
+    float cursor_d = distance(wfc, iMouse.xy);
     if (cursor_d < d1) {
         d2 = d1; c2 = c1;
         d1 = cursor_d; c1 = accent * 0.4;
         nearest_focus_amt = 0.0;
         cell_pulse = 0.0;
+        p1 = iMouse.xy;
     } else if (cursor_d < d2) {
         d2 = cursor_d; c2 = accent * 0.4;
     }
@@ -103,7 +114,7 @@ void main() {
         float px = fract(fi * 0.381966) + wander * sin(t * (0.5 + fi * 0.11));
         float py = fract(fi * 0.618034) + wander * cos(t * (0.4 + fi * 0.13));
         vec2 dp = iResolution.xy * vec2(clamp(px, 0.02, 0.98), clamp(py, 0.02, 0.98));
-        float d = distance(fc, dp);
+        float d = distance(wfc, dp);
         int ci = int(mod(fi + 3.0, 6.0));
         vec3 tint = pal[ci] * 0.3;
         if (d < d1) {
@@ -111,25 +122,38 @@ void main() {
             d1 = d;  c1 = tint;
             nearest_focus_amt = 0.0;
             cell_pulse = iBloomBands[int(mod(fi, 6.0))];
+            p1 = dp;
         } else if (d < d2) {
             d2 = d;  c2 = tint;
         }
     }
 
-    // --- Cell fill: the dancefloor ---
+    // --- Cell fill: the dancefloor, domed ---
     // Resting fill is the classic whisper; a cell whose band is playing
-    // floods with its own tint, hard.
+    // floods with its own tint. The dome term lifts interiors toward
+    // their middles and lets them fall to a thin dark rim — cushions,
+    // not flat tiles.
+    float edge_dist = d2 - d1;
+    float dome = smoothstep(0.0, 50.0, edge_dist);
     float fill = exp(-max(d1, 0.0) / 120.0);
     float lit = mix(0.03, 0.06, nearest_focus_amt) + min(cell_pulse, 1.2) * 0.30;
-    col = mix(col, c1, fill * min(lit, 0.42));
+    col = mix(col, c1, fill * min(lit, 0.42) * (0.45 + 0.55 * dome));
 
-    // --- Sharp cell edge lines ---
-    // Kicks flash the whole lattice: brighter and momentarily wider.
-    float edge_dist = d2 - d1;
+    // Gloss: a soft specular spot offset from each point-owned bubble's
+    // center, like light on a soap film; kicks glint it brighter.
+    if (p1.x > -1e5) {
+        vec2 hp = p1 + vec2(-55.0, 65.0);
+        float gd = distance(fc, hp);
+        float gloss = exp(-gd * gd / 1800.0);
+        col += (accent + vec3(0.25)) * gloss * (0.09 + iBloomBeat * 0.12) * dome;
+    }
+
+    // --- Cell walls: soap films ---
+    // Softer and wider than the old hard lines; kicks flash the whole
+    // lattice brighter and momentarily wider.
     vec3 edge_color = mix(c1, c2, 0.5);
-
-    float line = 1.0 - smoothstep(0.0, 3.0 + iBloomBeat * 4.0, edge_dist);
-    col = mix(col, edge_color, min(line * (0.6 + iBloomBeat * 0.4), 0.95));
+    float line = 1.0 - smoothstep(0.0, 5.0 + iBloomBeat * 4.0, edge_dist);
+    col = mix(col, edge_color, min(line * (0.5 + iBloomBeat * 0.4), 0.9));
 
     // --- Cursor proximity boost ---
     float cursor_dist = distance(fc, iMouse.xy);
