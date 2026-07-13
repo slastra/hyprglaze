@@ -86,13 +86,16 @@ void main() {
     }
 
     // Film grain: fine luminance-only noise, reseeded at ~10fps like
-    // film stock — texture, not shimmer. Slightly stronger where the
-    // glow lives so the halo reads matte rather than airbrushed.
+    // film stock — texture, not shimmer. ADDITIVE, not multiplicative:
+    // scaling a near-black surface by ±2% lands below one 8-bit step and
+    // rounds away to nothing, which is also why real stock noise shows
+    // on dark footage. Slightly stronger where the glow lives so the
+    // halo reads matte rather than airbrushed.
     if (iGlowGrain > 0.0) {
         float seed = floor(iTime * 10.0);
         float g = hash21(fc + seed * 17.31) - 0.5;
         float lift = length(col - bg);
-        col *= 1.0 + g * iGlowGrain * (0.035 + lift * 0.10);
+        col += g * iGlowGrain * (0.045 + lift * 0.05);
     }
 
     fragColor = vec4(col, 1.0);
