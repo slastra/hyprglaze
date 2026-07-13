@@ -26,7 +26,6 @@ A Wayland wallpaper daemon for Hyprland that renders GLSL fragment shaders and m
 | `cellbloom` | Voronoi cells shaped by window boundaries and cursor, animated drift points |
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
-| `aurora` | Northern lights curtains that drape and bend around windows, cursor distortion |
 | `starfield` | Radial starfield with audio-reactive speed, per-band star colors, beat pulses |
 | `visualizer` | Stereo waveform with Catmull-Rom interpolation, amplitude-driven palette colors |
 | `milkdrop` | Feedback-loop visualizer with kaleidoscope, beat detection, FBO pipeline |
@@ -63,9 +62,9 @@ zig build run
 `~/.config/hypr/hyprglaze.toml`:
 
 ```toml
-# Effects: particles, windowglow, cellbloom, concentric, fluid, aurora,
-#          starfield, visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire,
-#          swarm, voltaic, moire, fable, ivy, whorl
+# Effects: particles, windowglow, cellbloom, concentric, fluid, starfield,
+#          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
+#          voltaic, moire, fable, ivy, whorl
 effect = "fluid"
 theme = "Rosé Pine"
 
