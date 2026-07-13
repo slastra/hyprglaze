@@ -141,7 +141,7 @@ pub const libc = struct {
 
 /// Auto-detect the user's default PulseAudio sink and write its `.monitor`
 /// source name into `buf`. Returns the length, or 0 on failure.
-/// Shared by visualizer/audio.zig and meshflow/beatnet.zig.
+/// Used by visualizer/audio.zig.
 pub fn autoDetectPulseMonitor(buf: *[256]u8) u16 {
     const stream = libc.popen("pactl get-default-sink 2>/dev/null", "r") orelse return 0;
     defer _ = libc.pclose(stream);

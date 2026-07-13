@@ -22,15 +22,11 @@ const buddy = @import("effects/buddy/context.zig");
 const ai_buddy = @import("effects/ai_buddy/context.zig");
 const tide = @import("effects/tide.zig");
 const fire = @import("effects/fire.zig");
-const meshflow = @import("effects/meshflow/context.zig");
 const swarm = @import("effects/swarm/context.zig");
 const voltaic = @import("effects/voltaic.zig");
 const moire = @import("effects/moire.zig");
 const fable = @import("effects/fable.zig");
-const quill = @import("effects/quill.zig");
 const ivy = @import("effects/ivy.zig");
-const sol = @import("effects/sol.zig");
-const mycelium = @import("effects/mycelium.zig");
 const whorl = @import("effects/whorl.zig");
 
 pub const WindowInfo = struct {
@@ -70,15 +66,11 @@ pub const Effect = union(enum) {
     milkdrop: milkdrop.Context,
     tide: tide.Context,
     fire: fire.Context,
-    meshflow: meshflow.Context,
     swarm: swarm.Context,
     voltaic: voltaic.Context,
     moire: moire.Context,
     fable: fable.Context,
-    quill: quill.Context,
     ivy: ivy.Context,
-    sol: sol.Context,
-    mycelium: mycelium.Context,
     whorl: whorl.Context,
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
@@ -119,9 +111,6 @@ pub const Effect = union(enum) {
             return .{ .tide = tide.Context.init(params) };
         } else if (std.mem.eql(u8, name, "fire")) {
             return .{ .fire = fire.Context.init() };
-        } else if (std.mem.eql(u8, name, "meshflow")) {
-            const params = config_mod.effectParams(cfg, "meshflow");
-            return .{ .meshflow = try meshflow.Context.init(allocator, params) };
         } else if (std.mem.eql(u8, name, "swarm")) {
             const params = config_mod.effectParams(cfg, "swarm");
             return .{ .swarm = try swarm.Context.init(allocator, width, height, params) };
@@ -134,18 +123,9 @@ pub const Effect = union(enum) {
         } else if (std.mem.eql(u8, name, "fable")) {
             const params = config_mod.effectParams(cfg, "fable");
             return .{ .fable = try fable.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "quill")) {
-            const params = config_mod.effectParams(cfg, "quill");
-            return .{ .quill = try quill.Context.init(allocator, width, height, params) };
         } else if (std.mem.eql(u8, name, "ivy")) {
             const params = config_mod.effectParams(cfg, "ivy");
             return .{ .ivy = try ivy.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "sol")) {
-            const params = config_mod.effectParams(cfg, "sol");
-            return .{ .sol = try sol.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "mycelium")) {
-            const params = config_mod.effectParams(cfg, "mycelium");
-            return .{ .mycelium = try mycelium.Context.init(allocator, width, height, params) };
         } else if (std.mem.eql(u8, name, "whorl")) {
             const params = config_mod.effectParams(cfg, "whorl");
             return .{ .whorl = try whorl.Context.init(allocator, width, height, params) };
@@ -188,15 +168,11 @@ pub const Effect = union(enum) {
             .milkdrop => "shaders/milkdrop.frag",
             .tide => "shaders/tide.frag",
             .fire => "shaders/fire.frag",
-            .meshflow => "shaders/meshflow.frag",
             .swarm => "shaders/swarm.frag",
             .voltaic => "shaders/voltaic.frag",
             .moire => "shaders/moire.frag",
             .fable => "shaders/fable.frag",
-            .quill => "shaders/quill.frag",
             .ivy => "shaders/ivy.frag",
-            .sol => "shaders/sol.frag",
-            .mycelium => "shaders/mycelium.frag",
             .whorl => "shaders/whorl.frag",
         };
     }
