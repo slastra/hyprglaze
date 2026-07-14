@@ -15,8 +15,8 @@ uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
 // Ivy geometry from ivy.zig, rebuilt every frame.
-uniform vec4 iSegs[480];   // stem segments (x1, y1, x2, y2)
-uniform vec4 iSegB[120];   // per-segment brightness, packed 4 per vec4
+uniform vec4 iSegs[360];   // stem segments (x1, y1, x2, y2)
+uniform vec4 iSegB[90];    // per-segment brightness, packed 4 per vec4
 uniform int iSegCount;
 uniform vec4 iLeaf[200];   // (x, y, angle, size)
 uniform int iLeafCount;
@@ -112,7 +112,7 @@ void main() {
     vec3 light = vec3(0.0);
 
     // ---- stems: thin glowing tendrils, the growing tip brightest ----
-    for (int i = 0; i < iSegCount && i < 480; i++) {
+    for (int i = 0; i < iSegCount && i < 360; i++) {
         vec4 s = iSegs[i];
         vec2 lo = min(s.xy, s.zw) - 40.0;
         vec2 hi = max(s.xy, s.zw) + 40.0;
