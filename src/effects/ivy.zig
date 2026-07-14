@@ -278,9 +278,17 @@ pub const Context = struct {
             @sin(self.now * 1.2 + s * 0.05 + v.seed) * sway_amp;
         const l = if (v.inward) -@max(lift, 1.5) else @max(lift, 1.5);
         // Wilt: dying vines droop earthward, tips first (quadratic
-        // ease-in so early death barely sags, then lets go).
+        // ease-in over time so early death barely sags, then lets go).
+        // The droop SHAPE depends on the run's orientation, read off the
+        // edge normal: horizontal runs bend like a cantilever (deflection
+        // ~ s^2, staying rooted near the anchor and curving away at the
+        // tip), vertical climbs just slump gently — a linear drop there
+        // reads as sliding down the wall, which already looks right.
         const wilt = @min(v.dying / vine_die_secs, 1.0);
-        const sag = wilt * wilt * (8.0 + s * 0.35);
+        const horiz = @abs(hit.normal[1]);
+        const bend = @min(s * s * 0.0022, 130.0);
+        const slide = 8.0 + s * 0.35;
+        const sag = wilt * wilt * (horiz * bend + (1.0 - horiz) * slide);
         return .{ hit.pos[0] + hit.normal[0] * l, hit.pos[1] + hit.normal[1] * l - sag };
     }
 
@@ -317,8 +325,10 @@ pub const Context = struct {
             bend * s * s +
             @sin(self.now * 1.4 + s * 0.06 + v.seed) * sway_amp;
         // Branch wilt compounds with the parent's sag — tips droop most.
+        // Branches hang in free space, so they always bend cantilever-
+        // style rather than shearing down as a straight line.
         const wilt = @min(v.dying / vine_die_secs, 1.0);
-        const sag = wilt * wilt * (6.0 + s * 0.3);
+        const sag = wilt * wilt * (4.0 + @min(s * s * 0.0028, 110.0));
         return .{ attach[0] + ux * s + px * off, attach[1] + uy * s + py * off - sag };
     }
 
