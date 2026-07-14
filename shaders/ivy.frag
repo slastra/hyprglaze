@@ -106,7 +106,7 @@ void main() {
     // Night-garden backdrop: dark bg with a whisper of moss toward the
     // bottom, as if the foliage lights the ground it grows from.
     float vig = 1.0 - 0.35 * length(uv - 0.5);
-    vec3 col = bg * (0.85 * vig + iBass * 0.04);
+    vec3 col = bg * (0.85 * vig + iBass * 0.02);
     col += leaf_c * (1.0 - uv.y) * (1.0 - uv.y) * 0.020;
 
     vec3 light = vec3(0.0);
@@ -127,7 +127,7 @@ void main() {
 
         // Width follows brightness (voltaic pattern): dim child shoots and
         // fading vines are also thinner, so generations taper naturally.
-        float w = (0.55 + 0.65 * min(b, 1.0)) * (1.0 + iBass * 0.35);
+        float w = (0.55 + 0.65 * min(b, 1.0)) * (1.0 + iBass * 0.15);
         // Bias-subtracted so the reject box never shows as a square edge.
         float cut = exp(-40.0 * 0.35 / w);
         light += stem_c * (exp(-d * 0.35 / w) - cut) * b * 0.45;
@@ -145,7 +145,7 @@ void main() {
         vec2 q = vec2(ca * dp.x + sa * dp.y, -sa * dp.x + ca * dp.y);
         vec2 lf = leafShape(q, L.w);
         float tw = 0.85 + 0.15 * sin(iIvyTime * 2.6 + float(i) * 1.7);
-        float shine = tw * (0.55 + iTreble * 0.6);
+        float shine = tw * (0.55 + iTreble * 0.3);
         // Age varies the green: young (small) leaves lighter yellow-green,
         // mature blades deep and solid — like the reference photo.
         float young = clamp(1.3 - L.w / 9.0, 0.0, 0.8);
@@ -177,8 +177,8 @@ void main() {
     // Soft Reinhard so dense foliage stays colored instead of clipping.
     col += light * iBright / (1.0 + 0.35 * light * iBright);
 
-    // Beat: the garden breathes.
-    col += leaf_c * iBeat * 0.03 * vig;
+    // Beat: the garden breathes, barely.
+    col += leaf_c * iBeat * 0.015 * vig;
 
     // Fine grain so the dark field never looks flat.
     col += (hash21(fc + fract(iIvyTime) * 100.0) - 0.5) * 0.012;

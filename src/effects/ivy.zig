@@ -3,6 +3,7 @@ const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
 const audio_mod = @import("visualizer/audio.zig");
+const spectral = @import("spectral.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -177,17 +178,11 @@ pub const Context = struct {
     // in organically instead of snapping with the raw rect.
     smooth_cache: [max_windows]SmoothWin = [_]SmoothWin{.{}} ** max_windows,
 
-    // Audio analysis (voltaic pattern).
-    bands: [6]f32 = [_]f32{0} ** 6,
-    bass: f32 = 0,
-    mid: f32 = 0,
-    treble: f32 = 0,
-    energy: f32 = 0,
-    bass_smooth: f32 = 0,
-    bass_prev: f32 = 0,
-    flux_avg: f32 = 0,
-    beat: f32 = 0,
-    beat_cooldown: f32 = 0,
+    // Audio analysis: shared spectral front-end (real FFT bands + AGC).
+    // Only the SLOW envelopes drive the garden — it breathes, never twitches.
+    an: spectral.Bands = .{},
+    onset: spectral.Onset = .{},
+    beat_prev: f32 = 0,
 
     growth: f32 = 1.0,
     brightness: f32 = 1.0,
@@ -267,7 +262,7 @@ pub const Context = struct {
     /// by an organic meander, swaying more toward the free tip.
     fn trunkPoint(self: *const Context, rect: shader_mod.ShaderProgram.WindowRect, v: *const Vine, s: f32) [2]f32 {
         const hit = perimeterAt(rect, v.t0 + v.dir * s);
-        const sway_amp = (1.5 + self.energy * 7.0) * @min(s / 140.0, 1.0);
+        const sway_amp = (1.5 + self.an.energy_ema * 3.0) * @min(s / 140.0, 1.0);
         // Three incommensurate meander frequencies with a per-vine
         // amplitude so no two vines wander with the same rhythm.
         const amp_v = 0.8 + fhash(v.seed, 0.29) * 0.5;
@@ -311,7 +306,7 @@ pub const Context = struct {
         const px = -uy;
         const py = ux;
         const bend = (@mod(v.seed * 0.37, 1.0) - 0.5) * 2.0 * 0.0032;
-        const sway_amp = (1.5 + self.energy * 7.0) * @min(s / 90.0, 1.0);
+        const sway_amp = (1.5 + self.an.energy_ema * 3.0) * @min(s / 90.0, 1.0);
         const off = @sin(s * 0.05 + v.seed * 3.0) * 7.0 +
             @sin(s * 0.013 + v.seed * 1.3) * 16.0 * (s / @max(v.target, 1.0)) +
             bend * s * s +
@@ -454,39 +449,13 @@ pub const Context = struct {
         self.now += dt;
         const r = self.rng.random();
 
-        // ---- audio analysis (voltaic band split + flux beats) ----
+        // ---- audio analysis: real FFT bands, adaptive onset ----
         const wave = self.audio.getWaveform();
-        const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
-        for (0..6) |bi| {
-            var en: f32 = 0;
-            const lo = ranges[bi][0];
-            const hi = ranges[bi][1];
-            for (lo..hi) |j| en += @abs(wave[j]) + @abs(wave[128 + j]);
-            en /= @floatFromInt((hi - lo) * 2);
-            const raw = en * 6.0;
-            const attack = @min(1.0, 25.0 * dt);
-            const decay = @min(1.0, 5.0 * dt);
-            self.bands[bi] += (raw - self.bands[bi]) * (if (raw > self.bands[bi]) attack else decay);
-        }
-        self.bass = (self.bands[0] + self.bands[1]) * 0.5;
-        self.mid = (self.bands[2] + self.bands[3]) * 0.5;
-        self.treble = (self.bands[4] + self.bands[5]) * 0.5;
-        self.energy = (self.bands[0] + self.bands[1] + self.bands[2] +
-            self.bands[3] + self.bands[4] + self.bands[5]) / 6.0;
-
-        self.bass_smooth += (self.bass - self.bass_smooth) * @min(1.0, 0.8 * dt);
-        const flux = @max(0.0, self.bass - self.bass_prev);
-        self.bass_prev = self.bass;
-        self.flux_avg += (flux - self.flux_avg) * @min(1.0, 1.5 * dt);
-        self.beat_cooldown -= dt;
-        var beat_hit = false;
-        if (flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0 and self.bass > self.bass_smooth * 1.5) {
-            self.beat = 1.0;
-            self.beat_cooldown = 0.25;
-            beat_hit = true;
-        }
-        self.beat *= @exp(-4.0 * dt);
-        if (self.beat < 0.01) self.beat = 0;
+        const mags = spectral.magnitudes(&wave);
+        self.an.update(&mags, dt);
+        self.onset.update(&mags, dt, self.an.bands[0]);
+        const beat_hit = self.onset.beat > self.beat_prev;
+        self.beat_prev = self.onset.beat;
 
         // ---- cache windows + focused center ----
         self.win_cache_count = 0;
@@ -662,7 +631,7 @@ pub const Context = struct {
             // Silence -> a slow creep; music feeds the garden. Each vine has
             // its own vigor so the canopy fills in unevenly, like a plant.
             const vigor = 0.75 + fhash(v.seed, 0.53) * 0.5;
-            v.dl = @min(v.dl + dt * self.growth * tend * vigor * (16.0 + self.energy * 90.0), v.target);
+            v.dl = @min(v.dl + dt * self.growth * tend * vigor * (16.0 + self.an.energy_ema * 40.0), v.target);
 
             // Organic forking: once a vine has grown past each fork
             // threshold, a shoot peels off into free space. Trunks fork up
@@ -676,17 +645,16 @@ pub const Context = struct {
             }
         }
 
-        // ---- beats: growth spurts, and a leaf shaken loose ----
+        // ---- beats: a gentle growth nudge, and sometimes a leaf ----
         if (beat_hit) {
-            const punch = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
             for (0..2) |_| {
                 const vi = r.intRangeLessThan(usize, 0, max_vines);
                 const v = &self.vines[vi];
                 if (v.active and v.dying == 0) {
-                    v.dl = @min(v.dl + 3.0 + punch * 4.0, v.target);
+                    v.dl = @min(v.dl + 4.0, v.target);
                 }
             }
-            if (r.float(f32) < 0.45 * punch) {
+            if (r.float(f32) < 0.3) {
                 var tries: u8 = 0;
                 while (tries < 8) : (tries += 1) {
                     const vi = r.intRangeLessThan(usize, 0, max_vines);
@@ -759,15 +727,15 @@ pub const Context = struct {
                 const pb = self.vinePoint(rect, v, ls_e + 5.0);
                 const tang = std.math.atan2(pb[1] - pa[1], pb[0] - pa[0]);
                 const side: f32 = if (li % 2 == 0) 1.0 else -1.0;
-                const flutter = @sin(self.now * 1.6 + ls_e * 0.3 + v.seed) * (0.08 + self.treble * 0.25);
+                const flutter = @sin(self.now * 1.6 + ls_e * 0.3 + v.seed) * (0.08 + (self.an.smooth[4] + self.an.smooth[5]) * 0.5 * 0.12);
                 const angle = tang + side * (0.75 + fhash(v.seed + 3.0, fi) * 0.55) + (jit - 0.5) * 0.5 + flutter;
                 const grow_in = smoothstep(0.0, 35.0, v.dl - ls_e);
                 // Real ivy: young leaves near the growing tip stay small,
                 // older nodes carry big mature leaves.
                 const mature = 0.5 + 0.5 * smoothstep(0.0, 140.0, v.dl - ls_e);
                 const vary = 0.75 + fhash(v.seed + 7.0, fi) * 0.5;
-                const band = self.bands[@as(usize, @intFromFloat(ls_e)) % 6];
-                const size = (11.5 + @sin(v.seed * 3.0 + ls_e * 0.7) * 3.5) * vary * mature * grow_in * (1.0 + band * 0.15) * fade;
+                const band = self.an.smooth[@as(usize, @intFromFloat(ls_e)) % 6];
+                const size = (11.5 + @sin(v.seed * 3.0 + ls_e * 0.7) * 3.5) * vary * mature * grow_in * (1.0 + band * 0.08) * fade;
                 if (size > 0.5) {
                     self.leaves[self.leaf_count] = .{ p0[0], p0[1], angle, size };
                     self.leaf_count += 1;
@@ -826,10 +794,10 @@ pub const Context = struct {
         // Effect-local time (fire.zig pattern) — keeps shader noise
         // coordinates small so f32 precision holds over long sessions.
         if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
-        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
-        if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble);
-        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
-        if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.energy);
+        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, (self.an.smooth[0] + self.an.smooth[1]) * 0.5);
+        if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, (self.an.smooth[4] + self.an.smooth[5]) * 0.5);
+        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.onset.beat);
+        if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.an.energy_ema);
         if (self.loc_bright >= 0) c.glUniform1f(self.loc_bright, self.brightness);
     }
 
