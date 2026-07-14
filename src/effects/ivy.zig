@@ -30,8 +30,7 @@ const Vine = struct {
     active: bool = false,
     /// Seconds spent dying (window closed); fades out, then frees the slot.
     dying: f32 = 0,
-    /// 0 = garden trellis post (empty workspace); 1 = the screen border
-    /// itself; anything else is a window address.
+    /// 1 = the screen border itself; anything else is a window address.
     addr: u64 = 0,
     t0: f32 = 0,
     dir: f32 = 1,
@@ -85,6 +84,46 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
 /// normal of the edge it lands on. Coordinates are y-up (frag space).
 const PerimHit = struct { pos: [2]f32, normal: [2]f32 };
 
+/// Per-window anchor state, persisted across frames. `rect` is the
+/// smoothed rect wilting vines trail behind; `raw_prev` detects motion
+/// frame-to-frame; `moving` counts down the settle window after motion.
+const SmoothWin = struct {
+    addr: u64 = 0,
+    rect: shader_mod.ShaderProgram.WindowRect = undefined,
+    raw_prev: shader_mod.ShaderProgram.WindowRect = undefined,
+    moving: f32 = 0,
+    active: bool = false,
+};
+
+/// Distance from a point to a rect's border line (0 on the frame).
+fn rectBorderDist(rect: shader_mod.ShaderProgram.WindowRect, p: [2]f32) f32 {
+    const qx = @max(rect.x - p[0], p[0] - (rect.x + rect.w));
+    const qy = @max(rect.y - p[1], p[1] - (rect.y + rect.h));
+    const ox = @max(qx, 0.0);
+    const oy = @max(qy, 0.0);
+    const outside = @sqrt(ox * ox + oy * oy);
+    const inside = @min(@max(qx, qy), 0.0);
+    return @abs(outside + inside);
+}
+
+/// Inverse of perimeterAt: the arc offset of the border point nearest
+/// `p`, in the same bottom -> right -> top -> left walk.
+fn arcOffsetOf(rect: shader_mod.ShaderProgram.WindowRect, p: [2]f32) f32 {
+    const w = @max(rect.w, 1.0);
+    const h = @max(rect.h, 1.0);
+    const px = std.math.clamp(p[0] - rect.x, 0.0, w);
+    const py = std.math.clamp(p[1] - rect.y, 0.0, h);
+    const d_bot = py;
+    const d_top = h - py;
+    const d_left = px;
+    const d_right = w - px;
+    const m = @min(@min(d_bot, d_top), @min(d_left, d_right));
+    if (m == d_bot) return px;
+    if (m == d_right) return w + py;
+    if (m == d_top) return w + h + (w - px);
+    return 2.0 * w + h + (h - py);
+}
+
 fn perimeterAt(rect: anytype, t: f32) PerimHit {
     const w = @max(rect.w, 1.0);
     const h = @max(rect.h, 1.0);
@@ -127,6 +166,13 @@ pub const Context = struct {
     win_cache: [max_windows]shader_mod.ShaderProgram.WindowRect = undefined,
     win_cache_count: usize = 0,
     focused_center: [2]f32 = .{ -1e9, -1e9 },
+
+    // Per-window SMOOTHED anchor rects, persisted across frames and keyed
+    // by address. Vines resolve against these, so drags and resizes flex
+    // in organically instead of snapping with the raw rect.
+    smooth_cache: [max_windows]SmoothWin = [_]SmoothWin{.{}} ** max_windows,
+    /// How lazily the wilt-trail rect follows its window (config: flex).
+    flex: f32 = 0.85,
 
     // Audio analysis (voltaic pattern).
     bands: [6]f32 = [_]f32{0} ** 6,
@@ -171,18 +217,8 @@ pub const Context = struct {
             .height = height,
             .growth = params.getFloat("growth", 1.0),
             .brightness = params.getFloat("brightness", 1.0),
+            .flex = std.math.clamp(params.getFloat("flex", 0.85), 0.0, 0.95),
         };
-    }
-
-    /// Empty-workspace garden: each addr == 0 vine climbs an invisible thin
-    /// trellis post rising from the screen bottom (a horizontal bed would
-    /// only let the vine snake flat along the edge). The post's x position
-    /// and height derive from the vine's seed so they're stable per vine.
-    fn gardenPost(self: *const Context, seed: f32) shader_mod.ShaderProgram.WindowRect {
-        const u = seed / 100.0;
-        const x = self.width * (0.08 + 0.84 * (u * 7.13 - @floor(u * 7.13)));
-        const h = self.height * (0.30 + 0.25 * (u * 3.71 - @floor(u * 3.71)));
-        return .{ .x = x, .y = -10.0, .w = 3.0, .h = h, .address = 0 };
     }
 
     /// The desktop border as a trellis for addr == 1 vines.
@@ -190,16 +226,24 @@ pub const Context = struct {
         return .{ .x = 2.0, .y = 2.0, .w = self.width - 4.0, .h = self.height - 4.0, .address = 1 };
     }
 
-    /// The rect a vine is rooted on: its window (by address), a garden
-    /// trellis post (addr 0), or the screen border (addr 1). Returns null
-    /// if the window is gone this frame.
+    /// The rect a vine is rooted on: its window (by address, resolved
+    /// against the per-window SMOOTHED rect so geometry changes ease in
+    /// organically) or the screen border (addr 1). Returns null if the
+    /// window is gone this frame.
     fn vineRect(self: *const Context, v: *const Vine) ?shader_mod.ShaderProgram.WindowRect {
-        if (v.addr == 0) return self.gardenPost(v.seed);
         if (v.addr == 1) return self.screenRect();
-        for (self.win_cache[0..self.win_cache_count]) |w| {
-            if (w.address == v.addr) return w;
+        for (self.smooth_cache) |sw| {
+            if (sw.active and sw.addr == v.addr) return sw.rect;
         }
         return null;
+    }
+
+    /// Is this window still settling after a move/resize?
+    fn winMoving(self: *const Context, addr: u64) bool {
+        for (self.smooth_cache) |sw| {
+            if (sw.active and sw.addr == addr) return sw.moving > 0;
+        }
+        return false;
     }
 
     /// A trunk node at arc offset `s`: perimeter point lifted off the frame
@@ -216,7 +260,11 @@ pub const Context = struct {
                 @sin(s * 0.021 + v.seed * 3.1) * 3.5) * amp_v +
             @sin(self.now * 1.2 + s * 0.05 + v.seed) * sway_amp;
         const l = if (v.inward) -@max(lift, 1.5) else @max(lift, 1.5);
-        return .{ hit.pos[0] + hit.normal[0] * l, hit.pos[1] + hit.normal[1] * l };
+        // Wilt: dying vines droop earthward, tips first (quadratic
+        // ease-in so early death barely sags, then lets go).
+        const wilt = @min(v.dying / vine_die_secs, 1.0);
+        const sag = wilt * wilt * (8.0 + s * 0.35);
+        return .{ hit.pos[0] + hit.normal[0] * l, hit.pos[1] + hit.normal[1] * l - sag };
     }
 
     /// A vine node at arc offset `s`. Trunks follow their rect's perimeter;
@@ -251,7 +299,10 @@ pub const Context = struct {
             @sin(s * 0.013 + v.seed * 1.3) * 16.0 * (s / @max(v.target, 1.0)) +
             bend * s * s +
             @sin(self.now * 1.4 + s * 0.06 + v.seed) * sway_amp;
-        return .{ attach[0] + ux * s + px * off, attach[1] + uy * s + py * off };
+        // Branch wilt compounds with the parent's sag — tips droop most.
+        const wilt = @min(v.dying / vine_die_secs, 1.0);
+        const sag = wilt * wilt * (6.0 + s * 0.3);
+        return .{ attach[0] + ux * s + px * off, attach[1] + uy * s + py * off - sag };
     }
 
     fn spawnBranch(self: *Context, parent_idx: usize) void {
@@ -316,31 +367,17 @@ pub const Context = struct {
     fn spawnVine(self: *Context, addr: u64, rect_in: ?shader_mod.ShaderProgram.WindowRect) void {
         const r = self.rng.random();
         const seed = r.float(f32) * 100.0;
-        const rect = rect_in orelse (if (addr == 1) self.screenRect() else self.gardenPost(seed));
+        const rect = rect_in orelse self.screenRect();
         for (&self.vines) |*v| {
             if (v.active) continue;
             const per = 2.0 * (rect.w + rect.h);
-            var t0 = r.float(f32) * per;
-            var dir: f32 = if (r.boolean()) 1.0 else -1.0;
+            const t0 = r.float(f32) * per;
+            const dir: f32 = if (r.boolean()) 1.0 else -1.0;
             var target = @min(120.0 + r.float(f32) * 260.0, per * 0.55);
             if (addr == 1) {
                 // Border creepers reach farther than window vines, but stay
                 // capped so they can't starve the shared segment budget.
                 target = @min(280.0 + r.float(f32) * 300.0, per * 0.12);
-            }
-            if (addr == 0) {
-                // Root near the base of the post and climb one side upward,
-                // stopping shy of the top so the tendril never crests the
-                // (invisible) post and hairpins back down mid-air.
-                const start = r.float(f32) * rect.h * 0.15;
-                if (r.boolean()) {
-                    t0 = rect.w + start; // right side, ascending
-                    dir = 1.0;
-                } else {
-                    t0 = 2.0 * rect.w + 2.0 * rect.h - start; // left side, ascending
-                    dir = -1.0;
-                }
-                target = @min(120.0 + r.float(f32) * 260.0, (rect.h - start) * 0.95);
             }
             v.* = .{
                 .active = true,
@@ -351,6 +388,27 @@ pub const Context = struct {
                 .target = target,
                 .seed = seed,
                 .inward = addr == 1,
+            };
+            return;
+        }
+    }
+
+    /// Root a vine on `rect` at a given perimeter offset — used by
+    /// propagation so the ivy continues exactly where a tip touched.
+    fn spawnVineAt(self: *Context, rect: shader_mod.ShaderProgram.WindowRect, t0: f32) void {
+        const r = self.rng.random();
+        for (&self.vines) |*v| {
+            if (v.active) continue;
+            const per = 2.0 * (rect.w + rect.h);
+            v.* = .{
+                .active = true,
+                .addr = rect.address,
+                .t0 = t0,
+                .dir = if (r.boolean()) 1.0 else -1.0,
+                .dl = 0,
+                .target = @min(120.0 + r.float(f32) * 260.0, per * 0.55),
+                .seed = r.float(f32) * 100.0,
+                .inward = false,
             };
             return;
         }
@@ -426,6 +484,91 @@ pub const Context = struct {
         else
             .{ -1e9, -1e9 };
 
+        // ---- per-window anchor state: wilt on motion, regrow on rest ----
+        // Plants don't like being moved. Any sustained drag or resize
+        // wilts that window's vines — they sag, shed leaves, and fade
+        // while trailing the moving frame on a lazily smoothed rect —
+        // and regrowth is suppressed until the window has settled for a
+        // moment, when the spawner recolonizes the new geometry. Single-
+        // frame teleports skip even the trailing fade: those vines
+        // release instantly, scattering leaves where the plant stood.
+        // Alpha is transition.zig's smoothAlpha formula (it's private).
+        const alpha = blk: {
+            const f = std.math.clamp(self.flex, 0.001, 0.999);
+            break :blk 1.0 - @exp(-(-@log(f) * 30.0) * dt);
+        };
+        for (&self.smooth_cache) |*sw| {
+            if (!sw.active) continue;
+            var seen = false;
+            for (self.win_cache[0..self.win_cache_count]) |w| {
+                if (w.address == sw.addr) {
+                    seen = true;
+                    break;
+                }
+            }
+            // Window gone: vineRect returns null and the existing orphan
+            // path sheds and fades its vines.
+            if (!seen) sw.active = false;
+        }
+        for (self.win_cache[0..self.win_cache_count]) |w| {
+            var entry: ?*SmoothWin = null;
+            var free: ?*SmoothWin = null;
+            for (&self.smooth_cache) |*sw| {
+                if (sw.active and sw.addr == w.address) entry = sw;
+                if (!sw.active and free == null) free = sw;
+            }
+            if (entry) |sw| {
+                // Motion detection on RAW frame-to-frame deltas (the
+                // smoothed rect lags and would read as perpetual motion).
+                const mdx = (w.x + w.w * 0.5) - (sw.raw_prev.x + sw.raw_prev.w * 0.5);
+                const mdy = (w.y + w.h * 0.5) - (sw.raw_prev.y + sw.raw_prev.h * 0.5);
+                const msz = @abs(w.w - sw.raw_prev.w) + @abs(w.h - sw.raw_prev.h);
+                const step2 = mdx * mdx + mdy * mdy;
+                sw.raw_prev = w;
+
+                if (step2 > 220.0 * 220.0) {
+                    // Teleport: release instantly, leaves mark the old spot.
+                    for (&self.vines) |*v| {
+                        if (!v.active or v.addr != w.address) continue;
+                        if (v.parent < 0 and v.dl > 30.0) {
+                            self.shedLeaves(self.vinePoint(sw.rect, v, v.dl * 0.5), 2);
+                            self.shedLeaves(self.vinePoint(sw.rect, v, v.dl * 0.9), 1);
+                        }
+                        v.active = false;
+                    }
+                    sw.rect = w;
+                    sw.moving = 0;
+                    continue;
+                }
+
+                if (step2 > 6.0 * 6.0 or msz > 6.0) {
+                    const was_still = sw.moving <= 0;
+                    sw.moving = 0.4;
+                    if (was_still) {
+                        // Motion began: this trellis's plants wilt.
+                        for (&self.vines) |*v| {
+                            if (!v.active or v.dying > 0 or v.addr != w.address) continue;
+                            v.dying = 0.0001;
+                            if (v.parent < 0 and v.dl > 30.0) {
+                                self.shedLeaves(self.vinePoint(sw.rect, v, v.dl * 0.6), 2);
+                            }
+                        }
+                    }
+                } else {
+                    sw.moving = @max(sw.moving - dt, 0);
+                }
+
+                // The anchor rect trails lazily — wilting vines droop
+                // behind the moving frame instead of riding it rigidly.
+                sw.rect.x += (w.x - sw.rect.x) * alpha;
+                sw.rect.y += (w.y - sw.rect.y) * alpha;
+                sw.rect.w += (w.w - sw.rect.w) * alpha;
+                sw.rect.h += (w.h - sw.rect.h) * alpha;
+            } else if (free) |sw| {
+                sw.* = .{ .addr = w.address, .rect = w, .raw_prev = w, .active = true };
+            }
+        }
+
         // ---- vine lifecycle ----
         // Windows without a vine get one (staggered so a workspace switch
         // plants the garden over a second or two, not all at once).
@@ -433,19 +576,29 @@ pub const Context = struct {
         if (self.spawn_timer <= 0) {
             self.spawn_timer = 0.45;
             var frame_n: u32 = 0;
-            var garden_n: u32 = 0;
             for (self.vines) |v| {
                 if (!v.active or v.dying > 0) continue;
                 if (v.addr == 1) frame_n += 1;
-                if (v.addr == 0) garden_n += 1;
             }
-            if (frame_n < 3) {
-                // The desktop border always hosts a few long creepers.
+            // The desktop border always hosts creepers — and on an empty
+            // workspace it carries the whole garden.
+            const border_want: u32 = if (self.win_cache_count == 0) 6 else 3;
+            if (frame_n < border_want) {
                 self.spawnVine(1, null);
-            } else if (self.win_cache_count == 0) {
-                if (garden_n < 3) self.spawnVine(0, null);
-            } else outer: for (self.win_cache[0..self.win_cache_count]) |w| {
-                // Bigger frames host more vines.
+            } else if (frame_n > border_want) {
+                // Windows returned: the border thins back out, one vine
+                // per tick, through the normal dieback fade.
+                for (&self.vines) |*v| {
+                    if (v.active and v.dying == 0 and v.addr == 1 and v.parent < 0) {
+                        v.dying = 0.0001;
+                        break;
+                    }
+                }
+            }
+            outer: for (self.win_cache[0..self.win_cache_count]) |w| {
+                // Bigger frames host more vines. Settling windows wait —
+                // nothing roots on a moving trellis.
+                if (self.winMoving(w.address)) continue :outer;
                 const per = 2.0 * (w.w + w.h);
                 var want: u32 = 1;
                 if (per > 2200.0) want += 1;
@@ -458,13 +611,43 @@ pub const Context = struct {
                 self.spawnVine(w.address, w);
                 break;
             }
+
+            // Propagation: a trunk tip that has grown within reach of
+            // another (settled) frame steps onto it, rooting exactly at
+            // the contact point — the ivy spreads edge -> window and
+            // window -> window as one continuous organism. One hop per
+            // tick keeps the colonization gradual.
+            var free_slots: u32 = 0;
+            for (self.vines) |v| {
+                if (!v.active) free_slots += 1;
+            }
+            if (free_slots > 6) {
+                prop: for (self.vines) |v| {
+                    if (!v.active or v.dying > 0 or v.parent >= 0) continue;
+                    if (v.dl < 60.0) continue;
+                    const rect = self.vineRect(&v) orelse continue;
+                    const tip = self.vinePoint(rect, &v, v.dl);
+                    for (self.win_cache[0..self.win_cache_count]) |w| {
+                        if (w.address == v.addr) continue;
+                        if (self.winMoving(w.address)) continue;
+                        if (rectBorderDist(w, tip) > 16.0) continue;
+                        var have: u32 = 0;
+                        for (self.vines) |u| {
+                            if (u.active and u.addr == w.address and u.dying == 0) have += 1;
+                        }
+                        if (have >= 5) continue;
+                        self.spawnVineAt(w, arcOffsetOf(w, tip));
+                        break :prop;
+                    }
+                }
+            }
         }
 
         for (&self.vines, 0..) |*v, vi| {
             if (!v.active) continue;
 
             const rect_opt = self.vineRect(v);
-            var orphaned = rect_opt == null or (v.addr == 0 and self.win_cache_count > 0);
+            var orphaned = rect_opt == null;
             // Branches die with their trunk. The seed check guards against a
             // recycled slot silently becoming a different parent.
             if (v.parent >= 0) {
