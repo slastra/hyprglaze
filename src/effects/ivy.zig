@@ -16,9 +16,9 @@ const max_windows = 32;
 // geometry is recomputed from the *current* window rect every frame
 // (perimeter-parameterized, voltaic crawl pattern), so vines ride their
 // window through moves and resizes.
-const max_vines = 20;
+const max_vines = 32;
 const seg_step: f32 = 16.0; // arc length per uploaded stem segment
-const max_segs = 360;
+const max_segs = 480;
 const seg_b_vec4s = max_segs / 4;
 const max_leaves = 200;
 const leaf_spacing: f32 = 26.0;
@@ -36,6 +36,9 @@ const Vine = struct {
     /// plant stood, unaffected by where the window went (or that it's gone).
     frozen: bool = false,
     frozen_rect: shader_mod.ShaderProgram.WindowRect = undefined,
+    /// Seconds alive. Old vines wilt naturally (seeded 50-100s lifespan),
+    /// freeing budget so the garden churns instead of freezing solid.
+    age: f32 = 0,
     t0: f32 = 0,
     dir: f32 = 1,
     dl: f32 = 0,
@@ -612,16 +615,16 @@ pub const Context = struct {
             for (self.vines) |v| {
                 if (!v.active) free_slots += 1;
             }
-            if (free_slots > 6) {
+            if (free_slots > 3) {
                 prop: for (self.vines) |v| {
-                    if (!v.active or v.dying > 0 or v.parent >= 0) continue;
-                    if (v.dl < 60.0) continue;
+                    if (!v.active or v.dying > 0) continue;
+                    if (v.dl < 50.0) continue;
                     const rect = self.vineRect(&v) orelse continue;
                     const tip = self.vinePoint(rect, &v, v.dl);
                     for (self.win_cache[0..self.win_cache_count]) |w| {
                         if (w.address == v.addr) continue;
                         if (self.winMoving(w.address)) continue;
-                        if (rectBorderDist(w, tip) > 16.0) continue;
+                        if (rectBorderDist(w, tip) > 24.0) continue;
                         var have: u32 = 0;
                         for (self.vines) |u| {
                             if (u.active and u.addr == w.address and u.dying == 0) have += 1;
@@ -673,6 +676,30 @@ pub const Context = struct {
             // its own vigor so the canopy fills in unevenly, like a plant.
             const vigor = 0.75 + fhash(v.seed, 0.53) * 0.5;
             v.dl = @min(v.dl + dt * self.growth * tend * vigor * (16.0 + self.energy * 90.0), v.target);
+
+            // Continuous growth: a fully grown vine keeps creeping — its
+            // target inches outward toward the hard perimeter cap, so the
+            // garden never freezes mid-gesture.
+            if (v.dl >= v.target and v.parent < 0) {
+                const per = 2.0 * (rect.w + rect.h);
+                const cap = if (v.addr == 1) per * 0.12 else per * 0.55;
+                v.target = @min(v.target + dt * self.growth * (2.5 + self.energy * 8.0), cap);
+            }
+
+            // Mortality: old vines wilt in place, ceding their segment
+            // budget to fresh growth elsewhere — the churn that lets the
+            // ivy spread indefinitely. Branches die with their trunk.
+            v.age += dt;
+            if (v.parent < 0) {
+                const lifespan = 50.0 + fhash(v.seed, 0.71) * 50.0;
+                if (v.age > lifespan) {
+                    v.frozen = true;
+                    v.frozen_rect = rect;
+                    v.dying = 0.0001;
+                    self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.7), 2);
+                    continue;
+                }
+            }
 
             // Organic forking: once a vine has grown past each fork
             // threshold, a shoot peels off into free space. Trunks fork up
