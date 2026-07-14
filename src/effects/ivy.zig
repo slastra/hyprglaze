@@ -32,6 +32,10 @@ const Vine = struct {
     dying: f32 = 0,
     /// 1 = the screen border itself; anything else is a window address.
     addr: u64 = 0,
+    /// Dying vines wilt IN PLACE: their anchor rect freezes where the
+    /// plant stood, unaffected by where the window went (or that it's gone).
+    frozen: bool = false,
+    frozen_rect: shader_mod.ShaderProgram.WindowRect = undefined,
     t0: f32 = 0,
     dir: f32 = 1,
     dl: f32 = 0,
@@ -84,9 +88,10 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
 /// normal of the edge it lands on. Coordinates are y-up (frag space).
 const PerimHit = struct { pos: [2]f32, normal: [2]f32 };
 
-/// Per-window anchor state, persisted across frames. `rect` is the
-/// smoothed rect wilting vines trail behind; `raw_prev` detects motion
-/// frame-to-frame; `moving` counts down the settle window after motion.
+/// Per-window anchor state, persisted across frames. `rect` is the last
+/// known rect (used to freeze wilting vines where the plant stood);
+/// `raw_prev` detects motion frame-to-frame; `moving` counts down the
+/// settle window after motion.
 const SmoothWin = struct {
     addr: u64 = 0,
     rect: shader_mod.ShaderProgram.WindowRect = undefined,
@@ -171,8 +176,6 @@ pub const Context = struct {
     // by address. Vines resolve against these, so drags and resizes flex
     // in organically instead of snapping with the raw rect.
     smooth_cache: [max_windows]SmoothWin = [_]SmoothWin{.{}} ** max_windows,
-    /// How lazily the wilt-trail rect follows its window (config: flex).
-    flex: f32 = 0.85,
 
     // Audio analysis (voltaic pattern).
     bands: [6]f32 = [_]f32{0} ** 6,
@@ -217,7 +220,6 @@ pub const Context = struct {
             .height = height,
             .growth = params.getFloat("growth", 1.0),
             .brightness = params.getFloat("brightness", 1.0),
-            .flex = std.math.clamp(params.getFloat("flex", 0.85), 0.0, 0.95),
         };
     }
 
@@ -231,11 +233,26 @@ pub const Context = struct {
     /// organically) or the screen border (addr 1). Returns null if the
     /// window is gone this frame.
     fn vineRect(self: *const Context, v: *const Vine) ?shader_mod.ShaderProgram.WindowRect {
+        if (v.frozen) return v.frozen_rect;
         if (v.addr == 1) return self.screenRect();
         for (self.smooth_cache) |sw| {
             if (sw.active and sw.addr == v.addr) return sw.rect;
         }
         return null;
+    }
+
+    /// Wilt every live vine on `addr` in place: freeze its anchor at
+    /// `rect` — where the plant stood — and start the dieback fade.
+    fn wiltVines(self: *Context, addr: u64, rect: shader_mod.ShaderProgram.WindowRect) void {
+        for (&self.vines) |*v| {
+            if (!v.active or v.dying > 0 or v.addr != addr) continue;
+            v.frozen = true;
+            v.frozen_rect = rect;
+            v.dying = 0.0001;
+            if (v.parent < 0 and v.dl > 30.0) {
+                self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.6), 2);
+            }
+        }
     }
 
     /// Is this window still settling after a move/resize?
@@ -484,19 +501,13 @@ pub const Context = struct {
         else
             .{ -1e9, -1e9 };
 
-        // ---- per-window anchor state: wilt on motion, regrow on rest ----
-        // Plants don't like being moved. Any sustained drag or resize
-        // wilts that window's vines — they sag, shed leaves, and fade
-        // while trailing the moving frame on a lazily smoothed rect —
-        // and regrowth is suppressed until the window has settled for a
-        // moment, when the spawner recolonizes the new geometry. Single-
-        // frame teleports skip even the trailing fade: those vines
-        // release instantly, scattering leaves where the plant stood.
-        // Alpha is transition.zig's smoothAlpha formula (it's private).
-        const alpha = blk: {
-            const f = std.math.clamp(self.flex, 0.001, 0.999);
-            break :blk 1.0 - @exp(-(-@log(f) * 30.0) * dt);
-        };
+        // ---- per-window anchor state: wilt in place, regrow on rest ----
+        // Plants don't like being moved. Any sustained drag, resize, or
+        // teleport wilts that window's vines IN PLACE — each freezes its
+        // anchor where the plant stood, sags, sheds leaves, and fades,
+        // regardless of where the window went. Regrowth is suppressed
+        // until the window has settled for a moment, then the spawner
+        // recolonizes the new geometry. Closed windows wilt the same way.
         for (&self.smooth_cache) |*sw| {
             if (!sw.active) continue;
             var seen = false;
@@ -506,9 +517,11 @@ pub const Context = struct {
                     break;
                 }
             }
-            // Window gone: vineRect returns null and the existing orphan
-            // path sheds and fades its vines.
-            if (!seen) sw.active = false;
+            if (!seen) {
+                // Window closed: its plants wilt where it stood.
+                self.wiltVines(sw.addr, sw.rect);
+                sw.active = false;
+            }
         }
         for (self.win_cache[0..self.win_cache_count]) |w| {
             var entry: ?*SmoothWin = null;
@@ -518,52 +531,20 @@ pub const Context = struct {
                 if (!sw.active and free == null) free = sw;
             }
             if (entry) |sw| {
-                // Motion detection on RAW frame-to-frame deltas (the
-                // smoothed rect lags and would read as perpetual motion).
                 const mdx = (w.x + w.w * 0.5) - (sw.raw_prev.x + sw.raw_prev.w * 0.5);
                 const mdy = (w.y + w.h * 0.5) - (sw.raw_prev.y + sw.raw_prev.h * 0.5);
                 const msz = @abs(w.w - sw.raw_prev.w) + @abs(w.h - sw.raw_prev.h);
-                const step2 = mdx * mdx + mdy * mdy;
                 sw.raw_prev = w;
 
-                if (step2 > 220.0 * 220.0) {
-                    // Teleport: release instantly, leaves mark the old spot.
-                    for (&self.vines) |*v| {
-                        if (!v.active or v.addr != w.address) continue;
-                        if (v.parent < 0 and v.dl > 30.0) {
-                            self.shedLeaves(self.vinePoint(sw.rect, v, v.dl * 0.5), 2);
-                            self.shedLeaves(self.vinePoint(sw.rect, v, v.dl * 0.9), 1);
-                        }
-                        v.active = false;
-                    }
-                    sw.rect = w;
-                    sw.moving = 0;
-                    continue;
-                }
-
-                if (step2 > 6.0 * 6.0 or msz > 6.0) {
+                if (mdx * mdx + mdy * mdy > 6.0 * 6.0 or msz > 6.0) {
                     const was_still = sw.moving <= 0;
                     sw.moving = 0.4;
-                    if (was_still) {
-                        // Motion began: this trellis's plants wilt.
-                        for (&self.vines) |*v| {
-                            if (!v.active or v.dying > 0 or v.addr != w.address) continue;
-                            v.dying = 0.0001;
-                            if (v.parent < 0 and v.dl > 30.0) {
-                                self.shedLeaves(self.vinePoint(sw.rect, v, v.dl * 0.6), 2);
-                            }
-                        }
-                    }
+                    // Wilt at the last resting rect, not mid-motion.
+                    if (was_still) self.wiltVines(w.address, sw.rect);
                 } else {
                     sw.moving = @max(sw.moving - dt, 0);
                 }
-
-                // The anchor rect trails lazily — wilting vines droop
-                // behind the moving frame instead of riding it rigidly.
-                sw.rect.x += (w.x - sw.rect.x) * alpha;
-                sw.rect.y += (w.y - sw.rect.y) * alpha;
-                sw.rect.w += (w.w - sw.rect.w) * alpha;
-                sw.rect.h += (w.h - sw.rect.h) * alpha;
+                sw.rect = w;
             } else if (free) |sw| {
                 sw.* = .{ .addr = w.address, .rect = w, .raw_prev = w, .active = true };
             }
@@ -656,11 +637,14 @@ pub const Context = struct {
             }
             if (orphaned and v.dying == 0) {
                 v.dying = 0.0001;
-                // The trellis fell: this vine's leaves scatter.
-                if (rect_opt != null and v.parent < 0) {
-                    const rect = rect_opt.?;
-                    self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.5), 2);
-                    self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.9), 2);
+                // The trellis fell: freeze in place and scatter leaves.
+                if (rect_opt) |rect| {
+                    v.frozen = true;
+                    v.frozen_rect = rect;
+                    if (v.parent < 0) {
+                        self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.5), 2);
+                        self.shedLeaves(self.vinePoint(rect, v, v.dl * 0.9), 2);
+                    }
                 }
             }
             if (v.dying > 0) {
