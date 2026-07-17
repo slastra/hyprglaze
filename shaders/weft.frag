@@ -25,14 +25,13 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
-uniform float iWeftDrift;  // lattice phase drift (CPU clock)
-uniform float iWeftGrainT; // grain reseed clock (treble quickens)
-uniform float iWeftEnergy; // slow full-mix envelope
-uniform float iWeftBass;   // smoothed low end
-uniform float iWeftSeat;   // kick re-seat phase for lattice 0
-uniform float iWeftScale;  // base stripe wavelength (px)
-uniform float iWeftReach;  // halo radius multiplier
-uniform float iWeftGrain;  // grain amplitude
+uniform float iWeftDrift;   // lattice phase drift (CPU clock)
+uniform float iWeftGrainT;  // grain reseed clock (fixed film cadence)
+uniform float iWeftTune[3]; // per-lattice detune — music tunes the
+                            // interferometer; zero in silence
+uniform float iWeftScale;   // base stripe wavelength (px)
+uniform float iWeftReach;   // halo radius multiplier
+uniform float iWeftGrain;   // grain amplitude
 
 out vec4 fragColor;
 
@@ -77,8 +76,7 @@ void main() {
         if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
 
         float d = sdRoundBox(fc, center, win.zw * 0.5, 12.0);
-        float radius = (90.0 + focus_amt * 70.0) * iWeftReach
-            * (1.0 + min(iWeftEnergy, 1.0) * 0.5);
+        float radius = (100.0 + focus_amt * 70.0) * iWeftReach;
         float g = exp(-max(d, 0.0) / radius);
         halo += g * (0.55 + focus_amt * 0.45);
         // Curvature, not domination: strong enough to bend the weave
@@ -90,19 +88,21 @@ void main() {
     // instead of carrying a faint everywhere-fringe.
     halo = min(max(halo - 0.06, 0.0) * 1.06, 1.4);
 
-    // ---- the weave: quantized, detuned stripe lattices ----
-    // Bass chunks the sampling cell (1 -> 3px); the quantization is what
-    // keeps the fringes crisp and digital rather than smooth waves.
-    float cell = 1.0 + floor(min(iWeftBass, 1.2) * 1.8);
+    // ---- the weave: an interferometer the music detunes ----
+    // In silence the lattices sit nearly in tune (tiny base detune keeps
+    // faint broad fringes alive). Each band group stretches its own
+    // lattice's wavelength, so the fringe geometry IS the spectral
+    // balance of the mix; kicks pluck all three and let them relax.
+    const float cell = 2.0;
     vec2 p = floor(fc / cell) * cell;
 
     float f = 0.0;
     for (int k = 0; k < 3; k++) {
         float fk = float(k);
-        float lam = iWeftScale * (1.0 + fk * 0.023);
+        float lam = iWeftScale * (1.0 + fk * 0.008 + iWeftTune[k]);
         float ang = -0.12 + 0.12 * fk; // near-vertical, slightly fanned
         vec2 dir = vec2(cos(ang), sin(ang));
-        float ph = iWeftDrift * (0.7 + 0.35 * fk) + (k == 0 ? iWeftSeat : 0.0);
+        float ph = iWeftDrift * (0.7 + 0.35 * fk);
         f += cos((dot(p, dir) / lam) * TAU + ph + phase_w);
     }
     // Sharpened so bright fringes are narrow threads with dark warp between.
