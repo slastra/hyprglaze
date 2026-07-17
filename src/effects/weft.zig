@@ -3,7 +3,6 @@ const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
 const audio_mod = @import("visualizer/audio.zig");
-const spectral = @import("spectral.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -15,30 +14,29 @@ const c = @cImport({
 // of a broken hash making interference bands in windowglow's film
 // grain, kept deliberate here.
 //
-// Music tunes the interferometer, and does nothing else. In silence
-// the lattices sit nearly in tune: broad, calm, almost-still fringes.
-// Each lattice's wavelength is detuned by its own band group (lows /
-// mids / highs, slow envelopes), so the interference pattern IS the
-// mix's spectral balance rendered as geometry — bass tightens one
-// beat-fringe family, treble another. Kicks pluck the weave: a detune
-// impulse across all three that relaxes over ~a second, fringes
-// blooming apart and settling back into tune. Halo reach, grain
-// cadence, and drift stay constant — the tuning is the whole story.
+// The music IS woven into the interference: the audio waveform itself —
+// smoothed ~50ms so it keeps its shape without frame jitter, peak-
+// normalized so volume doesn't change depth — threads through the
+// fringes as a phase displacement sampled along each thread's length.
+// Every fringe is an oscilloscope trace in the weave: a kick is a sharp
+// hump rippling through, a pad a slow braid; silence is clean, still
+// threads (bit-identical to no music). Nothing else responds — no
+// bands, no envelopes, no beat detector. Halo reach, drift, grain
+// cadence, and detune are constants.
 pub const Context = struct {
     allocator: std.mem.Allocator,
     audio: ?*audio_mod.AudioCapture,
-    an: spectral.Bands = .{},
-    onset: spectral.Onset = .{},
-    beat_prev: f32 = 0,
 
     /// Lattice phase drift (slow, constant).
     drift: f32 = 0,
     /// Grain reseed clock (fixed film cadence).
     grain_clock: f32 = 0,
-    /// Per-lattice detune from band groups, extra-slow EMA (~3/s).
-    tune: [3]f32 = [_]f32{0} ** 3,
-    /// Kick pluck envelope: detune impulse, relaxing over ~a second.
-    pluck: f32 = 0,
+    /// Mono waveform, EMA-smoothed per sample (~50ms memory).
+    wave_s: [128]f32 = [_]f32{0} ** 128,
+    /// Peak-normalized copy shipped to the shader.
+    wave_n: [128]f32 = [_]f32{0} ** 128,
+    /// Slow AGC peak (~3s decay).
+    wave_peak: f32 = 0,
 
     // Params.
     scale: f32,
@@ -48,7 +46,7 @@ pub const Context = struct {
     cached_program: c.GLuint = 0,
     loc_drift: c.GLint = -1,
     loc_grain_t: c.GLint = -1,
-    loc_tune: c.GLint = -1,
+    loc_wave: c.GLint = -1,
     loc_scale: c.GLint = -1,
     loc_reach: c.GLint = -1,
     loc_grain: c.GLint = -1,
@@ -74,29 +72,19 @@ pub const Context = struct {
         const dt = std.math.clamp(state.dt, 0.0, 0.05);
         if (self.audio) |audio| {
             const wave = audio.getWaveform();
-            const mags = spectral.magnitudes(&wave);
-            self.an.update(&mags, dt);
-            self.onset.update(&mags, dt, self.an.bands[0]);
-            if (self.onset.beat > self.beat_prev) self.pluck = 1.0;
-            self.beat_prev = self.onset.beat;
+            var peak_new: f32 = 0;
+            const a = @min(1.0, 18.0 * dt); // ~55ms shape memory
+            for (0..128) |i| {
+                const s = (wave[i] + wave[128 + i]) * 0.5;
+                self.wave_s[i] += (s - self.wave_s[i]) * a;
+                peak_new = @max(peak_new, @abs(self.wave_s[i]));
+            }
+            self.wave_peak = @max(self.wave_peak * @exp(-dt / 3.0), peak_new);
+            const inv: f32 = if (self.wave_peak > 0.01) 1.0 / self.wave_peak else 0.0;
+            for (0..128) |i| {
+                self.wave_n[i] = std.math.clamp(self.wave_s[i] * inv, -1.0, 1.0);
+            }
         }
-        self.pluck *= @exp(-1.5 * dt);
-        if (self.pluck < 0.01) self.pluck = 0;
-
-        // Each lattice detunes with its band group; the pluck detunes all
-        // three unevenly so the bloom has shape. Extra-slow EMA on top of
-        // the already-smoothed bands: geometry should sway, not flicker.
-        const groups = [3]f32{
-            (self.an.smooth[0] + self.an.smooth[1]) * 0.5,
-            (self.an.smooth[2] + self.an.smooth[3]) * 0.5,
-            (self.an.smooth[4] + self.an.smooth[5]) * 0.5,
-        };
-        for (0..3) |k| {
-            const fk: f32 = @floatFromInt(k);
-            const target = @min(groups[k], 1.0) * 0.035 + self.pluck * 0.015 * (1.0 + fk * 0.6);
-            self.tune[k] += (target - self.tune[k]) * @min(1.0, 3.0 * dt);
-        }
-
         self.grain_clock += dt * 10.0;
         self.drift += dt * 0.06;
     }
@@ -107,14 +95,14 @@ pub const Context = struct {
             self.cached_program = prog.program;
             self.loc_drift = c.glGetUniformLocation(prog.program, "iWeftDrift");
             self.loc_grain_t = c.glGetUniformLocation(prog.program, "iWeftGrainT");
-            self.loc_tune = c.glGetUniformLocation(prog.program, "iWeftTune[0]");
+            self.loc_wave = c.glGetUniformLocation(prog.program, "iWeftWave[0]");
             self.loc_scale = c.glGetUniformLocation(prog.program, "iWeftScale");
             self.loc_reach = c.glGetUniformLocation(prog.program, "iWeftReach");
             self.loc_grain = c.glGetUniformLocation(prog.program, "iWeftGrain");
         }
         if (self.loc_drift >= 0) c.glUniform1f(self.loc_drift, self.drift);
         if (self.loc_grain_t >= 0) c.glUniform1f(self.loc_grain_t, self.grain_clock);
-        if (self.loc_tune >= 0) c.glUniform1fv(self.loc_tune, 3, &self.tune[0]);
+        if (self.loc_wave >= 0) c.glUniform1fv(self.loc_wave, 128, &self.wave_n[0]);
         if (self.loc_scale >= 0) c.glUniform1f(self.loc_scale, self.scale);
         if (self.loc_reach >= 0) c.glUniform1f(self.loc_reach, self.reach);
         if (self.loc_grain >= 0) c.glUniform1f(self.loc_grain, self.grain);

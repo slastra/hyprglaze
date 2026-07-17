@@ -25,13 +25,13 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
-uniform float iWeftDrift;   // lattice phase drift (CPU clock)
-uniform float iWeftGrainT;  // grain reseed clock (fixed film cadence)
-uniform float iWeftTune[3]; // per-lattice detune — music tunes the
-                            // interferometer; zero in silence
-uniform float iWeftScale;   // base stripe wavelength (px)
-uniform float iWeftReach;   // halo radius multiplier
-uniform float iWeftGrain;   // grain amplitude
+uniform float iWeftDrift;     // lattice phase drift (CPU clock)
+uniform float iWeftGrainT;    // grain reseed clock (fixed film cadence)
+uniform float iWeftWave[128]; // smoothed, peak-normalized audio waveform
+                              // — all zero in silence
+uniform float iWeftScale;     // base stripe wavelength (px)
+uniform float iWeftReach;     // halo radius multiplier
+uniform float iWeftGrain;     // grain amplitude
 
 out vec4 fragColor;
 
@@ -88,22 +88,24 @@ void main() {
     // instead of carrying a faint everywhere-fringe.
     halo = min(max(halo - 0.06, 0.0) * 1.06, 1.4);
 
-    // ---- the weave: an interferometer the music detunes ----
-    // In silence the lattices sit nearly in tune (tiny base detune keeps
-    // faint broad fringes alive). Each band group stretches its own
-    // lattice's wavelength, so the fringe geometry IS the spectral
-    // balance of the mix; kicks pluck all three and let them relax.
+    // ---- the weave: the music threaded through the fringes ----
+    // The audio waveform itself displaces each lattice's phase, sampled
+    // along the thread direction — every fringe is an oscilloscope trace
+    // woven into the interference. A kick is a sharp hump rippling
+    // through the weave, a pad a slow braid; silence is clean threads.
     const float cell = 2.0;
     vec2 p = floor(fc / cell) * cell;
 
     float f = 0.0;
     for (int k = 0; k < 3; k++) {
         float fk = float(k);
-        float lam = iWeftScale * (1.0 + fk * 0.008 + iWeftTune[k]);
+        float lam = iWeftScale * (1.0 + fk * 0.023);
         float ang = -0.12 + 0.12 * fk; // near-vertical, slightly fanned
         vec2 dir = vec2(cos(ang), sin(ang));
+        float along = clamp(dot(p, vec2(-dir.y, dir.x)) / iResolution.y * 0.5 + 0.5, 0.0, 1.0);
+        float wob = iWeftWave[int(along * 127.0)];
         float ph = iWeftDrift * (0.7 + 0.35 * fk);
-        f += cos((dot(p, dir) / lam) * TAU + ph + phase_w);
+        f += cos((dot(p, dir) / lam) * TAU + ph + phase_w + wob * 1.7);
     }
     // Sharpened so bright fringes are narrow threads with dark warp between.
     float fringe = pow(clamp(f / 3.0 * 0.5 + 0.5, 0.0, 1.0), 3.0);
