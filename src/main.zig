@@ -195,7 +195,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var config_watcher: ?watcher_mod.FileWatcher = null;
     if (cfg.config_path.len > 0) {
         if (config_mod.expandHome(allocator, cfg.config_path) catch null) |acp| {
-            config_watcher = watcher_mod.FileWatcher.init(allocator, acp) catch null;
+            config_watcher = watcher_mod.FileWatcher.init(allocator, acp) catch |err| blk: {
+                log.warn("config watcher init failed: {} — hot-reload disabled", .{err});
+                break :blk null;
+            };
             allocator.free(acp);
             if (config_watcher != null)
                 log.info("watching config: {s}", .{cfg.config_path});
@@ -665,10 +668,16 @@ fn loadConfig(allocator: std.mem.Allocator, cli: *const CliArgs) !config_mod.Con
         cfg = try config_mod.load(allocator, path);
     } else {
         const default_path = config_mod.resolveConfigPath(allocator) catch {
+            const effect_dup = try allocator.dupe(u8, cli.effect_name orelse "particles");
+            errdefer allocator.free(effect_dup);
+            const shader_dup = try allocator.dupe(u8, cli.shader_path orelse "");
+            errdefer allocator.free(shader_dup);
+            const theme_dup = if (cli.theme_name) |t| try allocator.dupe(u8, t) else null;
+            errdefer if (theme_dup) |td| allocator.free(td);
             return .{
-                .effect = try allocator.dupe(u8, cli.effect_name orelse "particles"),
-                .shader = try allocator.dupe(u8, cli.shader_path orelse ""),
-                .theme = if (cli.theme_name) |t| try allocator.dupe(u8, t) else null,
+                .effect = effect_dup,
+                .shader = shader_dup,
+                .theme = theme_dup,
                 .transition_duration = 0.3,
                 .cursor_smoothing = 0.15,
                 .geometry_smoothing = 0.12,
@@ -789,34 +798,34 @@ fn strEql(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
-const CliFlags = struct {
-    pub const description = "Wayland shader wallpaper daemon for Hyprland with window-aware effects.";
-
-    pub const descriptions = .{
-        .config = "TOML config path (default: ~/.config/hypr/hyprglaze.toml)",
-        .effect = "Effect: particles, windowglow, glitch, starfield, visualizer, milkdrop, tide, fire, etc.",
-        .shader = "Fragment shader path (overrides effect default)",
-        .theme = "Gogh color scheme name",
-        .set_theme = "Persist a theme to the config file and exit (hot-reloads in a running daemon)",
-        .list_themes = "List available themes and exit",
-        .list_effects = "List available effects and exit",
-        .fps = "Log frames-per-second every second",
-    };
-
-    config: ?[]const u8 = null,
-    effect: ?[]const u8 = null,
-    shader: ?[]const u8 = null,
-    theme: ?[]const u8 = null,
-    set_theme: ?[]const u8 = null,
-    list_themes: bool = false,
-    list_effects: bool = false,
-    fps: bool = false,
-};
+const usage_text =
+    \\Wayland shader wallpaper daemon for Hyprland with window-aware effects.
+    \\
+    \\Usage: hyprglaze [options]
+    \\
+    \\  --config PATH      TOML config path (default: ~/.config/hypr/hyprglaze.toml)
+    \\  --effect NAME      Effect to render (see --list-effects)
+    \\  --shader PATH      Fragment shader path (overrides effect default)
+    \\  --theme NAME       Gogh color scheme name
+    \\  --set-theme NAME   Persist a theme to the config file and exit (hot-reloads)
+    \\  --list-themes      List available themes and exit
+    \\  --list-effects     List available effects and exit
+    \\  --fps              Log frames-per-second every second
+    \\  --help, -h         Show this help
+    \\
+;
 
 /// Minimal in-tree CLI parser. Supports `--key value`, `--key=value`, and
 /// bool flags. Unknown args → error.
 fn parseCli(allocator: std.mem.Allocator, raw_argv: []const [*:0]const u8) !CliArgs {
     var out = CliArgs{};
+    errdefer {
+        if (out.config_path) |p| allocator.free(p);
+        if (out.effect_name) |p| allocator.free(p);
+        if (out.shader_path) |p| allocator.free(p);
+        if (out.theme_name) |p| allocator.free(p);
+        if (out.set_theme) |p| allocator.free(p);
+    }
 
     // Skip argv[0] (the program path).
     var i: usize = 1;
@@ -871,7 +880,12 @@ fn parseCli(allocator: std.mem.Allocator, raw_argv: []const [*:0]const u8) !CliA
             .list_effects => out.list_effects = true,
             .fps => out.fps = true,
             .help => {
-                std.log.info("hyprglaze [--config PATH] [--effect NAME] [--shader PATH] [--theme NAME] [--set-theme NAME] [--list-themes] [--list-effects] [--fps]", .{});
+                // Plain stdout, not the log: help is program output.
+                const io = std.Io.Threaded.global_single_threaded.io();
+                var stdout_buf: [1024]u8 = undefined;
+                var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+                stdout_writer.interface.writeAll(usage_text) catch {};
+                stdout_writer.interface.flush() catch {};
                 std.process.exit(0);
             },
         } else {

@@ -117,3 +117,52 @@ fn smoothAlpha(factor: f32, dt: f32) f32 {
     const speed = -@log(f) * 30.0;
     return 1.0 - @exp(-speed * dt);
 }
+
+test "smoothAlpha is frame-rate independent" {
+    // One 33ms step must land where two 16.5ms steps do (within float noise).
+    const factor: f32 = 0.15;
+    const one_step = smoothAlpha(factor, 1.0 / 30.0);
+    const half = smoothAlpha(factor, 1.0 / 60.0);
+    const two_steps = half + (1.0 - half) * half;
+    try std.testing.expectApproxEqAbs(one_step, two_steps, 0.0001);
+}
+
+test "smoothAlpha clamps degenerate factors" {
+    // 0 (instant) and 1 (frozen) must not produce NaN/inf via log(0).
+    try std.testing.expect(std.math.isFinite(smoothAlpha(0.0, 1.0 / 30.0)));
+    try std.testing.expect(std.math.isFinite(smoothAlpha(1.0, 1.0 / 30.0)));
+    try std.testing.expect(smoothAlpha(0.001, 1.0 / 30.0) > 0.9);
+    try std.testing.expect(smoothAlpha(0.999, 1.0 / 30.0) < 0.1);
+}
+
+test "focus change commits only after debounce" {
+    var ts = TransitionState.init();
+    ts.seed(.{ .x = 0, .y = 0, .w = 100, .h = 100 }, .{ 0, 0 }, 0xaaa);
+
+    const win_b = Rect{ .x = 200, .y = 0, .w = 100, .h = 100 };
+    // New focus candidate appears at t=1.0 — not committed yet.
+    ts.update(1.0, win_b, .{ 0, 0 }, 0xbbb);
+    try std.testing.expectEqual(@as(u64, 0xaaa), ts.focused_address);
+    // Still within the debounce window.
+    ts.update(1.0 + focus_debounce_secs / 2.0, win_b, .{ 0, 0 }, 0xbbb);
+    try std.testing.expectEqual(@as(u64, 0xaaa), ts.focused_address);
+    // Past the debounce window — commit, previous focus recorded.
+    ts.update(1.0 + focus_debounce_secs + 0.01, win_b, .{ 0, 0 }, 0xbbb);
+    try std.testing.expectEqual(@as(u64, 0xbbb), ts.focused_address);
+    try std.testing.expectEqual(@as(u64, 0xaaa), ts.prev_focused_address);
+    try std.testing.expectEqual(@as(f32, 0), ts.transition_progress);
+}
+
+test "focus flicker back to current cancels pending" {
+    var ts = TransitionState.init();
+    ts.seed(.{ .x = 0, .y = 0, .w = 100, .h = 100 }, .{ 0, 0 }, 0xaaa);
+
+    ts.update(1.0, .{}, .{ 0, 0 }, 0xbbb);
+    try std.testing.expectEqual(@as(u64, 0xbbb), ts.pending_address);
+    // Focus returns to the current window before the debounce elapses.
+    ts.update(1.05, .{ .x = 0, .y = 0, .w = 100, .h = 100 }, .{ 0, 0 }, 0xaaa);
+    try std.testing.expectEqual(@as(u64, 0), ts.pending_address);
+    // The old candidate reappearing later must restart its debounce.
+    ts.update(2.0, .{}, .{ 0, 0 }, 0xbbb);
+    try std.testing.expectEqual(@as(u64, 0xaaa), ts.focused_address);
+}

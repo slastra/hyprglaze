@@ -7,6 +7,8 @@ const transition_mod = @import("../../core/transition.zig");
 const effects = @import("../../effects.zig");
 const sprite = @import("sprite.zig");
 
+const log = std.log.scoped(.buddy);
+
 const c = @cImport({ @cInclude("GLES3/gl3.h"); });
 
 const Anim = sprite.Anim;
@@ -66,7 +68,10 @@ pub const Context = struct {
 
     pub fn init(_: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) Context {
         const sprite_path = params.getString("sprite", "sprites/buddy.png") orelse "sprites/buddy.png";
-        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch null;
+        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch |err| blk: {
+            log.warn("sprite load failed: {s} ({}) - buddy renders without a texture", .{ sprite_path, err });
+            break :blk null;
+        };
 
         const scale: f32 = params.getFloat("scale", 2.0);
         const walk_spd = (32.0 * scale) / (6.0 / 8.0);

@@ -14,8 +14,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.smp_allocator;
 
-    const io_local = std.Io.Threaded.global_single_threaded.io();
-    const io = io_local;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);

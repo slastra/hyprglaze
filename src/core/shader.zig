@@ -68,9 +68,12 @@ pub const ShaderProgram = struct {
         c.glCompileShader(frag);
         try checkShaderCompile(frag, "fragment");
 
-        // Link program
+        // Link program. errdefer matters in a long-lived daemon: failed
+        // shader hot-reloads recur, and each would otherwise leak a
+        // program object.
         const program = c.glCreateProgram();
         if (program == 0) return error.CreateProgramFailed;
+        errdefer c.glDeleteProgram(program);
 
         c.glAttachShader(program, vert);
         c.glAttachShader(program, frag);

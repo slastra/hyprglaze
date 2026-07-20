@@ -13,12 +13,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // --- flags dependency ---
-    const flags_dep = b.dependency("flags", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Force LLVM backend + LLD even in Debug. Zig 0.15's self-hosted
     // x86_64 backend produces objects whose link path can't combine with
     // `crt1.o` from gcc 15+ (the `.sframe` section uses a 64-bit PC-relative
@@ -35,7 +29,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
-                .{ .name = "flags", .module = flags_dep.module("flags") },
             },
         }),
         .use_llvm = llvm_backend,

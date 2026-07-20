@@ -36,7 +36,8 @@ pub fn execute(ctx: *context_mod.Context, state: effects.FrameState, dt: f32) vo
         ctx.vx = 0;
         ctx.x = ctx.climb_wall_x;
         ctx.grounded = false;
-        ctx.facing_right = ctx.climb_wall_x > ctx.x - 1;
+        // Facing is fixed at latch time (below); comparing against ctx.x
+        // here would be meaningless since it was just snapped to the wall.
         if (ctx.y >= ctx.climb_target_y) {
             ctx.y = ctx.climb_target_y;
             ctx.vy = 0;
@@ -87,8 +88,11 @@ pub fn execute(ctx: *context_mod.Context, state: effects.FrameState, dt: f32) vo
                     const wall_dist = @abs(ctx.x - wall_x);
 
                     if (wall_dist < 10) {
-                        // At the wall — latch and climb.
+                        // At the wall — latch and climb, facing the wall
+                        // (pre-snap x; ties break toward right like the
+                        // approach run below).
                         ctx.climbing = true;
+                        ctx.facing_right = wall_x > ctx.x - 1;
                         ctx.climb_wall_x = wall_x;
                         ctx.climb_target_y = fw.y + fw.h;
                         ctx.setBehavior(.climb, 15.0);

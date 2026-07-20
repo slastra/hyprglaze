@@ -63,7 +63,7 @@ pub fn getLocalHour() u8 {
     var t = c.time(null);
     const tm = c.localtime(&t);
     if (tm) |local| {
-        return @intCast(@as(u32, @bitCast(local.*.tm_hour)));
+        return @intCast(local.*.tm_hour);
     }
     return 12;
 }
@@ -227,7 +227,10 @@ pub const Context = struct {
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) Context {
         const sprite_path = params.getString("sprite", "sprites/buddy.png") orelse "sprites/buddy.png";
-        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch null;
+        const tex = texture_mod.Texture.loadFromFile(sprite_path) catch |err| blk: {
+            log.warn("sprite load failed: {s} ({}) - buddy renders without a texture", .{ sprite_path, err });
+            break :blk null;
+        };
 
         const scale: f32 = params.getFloat("scale", 2.0);
         const walk_spd = (32.0 * scale) / (6.0 / 8.0);

@@ -131,10 +131,17 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8, source_path: []cons
     const cursor_params = effectParamsFromTable(t, "cursor");
     const geometry_params = effectParamsFromTable(t, "geometry");
 
+    const effect_dup = try allocator.dupe(u8, effect_name);
+    errdefer allocator.free(effect_dup);
+    const shader_dup = try allocator.dupe(u8, shader_str);
+    errdefer allocator.free(shader_dup);
+    const theme_dup = if (theme_str) |ts| try allocator.dupe(u8, ts) else null;
+    errdefer if (theme_dup) |td| allocator.free(td);
+
     return .{
-        .effect = try allocator.dupe(u8, effect_name),
-        .shader = try allocator.dupe(u8, shader_str),
-        .theme = if (theme_str) |ts| try allocator.dupe(u8, ts) else null,
+        .effect = effect_dup,
+        .shader = shader_dup,
+        .theme = theme_dup,
         .transition_duration = transition_params.getFloat("duration", 0.3),
         .cursor_smoothing = cursor_params.getFloat("smoothing", 0.15),
         .geometry_smoothing = geometry_params.getFloat("smoothing", 0.12),
@@ -174,7 +181,9 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 }
 
 pub fn expandHome(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    if (path.len >= 1 and path[0] == '~') {
+    // Only expand `~/...` or a lone `~` — a `~user/...` path would
+    // otherwise silently become `$HOMEuser/...`.
+    if (std.mem.eql(u8, path, "~") or std.mem.startsWith(u8, path, "~/")) {
         const home_z = std.c.getenv("HOME") orelse return error.NoHomeDir;
         const home = std.mem.span(home_z);
         return std.fmt.allocPrint(allocator, "{s}{s}", .{ home, path[1..] });
@@ -252,6 +261,16 @@ fn isThemeLine(trimmed: []const u8) bool {
     if (trimmed.len < 6 or !std.mem.startsWith(u8, trimmed, "theme")) return false;
     const rest = std.mem.trimStart(u8, trimmed[5..], " \t");
     return rest.len > 0 and rest[0] == '=';
+}
+
+test "isThemeLine matches theme assignments only" {
+    try std.testing.expect(isThemeLine("theme = \"Nord\""));
+    try std.testing.expect(isThemeLine("theme=\"Nord\""));
+    try std.testing.expect(isThemeLine("theme \t= x"));
+    try std.testing.expect(!isThemeLine("theme"));
+    try std.testing.expect(!isThemeLine("themes = 3"));
+    try std.testing.expect(!isThemeLine("# theme = \"Nord\""));
+    try std.testing.expect(!isThemeLine("effect = \"fire\""));
 }
 
 fn readFileMut(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

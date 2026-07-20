@@ -29,11 +29,12 @@ pub const HyprEvents = struct {
     /// from a one-time `j/activewindow` query before starting the reader.
     focused_address: std.atomic.Value(u64) = .init(0),
 
-    /// Cursor position in layout coordinates, from `hg:cur` events. The
-    /// watcher emits unconditionally on its first tick after install, so
-    /// these are valid within ~16ms of startup.
-    cursor_x: std.atomic.Value(i32) = .init(0),
-    cursor_y: std.atomic.Value(i32) = .init(0),
+    /// Cursor position in layout coordinates, from `hg:cur` events,
+    /// packed x-high/y-low into one atomic so a reader can never observe
+    /// a torn (new x, old y) pair. The watcher emits unconditionally on
+    /// its first tick after install, so this is valid within ~16ms of
+    /// startup.
+    cursor_xy: std.atomic.Value(u64) = .init(0),
 
     /// Visible-window snapshot from the latest `hg:geo` event. Written by
     /// the reader thread under `snapshot_mutex`; `snapshot_gen` is bumped
@@ -73,6 +74,10 @@ pub const HyprEvents = struct {
             .socket_path_len = 0,
         };
         const path = std.fmt.bufPrint(&self.socket_path, "{s}/hypr/{s}/.socket2.sock", .{ xdg, sig }) catch return error.PathTooLong;
+        // sockaddr.un.path is 108 bytes on Linux; reject here rather than
+        // panicking on the memcpy in connectSocket.
+        if (path.len >= @typeInfo(std.meta.fieldInfo(posix.sockaddr.un, .path).type).array.len)
+            return error.PathTooLong;
         self.socket_path_len = path.len;
         return self;
     }
@@ -114,9 +119,10 @@ pub const HyprEvents = struct {
     }
 
     pub fn cursorPos(self: *const HyprEvents) hypr.CursorPos {
+        const packed_xy = self.cursor_xy.load(.acquire);
         return .{
-            .x = self.cursor_x.load(.acquire),
-            .y = self.cursor_y.load(.acquire),
+            .x = @bitCast(@as(u32, @truncate(packed_xy >> 32))),
+            .y = @bitCast(@as(u32, @truncate(packed_xy))),
         };
     }
 
@@ -262,8 +268,8 @@ fn handleCustom(self: *HyprEvents, data: []const u8) void {
         const comma = std.mem.indexOfScalar(u8, pos, ',') orelse return;
         const x = std.fmt.parseInt(i32, pos[0..comma], 10) catch return;
         const y = std.fmt.parseInt(i32, pos[comma + 1 ..], 10) catch return;
-        self.cursor_x.store(x, .release);
-        self.cursor_y.store(y, .release);
+        const packed_xy = (@as(u64, @as(u32, @bitCast(x))) << 32) | @as(u32, @bitCast(y));
+        self.cursor_xy.store(packed_xy, .release);
         return;
     }
 
@@ -333,7 +339,15 @@ fn parseGeo(payload: []const u8) hypr.VisibleWindows {
 }
 
 fn lockSpin(m: *std.atomic.Mutex) void {
-    while (!m.tryLock()) std.atomic.spinLoopHint();
+    // Critical sections here are a single ~7KB struct copy, so the lock
+    // is almost always free within a few spins. The yield fallback covers
+    // the pathological case where the holder is preempted mid-copy, which
+    // would otherwise burn a full core until the scheduler intervenes.
+    var spins: u32 = 0;
+    while (!m.tryLock()) {
+        spins += 1;
+        if (spins < 64) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
+    }
 }
 
 /// Monotonic milliseconds. Heartbeat lapse detection only needs deltas,

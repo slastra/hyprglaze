@@ -4,6 +4,7 @@ const config_mod = @import("../../core/config.zig");
 const palette_mod = @import("../../core/palette.zig");
 const effects = @import("../../effects.zig");
 const audio_mod = @import("../visualizer/audio.zig");
+const bands_mod = @import("../bands.zig");
 const boids_mod = @import("boids.zig");
 
 const c = @cImport({
@@ -208,17 +209,8 @@ pub const Context = struct {
 
     now: f32 = 0,
 
-    // Audio analysis (glitch.zig pattern)
-    bands: [6]f32 = [_]f32{0} ** 6,
-    bass: f32 = 0,
-    bass_instant: f32 = 0,
-    bass_smooth: f32 = 0,
-    bass_prev: f32 = 0,
-    flux: f32 = 0,
-    flux_avg: f32 = 0,
-    beat: f32 = 0,
-    beat_cooldown: f32 = 0,
-    total_energy: f32 = 0,
+    // Audio analysis (glitch.zig pattern, shared in bands.zig)
+    an: bands_mod.Splitter = .{},
 
     /// Roost state: sustained silence settles the flock onto window tops;
     /// returning music bursts it back into the air.
@@ -260,11 +252,8 @@ pub const Context = struct {
     loc_canvas: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
-        const sink = params.getString("sink", null);
-        const audio = try allocator.create(audio_mod.AudioCapture);
-        errdefer allocator.destroy(audio);
-        audio.* = audio_mod.AudioCapture.init(sink);
-        audio.start();
+        const audio = try audio_mod.spawn(allocator, params);
+        errdefer audio_mod.shutdown(audio, allocator);
 
         const accum = try allocator.create(Accum);
         accum.* = std.mem.zeroes(Accum);
@@ -292,51 +281,15 @@ pub const Context = struct {
         self.now += dt;
         const wave = self.audio.getWaveform();
 
-        // 6 spectrum bands from waveform (same as glitch.zig)
-        const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
-        var energy_sum: f32 = 0;
-        for (0..6) |b| {
-            var energy: f32 = 0;
-            const lo = ranges[b][0];
-            const hi = ranges[b][1];
-            for (lo..hi) |j| {
-                energy += @abs(wave[j]) + @abs(wave[128 + j]);
-            }
-            energy /= @as(f32, @floatFromInt((hi - lo) * 2));
-            const raw = energy * 6.0;
-            const attack = @min(1.0, 25.0 * dt);
-            const decay = @min(1.0, 5.0 * dt);
-            self.bands[b] += (raw - self.bands[b]) * (if (raw > self.bands[b]) attack else decay);
-            energy_sum += self.bands[b];
-        }
-        self.total_energy = energy_sum / 6.0;
-
-        // Beat detection (spectral flux)
-        const bass_e = (self.bands[0] + self.bands[1]) * 0.5;
-        self.bass = bass_e;
-        self.bass_instant = bass_e;
-        self.bass_smooth += (bass_e - self.bass_smooth) * @min(1.0, 0.8 * dt);
-
-        const flux_raw = @max(0.0, self.bass_instant - self.bass_prev);
-        self.bass_prev = self.bass_instant;
-        self.flux = flux_raw;
-        self.flux_avg += (flux_raw - self.flux_avg) * @min(1.0, 1.5 * dt);
-
-        self.beat_cooldown -= dt;
-        var beat_hit = false;
+        // 6 spectrum bands + beat detection (same as glitch.zig, bands.zig)
+        const beat_hit = self.an.update(&wave, dt);
         var punch: f32 = 1.0;
-        if (self.flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0 and self.bass_instant > self.bass_smooth * 1.5) {
-            self.beat = 1.0;
-            self.beat_cooldown = 0.25;
-            beat_hit = true;
-            punch = std.math.clamp(self.flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
-        }
-        self.beat *= @exp(-4.0 * dt);
-        if (self.beat < 0.01) self.beat = 0;
+        if (beat_hit)
+            punch = std.math.clamp(self.an.flux / (self.an.flux_avg * 3.0 + 0.03), 1.0, 2.0);
 
         // Silence settles the flock; sound lifts it. Roost ramps in slowly
         // (the birds drift down over a few seconds) but releases fast.
-        if (self.total_energy < 0.05) {
+        if (self.an.energy < 0.05) {
             self.quiet_t += dt;
         } else {
             self.quiet_t = @max(0.0, self.quiet_t - dt * 6.0);
@@ -350,11 +303,11 @@ pub const Context = struct {
 
         // Flock + predator simulation
         self.sys.update(dt, state.cursor[0], state.cursor[1], state.collision_rects, .{
-            .bass = self.bass,
-            .beat = self.beat,
+            .bass = self.an.bass,
+            .beat = self.an.beat,
             .beat_hit = beat_hit,
             .punch = punch,
-            .total_energy = self.total_energy,
+            .total_energy = self.an.energy,
             .roost = self.roost,
             .burst = burst,
         });
@@ -503,9 +456,9 @@ pub const Context = struct {
         if (self.loc_pixel >= 0) c.glUniform1f(self.loc_pixel, self.pixel);
         // Effect-local time (fire.zig pattern) for noise precision.
         if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
-        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
-        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
-        if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.total_energy);
+        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.an.beat);
+        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.an.bass);
+        if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.an.energy);
         if (self.loc_mute >= 0) c.glUniform1f(self.loc_mute, self.mute);
         if (self.loc_contour >= 0) c.glUniform1f(self.loc_contour, if (self.contour) 1.0 else 0.0);
 
@@ -531,8 +484,7 @@ pub const Context = struct {
         if (self.canvas_tex != 0) c.glDeleteTextures(1, &self.canvas_tex);
         if (self.field_tex != 0) c.glDeleteTextures(1, &self.field_tex);
         if (self.compute) |*cp| cp.deinit();
-        self.audio.stop();
-        self.allocator.destroy(self.audio);
+        audio_mod.shutdown(self.audio, self.allocator);
         self.allocator.destroy(self.accum);
     }
 };

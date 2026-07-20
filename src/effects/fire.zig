@@ -1,6 +1,7 @@
 const std = @import("std");
 const shader_mod = @import("../core/shader.zig");
 const effects = @import("../effects.zig");
+const bands_mod = @import("bands.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -76,10 +77,7 @@ const History = struct {
     }
 };
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
-    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
+const smoothstep = bands_mod.smoothstep;
 
 pub const Context = struct {
     now: f32 = 0,

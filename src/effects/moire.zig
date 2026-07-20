@@ -3,6 +3,7 @@ const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
 const audio_mod = @import("visualizer/audio.zig");
+const bands_mod = @import("bands.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -125,10 +126,7 @@ pub const Context = struct {
     loc_vel: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
-        const sink = params.getString("sink", null);
-        const audio = try allocator.create(audio_mod.AudioCapture);
-        audio.* = audio_mod.AudioCapture.init(sink);
-        audio.start();
+        const audio = try audio_mod.spawn(allocator, params);
 
         const count: u32 = @intCast(std.math.clamp(params.getInt("count", max_bodies), 0, max_bodies));
 
@@ -232,20 +230,11 @@ pub const Context = struct {
         const ek = if (e_raw > self.energy) @min(1.0, 25.0 * dt) else @min(1.0, 5.0 * dt);
         self.energy += (e_raw - self.energy) * ek;
 
-        // Six-band split (glitch/voltaic pattern): per-band envelope so each
-        // body can ride its own slice of the spectrum.
-        const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
-        for (0..6) |bi| {
-            var en: f32 = 0;
-            const lo = ranges[bi][0];
-            const hi = ranges[bi][1];
-            for (lo..hi) |j| en += @abs(wave[j]) + @abs(wave[128 + j]);
-            en /= @floatFromInt((hi - lo) * 2);
-            const b_raw = en * 6.0;
-            const attack = @min(1.0, 25.0 * dt);
-            const decay = @min(1.0, 5.0 * dt);
-            self.bands[bi] += (b_raw - self.bands[bi]) * (if (b_raw > self.bands[bi]) attack else decay);
-        }
+        // Six-band split (glitch/voltaic pattern, bands.zig): per-band
+        // envelope so each body can ride its own slice of the spectrum.
+        // Moire keeps its own bass/beat scheme below (different constants),
+        // so only the split loop is shared.
+        bands_mod.splitBands(&self.bands, &wave, dt);
 
         // Advance the ripple clock: a calm baseline flow plus a gentle
         // energy boost — kept low so the field doesn't constantly vibrate;
@@ -431,7 +420,6 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        self.audio.stop();
-        self.allocator.destroy(self.audio);
+        audio_mod.shutdown(self.audio, self.allocator);
     }
 };

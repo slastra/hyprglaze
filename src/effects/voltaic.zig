@@ -3,6 +3,7 @@ const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
 const audio_mod = @import("visualizer/audio.zig");
+const bands_mod = @import("bands.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -101,10 +102,7 @@ const Arc = struct {
     active: bool = false,
 };
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
-    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
+const smoothstep = bands_mod.smoothstep;
 
 /// Closest point on a window's border to `p`. Points inside the rect get
 /// pushed out to the nearest edge so arcs always root on the frame, not
@@ -190,21 +188,10 @@ pub const Context = struct {
     // fast decay — the room lighting up.
     flash: f32 = 0,
 
-    // Audio analysis (glitch.zig pattern)
-    bands: [6]f32 = [_]f32{0} ** 6,
-    bass: f32 = 0,
-    mid: f32 = 0,
-    treble: f32 = 0,
-    energy: f32 = 0,
+    // Audio analysis (glitch.zig pattern, shared in bands.zig)
+    an: bands_mod.Splitter = .{},
     energy_ema: f32 = 0,
     storm: f32 = 0,
-    bass_instant: f32 = 0,
-    bass_smooth: f32 = 0,
-    bass_prev: f32 = 0,
-    flux: f32 = 0,
-    flux_avg: f32 = 0,
-    beat: f32 = 0,
-    beat_cooldown: f32 = 0,
 
     // BPM phase sync: beat_phase_total accumulates beats at bpm_est per
     // minute; detected beats snap it to the nearest integer to keep the
@@ -229,10 +216,7 @@ pub const Context = struct {
     loc_ghost_start: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
-        const sink = params.getString("sink", null);
-        const audio = try allocator.create(audio_mod.AudioCapture);
-        audio.* = audio_mod.AudioCapture.init(sink);
-        audio.start();
+        const audio = try audio_mod.spawn(allocator, params);
 
         return .{
             .allocator = allocator,
@@ -374,7 +358,7 @@ pub const Context = struct {
         // Endpoints stay rooted on the window borders; only interior nodes
         // buzz. Two incommensurate sines with spatial phase read as chaotic
         // rather than a regular wave; treble (hi-hats) drives it harder.
-        const sh = std.math.clamp(amp * 0.014, 0.3, 1.4) * (0.8 + self.treble * 0.3);
+        const sh = std.math.clamp(amp * 0.014, 0.3, 1.4) * (0.8 + self.an.treble * 0.3);
         for (1..n) |i| {
             const ph = pts[i][0] * 0.043 + pts[i][1] * 0.031;
             const wig = (@sin(self.now * 24.0 + ph) + 0.5 * @sin(self.now * 53.0 + ph * 1.7)) * sh;
@@ -446,51 +430,16 @@ pub const Context = struct {
         const r = self.rng.random();
 
         // ---- audio analysis (same band split as glitch/swarm) ----
+        // Band split + beat detection (spectral flux on bass), see bands.zig.
         const wave = self.audio.getWaveform();
-        const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
-        for (0..6) |bi| {
-            var energy: f32 = 0;
-            const lo = ranges[bi][0];
-            const hi = ranges[bi][1];
-            for (lo..hi) |j| {
-                energy += @abs(wave[j]) + @abs(wave[128 + j]);
-            }
-            energy /= @as(f32, @floatFromInt((hi - lo) * 2));
-            const raw = energy * 6.0;
-            const attack = @min(1.0, 25.0 * dt);
-            const decay = @min(1.0, 5.0 * dt);
-            self.bands[bi] += (raw - self.bands[bi]) * (if (raw > self.bands[bi]) attack else decay);
-        }
-        self.bass = (self.bands[0] + self.bands[1]) * 0.5;
-        self.mid = (self.bands[2] + self.bands[3]) * 0.5;
-        self.treble = (self.bands[4] + self.bands[5]) * 0.5;
-        self.energy = (self.bands[0] + self.bands[1] + self.bands[2] +
-            self.bands[3] + self.bands[4] + self.bands[5]) / 6.0;
+        const beat_hit = self.an.update(&wave, dt);
 
         // Slow energy envelope + asymmetric storm ramp: choruses snap the
         // storm on, and it lets go a moment after the section ends.
-        self.energy_ema += (self.energy - self.energy_ema) * @min(1.0, 2.0 * dt);
+        self.energy_ema += (self.an.energy - self.energy_ema) * @min(1.0, 2.0 * dt);
         const storm_target: f32 = if (self.energy_ema > storm_threshold) 1.0 else 0.0;
         const storm_tau = if (storm_target > self.storm) storm_tau_in else storm_tau_out;
         self.storm += (storm_target - self.storm) * (1.0 - @exp(-dt / storm_tau));
-
-        // Beat detection (spectral flux on bass)
-        self.bass_instant = self.bass;
-        self.bass_smooth += (self.bass - self.bass_smooth) * @min(1.0, 0.8 * dt);
-        const flux_raw = @max(0.0, self.bass_instant - self.bass_prev);
-        self.bass_prev = self.bass_instant;
-        self.flux = flux_raw;
-        self.flux_avg += (flux_raw - self.flux_avg) * @min(1.0, 1.5 * dt);
-
-        self.beat_cooldown -= dt;
-        var beat_hit = false;
-        if (self.flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0 and self.bass_instant > self.bass_smooth * 1.5) {
-            self.beat = 1.0;
-            self.beat_cooldown = 0.25;
-            beat_hit = true;
-        }
-        self.beat *= @exp(-4.0 * dt);
-        if (self.beat < 0.01) self.beat = 0;
 
         // Thunder flash decays fast (snap on, quick falloff). Triggered below
         // on strong downbeat discharges; storm passages keep it flickering.
@@ -542,7 +491,7 @@ pub const Context = struct {
         // the free-running clock can't make the edges twitch in the quiet.
         const beat_period = 60.0 / @max(self.bpm_est, 1.0);
         const lead_frac = std.math.clamp(tendril_lead / beat_period, 0.0, 0.85);
-        const charge: f32 = if (self.energy > 0.08 and cpf > (1.0 - lead_frac))
+        const charge: f32 = if (self.an.energy > 0.08 and cpf > (1.0 - lead_frac))
             smoothstep(1.0 - lead_frac, 1.0, cpf)
         else
             0.0;
@@ -555,11 +504,11 @@ pub const Context = struct {
         }
 
         // Treble bushes the bolts out: hi-hats raise the fork probability.
-        self.branch_chance = std.math.clamp(0.12 + self.treble * 0.45, 0.12, 0.55);
+        self.branch_chance = std.math.clamp(0.12 + self.an.treble * 0.45, 0.12, 0.55);
 
         // Ambient strikes fill silences; BPM-synced arcs take over during music.
         // Rate reduced so both systems don't stack to a busy tangle.
-        self.spawn_timer -= dt * self.arc_rate * (0.18 + self.energy * 1.2);
+        self.spawn_timer -= dt * self.arc_rate * (0.18 + self.an.energy * 1.2);
         if (self.spawn_timer <= 0) {
             self.spawn_timer = spawn_min + r.float(f32) * (spawn_max - spawn_min);
             self.spawnArc(state.windows, 0.7 + r.float(f32) * 0.4);
@@ -568,7 +517,7 @@ pub const Context = struct {
         // Downbeat discharge: bright pair on every detected beat.
         // Punch factor rewards sharp transients over soft hits.
         if (beat_hit) {
-            const punch = std.math.clamp(self.flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
+            const punch = std.math.clamp(self.an.flux / (self.an.flux_avg * 3.0 + 0.03), 1.0, 2.0);
             self.spawnArc(state.windows, 1.1 * punch);
             self.spawnArc(state.windows, 0.9 * punch);
             // Thunder flash: the room lights up, scaled by how hard the drop hit.
@@ -578,7 +527,7 @@ pub const Context = struct {
         // Half-beat arc: softer, syncopated eighth-note feel.
         if (half_crossed) self.spawnArc(state.windows, 0.55 + r.float(f32) * 0.15);
         // Coasting arc: one per beat when flux detection misses (quiet passages).
-        if (full_crossed and self.energy > 0.02) self.spawnArc(state.windows, 0.6 + r.float(f32) * 0.2);
+        if (full_crossed and self.an.energy > 0.02) self.spawnArc(state.windows, 0.6 + r.float(f32) * 0.2);
 
         // ---- focus crawls ----
         const focused = state.focused_win;
@@ -589,7 +538,7 @@ pub const Context = struct {
         }
         if (focused.hasArea()) {
             // Treble makes the border fizz harder: faster spawns, hotter arcs.
-            self.crawl_timer -= dt * (1.0 + self.treble * 2.0);
+            self.crawl_timer -= dt * (1.0 + self.an.treble * 2.0);
             if (self.crawl_timer <= 0) {
                 self.crawl_timer = 0.06 + r.float(f32) * 0.18;
                 const per = 2.0 * (focused.w + focused.h);
@@ -601,7 +550,7 @@ pub const Context = struct {
                     .seed = r.int(u32),
                     .age = 0,
                     .life = 0.08 + r.float(f32) * 0.16,
-                    .intensity = (0.35 + r.float(f32) * 0.25) * (0.8 + self.treble * 0.8),
+                    .intensity = (0.35 + r.float(f32) * 0.25) * (0.8 + self.an.treble * 0.8),
                     .active = true,
                 };
             }
@@ -618,7 +567,7 @@ pub const Context = struct {
 
         // Mids drive the wander: geometry regenerates every strike, so a
         // thick chorus makes live bolts writhe wider mid-flight.
-        const wander = 1.0 + self.mid * 0.8;
+        const wander = 1.0 + self.an.mid * 0.8;
 
         for (&self.arcs) |*arc| {
             if (!arc.active) continue;
@@ -696,7 +645,7 @@ pub const Context = struct {
                 const dist = @sqrt(dx * dx + dy * dy);
                 if (dist > 24.0) {
                     const flick = 0.55 + 0.9 * ar.float(f32);
-                    const env = self.storm * (0.55 + self.bass * 0.6) * flick;
+                    const env = self.storm * (0.55 + self.an.bass * 0.6) * flick;
                     const amp = std.math.clamp(dist * 0.16, 14.0, 180.0);
                     self.genBolt(a, b, amp * wander, env, 1.0, ar, bolt_segs, false, true);
                 }
@@ -815,16 +764,15 @@ pub const Context = struct {
         // Effect-local time (fire.zig pattern) — keeps corona noise
         // coordinates small so f32 precision holds over long sessions.
         if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
-        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
-        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
-        if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble);
+        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.an.beat);
+        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.an.bass);
+        if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.an.treble);
         if (self.loc_beat_phase >= 0) c.glUniform1f(self.loc_beat_phase, self.beat_phase);
         if (self.loc_flash >= 0) c.glUniform1f(self.loc_flash, self.flash);
         if (self.loc_ghost_start >= 0) c.glUniform1i(self.loc_ghost_start, @intCast(self.ghost_start_idx));
     }
 
     pub fn deinit(self: *Context) void {
-        self.audio.stop();
-        self.allocator.destroy(self.audio);
+        audio_mod.shutdown(self.audio, self.allocator);
     }
 };

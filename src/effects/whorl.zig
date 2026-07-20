@@ -195,12 +195,7 @@ pub const Context = struct {
         const sim_hz = std.math.clamp(params.getFloat("sim_hz", 14.0), 1.0, 60.0);
 
         var audio: ?*audio_mod.AudioCapture = null;
-        if (params.getBool("music", true)) {
-            const cap = try allocator.create(audio_mod.AudioCapture);
-            cap.* = audio_mod.AudioCapture.init(params.getString("sink", null));
-            cap.start();
-            audio = cap;
-        }
+        if (params.getBool("music", true)) audio = try audio_mod.spawn(allocator, params);
 
         return .{
             .allocator = allocator,
@@ -438,6 +433,10 @@ pub const Context = struct {
         self.now += dt;
 
         // ---- audio analysis: real FFT bands + spectral-flux onset ----
+        // Stays inline rather than using spectral.zig (which was extracted
+        // from this code): the onset here has a configurable kick_threshold
+        // multiplier, kick telemetry, and extra smoothed aggregates the
+        // shared module doesn't carry.
         if (self.audio) |audio| {
             const wave = audio.getWaveform();
             const mags = spectral.magnitudes(&wave);
@@ -627,10 +626,7 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        if (self.audio) |audio| {
-            audio.stop();
-            self.allocator.destroy(audio);
-        }
+        if (self.audio) |audio| audio_mod.shutdown(audio, self.allocator);
         if (self.tex != 0) c.glDeleteTextures(1, &self.tex);
         self.allocator.free(self.cells[0]);
         self.allocator.free(self.cells[1]);

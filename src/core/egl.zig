@@ -20,6 +20,7 @@ pub const EglState = struct {
         var minor: c.EGLint = 0;
         if (c.eglInitialize(display, &major, &minor) != c.EGL_TRUE)
             return error.EglInitFailed;
+        errdefer _ = c.eglTerminate(display);
 
         if (c.eglBindAPI(c.EGL_OPENGL_ES_API) != c.EGL_TRUE)
             return error.EglBindApiFailed;
@@ -50,10 +51,12 @@ pub const EglState = struct {
 
         const context = c.eglCreateContext(display, config, c.EGL_NO_CONTEXT, &context_attribs);
         if (context == c.EGL_NO_CONTEXT) return error.EglCreateContextFailed;
+        errdefer _ = c.eglDestroyContext(display, context);
 
         // Create window surface
         const surface = c.eglCreateWindowSurface(display, config, @intFromPtr(wl_egl_window), null);
         if (surface == c.EGL_NO_SURFACE) return error.EglCreateSurfaceFailed;
+        errdefer _ = c.eglDestroySurface(display, surface);
 
         // Make current
         if (c.eglMakeCurrent(display, surface, surface, context) != c.EGL_TRUE)

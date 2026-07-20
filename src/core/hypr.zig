@@ -61,6 +61,10 @@ pub const HyprIpc = struct {
 
         var path_buf: [256]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/hypr/{s}/.socket.sock", .{ xdg_runtime, instance_sig }) catch return error.PathTooLong;
+        // sockaddr.un.path is 108 bytes on Linux (NUL-terminated); reject
+        // here instead of panicking on the memcpy at connect time.
+        if (path.len >= @typeInfo(std.meta.fieldInfo(std.posix.sockaddr.un, .path).type).array.len)
+            return error.PathTooLong;
 
         var result = HyprIpc{
             .socket_path = undefined,
@@ -83,7 +87,15 @@ pub const HyprIpc = struct {
         if (libc.connect(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) < 0) {
             return error.SocketConnectFailed;
         }
-        if (std.c.write(sock, command.ptr, command.len) < 0) return error.SocketWriteFailed;
+        // Stream sockets may write short, especially for multi-KiB eval
+        // commands; loop until the full command is on the wire.
+        var written: usize = 0;
+        while (written < command.len) {
+            const w = std.c.write(sock, command.ptr + written, command.len - written);
+            if (w < 0) return error.SocketWriteFailed;
+            if (w == 0) return error.SocketWriteFailed;
+            written += @intCast(w);
+        }
 
         var total: usize = 0;
         while (total < buf.len) {
@@ -195,6 +207,20 @@ fn jsonInt(val: ?std.json.Value) ?i32 {
     const v = val orelse return null;
     if (v != .integer) return null;
     return std.math.cast(i32, v.integer);
+}
+
+test "parseAddress handles prefixed, bare, and malformed input" {
+    try std.testing.expectEqual(@as(u64, 0xdeadbeef), parseAddress(.{ .string = "0xdeadbeef" }));
+    try std.testing.expectEqual(@as(u64, 0xabc), parseAddress(.{ .string = "abc" }));
+    try std.testing.expectEqual(@as(u64, 0), parseAddress(.{ .string = "not-hex" }));
+    try std.testing.expectEqual(@as(u64, 0), parseAddress(.{ .integer = 42 }));
+}
+
+test "jsonInt rejects wrong tags and overflow" {
+    try std.testing.expectEqual(@as(?i32, 42), jsonInt(.{ .integer = 42 }));
+    try std.testing.expectEqual(@as(?i32, null), jsonInt(.{ .string = "42" }));
+    try std.testing.expectEqual(@as(?i32, null), jsonInt(null));
+    try std.testing.expectEqual(@as(?i32, null), jsonInt(.{ .integer = 1 << 40 }));
 }
 
 fn jsonIntPair(val: ?std.json.Value) ?[2]i32 {

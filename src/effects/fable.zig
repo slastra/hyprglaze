@@ -3,6 +3,7 @@ const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
 const audio_mod = @import("visualizer/audio.zig");
+const bands_mod = @import("bands.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -36,10 +37,7 @@ const Spark = struct {
     intensity: f32 = 1,
 };
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
-    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
+const smoothstep = bands_mod.smoothstep;
 
 pub const Context = struct {
     allocator: std.mem.Allocator,
@@ -68,17 +66,8 @@ pub const Context = struct {
     next_spark: u8 = 0,
     muse_timer: f32 = 4.0,
 
-    // Audio analysis (voltaic pattern).
-    bands: [6]f32 = [_]f32{0} ** 6,
-    bass: f32 = 0,
-    mid: f32 = 0,
-    treble: f32 = 0,
-    energy: f32 = 0,
-    bass_smooth: f32 = 0,
-    bass_prev: f32 = 0,
-    flux_avg: f32 = 0,
-    beat: f32 = 0,
-    beat_cooldown: f32 = 0,
+    // Audio analysis (voltaic pattern, shared in bands.zig).
+    an: bands_mod.Splitter = .{},
 
     scale: f32 = 1.0,
     brightness: f32 = 1.0,
@@ -98,10 +87,7 @@ pub const Context = struct {
     loc_bright: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
-        const sink = params.getString("sink", null);
-        const audio = try allocator.create(audio_mod.AudioCapture);
-        audio.* = audio_mod.AudioCapture.init(sink);
-        audio.start();
+        const audio = try audio_mod.spawn(allocator, params);
 
         return .{
             .allocator = allocator,
@@ -118,7 +104,7 @@ pub const Context = struct {
     /// Body radius this frame: breath, music, and beat flare folded in.
     fn radius(self: *const Context) f32 {
         return 44.0 * self.scale *
-            (1.0 + 0.05 * @sin(self.now * 0.9) + self.energy * 0.10 + self.flare * 0.35 + self.curiosity * 0.07);
+            (1.0 + 0.05 * @sin(self.now * 0.9) + self.an.energy * 0.10 + self.flare * 0.35 + self.curiosity * 0.07);
     }
 
     fn shedSpark(self: *Context, intensity: f32) void {
@@ -178,47 +164,17 @@ pub const Context = struct {
         self.now += dt;
         const r = self.rng.random();
 
-        // ---- audio analysis (voltaic band split + flux beats) ----
+        // ---- audio analysis (voltaic band split + flux beats, bands.zig) ----
         const wave = self.audio.getWaveform();
-        const ranges = [_][2]u8{ .{ 0, 10 }, .{ 10, 25 }, .{ 25, 45 }, .{ 45, 70 }, .{ 70, 95 }, .{ 95, 128 } };
-        for (0..6) |bi| {
-            var en: f32 = 0;
-            const lo = ranges[bi][0];
-            const hi = ranges[bi][1];
-            for (lo..hi) |j| en += @abs(wave[j]) + @abs(wave[128 + j]);
-            en /= @floatFromInt((hi - lo) * 2);
-            const raw = en * 6.0;
-            const attack = @min(1.0, 25.0 * dt);
-            const decay = @min(1.0, 5.0 * dt);
-            self.bands[bi] += (raw - self.bands[bi]) * (if (raw > self.bands[bi]) attack else decay);
-        }
-        self.bass = (self.bands[0] + self.bands[1]) * 0.5;
-        self.mid = (self.bands[2] + self.bands[3]) * 0.5;
-        self.treble = (self.bands[4] + self.bands[5]) * 0.5;
-        self.energy = (self.bands[0] + self.bands[1] + self.bands[2] +
-            self.bands[3] + self.bands[4] + self.bands[5]) / 6.0;
-
-        self.bass_smooth += (self.bass - self.bass_smooth) * @min(1.0, 0.8 * dt);
-        const flux = @max(0.0, self.bass - self.bass_prev);
-        self.bass_prev = self.bass;
-        self.flux_avg += (flux - self.flux_avg) * @min(1.0, 1.5 * dt);
-        self.beat_cooldown -= dt;
-        var beat_hit = false;
-        if (flux > self.flux_avg * 3.0 + 0.03 and self.beat_cooldown <= 0 and self.bass > self.bass_smooth * 1.5) {
-            self.beat = 1.0;
-            self.beat_cooldown = 0.25;
-            beat_hit = true;
-        }
-        self.beat *= @exp(-4.0 * dt);
-        if (self.beat < 0.01) self.beat = 0;
+        const beat_hit = self.an.update(&wave, dt);
 
         // ---- listening: opposing arm pairs ride the bands ----
         // Pair map: bass, low-mid, high-mid, treble around the star.
         const pair_val = [4]f32{
-            self.bass,
-            self.bands[2],
-            self.bands[3],
-            self.treble,
+            self.an.bass,
+            self.an.bands[2],
+            self.an.bands[3],
+            self.an.treble,
         };
         for (0..arms) |k| {
             const target = 0.72 + @min(pair_val[k % 4], 1.3) * 0.55;
@@ -257,7 +213,7 @@ pub const Context = struct {
         self.rot += (0.15 + self.rot_vel) * dt;
         self.flare *= @exp(-5.0 * dt);
         if (beat_hit) {
-            const punch = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
+            const punch = std.math.clamp(self.an.flux / (self.an.flux_avg * 3.0 + 0.03), 1.0, 2.0);
             self.flare = @max(self.flare, 0.20 + punch * 0.28);
             // Reverse spin only occasionally — momentum builds across a few
             // beats instead of twitching direction on every hit.
@@ -295,7 +251,7 @@ pub const Context = struct {
             }
         }
         if (beat_hit) {
-            const punch = std.math.clamp(flux / (self.flux_avg * 3.0 + 0.03), 1.0, 2.0);
+            const punch = std.math.clamp(self.an.flux / (self.an.flux_avg * 3.0 + 0.03), 1.0, 2.0);
             self.shedSpark(0.85 + punch * 0.35);
             self.shedSpark(0.85 + punch * 0.35);
         }
@@ -365,17 +321,16 @@ pub const Context = struct {
         // Effect-local time (fire.zig pattern) — keeps shader noise
         // coordinates small so f32 precision holds over long sessions.
         if (self.loc_time >= 0) c.glUniform1f(self.loc_time, self.now);
-        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.bass);
-        if (self.loc_mid >= 0) c.glUniform1f(self.loc_mid, self.mid);
-        if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.treble);
-        if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.energy);
-        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.beat);
+        if (self.loc_bass >= 0) c.glUniform1f(self.loc_bass, self.an.bass);
+        if (self.loc_mid >= 0) c.glUniform1f(self.loc_mid, self.an.mid);
+        if (self.loc_treble >= 0) c.glUniform1f(self.loc_treble, self.an.treble);
+        if (self.loc_energy >= 0) c.glUniform1f(self.loc_energy, self.an.energy);
+        if (self.loc_beat >= 0) c.glUniform1f(self.loc_beat, self.an.beat);
         // Curiosity brightens the whole body a touch when the cursor is near.
         if (self.loc_bright >= 0) c.glUniform1f(self.loc_bright, self.brightness * (1.0 + self.curiosity * 0.25));
     }
 
     pub fn deinit(self: *Context) void {
-        self.audio.stop();
-        self.allocator.destroy(self.audio);
+        audio_mod.shutdown(self.audio, self.allocator);
     }
 };

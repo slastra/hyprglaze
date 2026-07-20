@@ -1,5 +1,6 @@
 const std = @import("std");
 const iohelp = @import("../../core/io_helper.zig");
+const config_mod = @import("../../core/config.zig");
 
 const c = @cImport({
     @cInclude("pulse/simple.h");
@@ -15,16 +16,42 @@ const channels = 2;
 const frames_per_read = sample_rate / 60;
 const read_floats = frames_per_read * channels;
 
+/// Heap-allocate an AudioCapture, resolve the monitor source from the
+/// effect's `sink` config param, and start the capture thread. Pair with
+/// `shutdown` in deinit (and errdefer during multi-step init).
+pub fn spawn(allocator: std.mem.Allocator, params: config_mod.EffectParams) !*AudioCapture {
+    const cap = try allocator.create(AudioCapture);
+    cap.* = AudioCapture.init(params.getString("sink", null));
+    cap.start();
+    return cap;
+}
+
+/// Stop-join the capture thread, then free the AudioCapture.
+pub fn shutdown(cap: *AudioCapture, allocator: std.mem.Allocator) void {
+    cap.stop();
+    allocator.destroy(cap);
+}
+
 pub const AudioCapture = struct {
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+    // Triple buffer: the three slots are always partitioned between the
+    // writer (being filled), `ready` (latest complete frame), and the
+    // reader (being copied). Publishing and taking are both single atomic
+    // exchanges on `ready`, so neither side can ever touch a slot the
+    // other holds. The high bit on `ready` marks unread data; the reader
+    // leaves it clear so it keeps re-reading its own slot until the next
+    // publish.
     waveform: [3][256]f32 = [_][256]f32{[_]f32{0} ** 256} ** 3,
-    write_idx: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-    read_idx: std.atomic.Value(u8) = std.atomic.Value(u8).init(2),
+    ready: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
+    write_slot: u8 = 0, // owned by the capture thread
+    read_slot: u8 = 2, // owned by the render thread
 
     source: [256]u8 = undefined,
     source_len: u16 = 0,
+
+    const fresh_bit: u8 = 0x80;
 
     pub fn init(sink_name: ?[]const u8) AudioCapture {
         var self = AudioCapture{};
@@ -33,9 +60,11 @@ pub const AudioCapture = struct {
             self.source_len = @intCast(monitor.len);
         } else {
             self.source_len = iohelp.autoDetectPulseMonitor(&self.source);
-            if (self.source_len > 0) {
-                log.info("auto-detected monitor: {s}", .{self.source[0..self.source_len]});
-            }
+        }
+        // Keep one byte free so getSourceZ can always NUL-terminate.
+        if (self.source_len > self.source.len - 1) self.source_len = self.source.len - 1;
+        if (sink_name == null and self.source_len > 0) {
+            log.info("auto-detected monitor: {s}", .{self.source[0..self.source_len]});
         }
         return self;
     }
@@ -55,7 +84,14 @@ pub const AudioCapture = struct {
     }
 
     pub fn getWaveform(self: *AudioCapture) [256]f32 {
-        return self.waveform[self.read_idx.load(.acquire)];
+        // Take the ready slot only when it holds unread data; hand back the
+        // slot we were reading. Otherwise keep re-reading our own slot, which
+        // the writer can never claim.
+        if (self.ready.load(.acquire) & fresh_bit != 0) {
+            const taken = self.ready.swap(self.read_slot, .acq_rel);
+            self.read_slot = taken & ~fresh_bit;
+        }
+        return self.waveform[self.read_slot];
     }
 
     fn getSourceZ(self: *AudioCapture) ?[*:0]const u8 {
@@ -105,7 +141,7 @@ pub const AudioCapture = struct {
                 }
 
                 // Downsample to 128 samples per channel, averaging each step
-                const wi = self.write_idx.load(.acquire);
+                const wi = self.write_slot;
                 for (0..samples_per_channel) |i| {
                     var left: f32 = 0;
                     var right: f32 = 0;
@@ -119,10 +155,11 @@ pub const AudioCapture = struct {
                     self.waveform[wi][128 + i] = right * inv;
                 }
 
-                // Publish
-                const old_read = self.read_idx.load(.acquire);
-                self.read_idx.store(wi, .release);
-                self.write_idx.store(old_read, .release);
+                // Publish: exchange the filled slot into ready and reclaim
+                // whatever was there (an old frame the reader never claimed,
+                // or the slot the reader just handed back).
+                const old = self.ready.swap(wi | fresh_bit, .acq_rel);
+                self.write_slot = old & ~fresh_bit;
             }
 
             c.pa_simple_free(pa);

@@ -205,14 +205,14 @@ pub const Context = struct {
     palette_fg: [3]f32 = .{ 0.9, 0.9, 0.9 },
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
-        const sink = params.getString("sink", null);
-        const audio = try allocator.create(audio_mod.AudioCapture);
-        audio.* = audio_mod.AudioCapture.init(sink);
-        audio.start();
+        const audio = try audio_mod.spawn(allocator, params);
 
         const w: i32 = @intFromFloat(width);
         const h: i32 = @intFromFloat(height);
 
+        // NOTE: unlike other effects (which defer GL work to first upload),
+        // milkdrop creates its FBO/textures/programs right here and so
+        // relies on Effect.init being called with a current GL context.
         var textures: [2]c.GLuint = .{ 0, 0 };
         c.glGenTextures(2, &textures);
         for (0..2) |i| {
@@ -362,8 +362,7 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        self.audio.stop();
-        self.allocator.destroy(self.audio);
+        audio_mod.shutdown(self.audio, self.allocator);
         c.glDeleteFramebuffers(1, &self.fbo);
         c.glDeleteTextures(2, &self.tex);
         c.glDeleteVertexArrays(1, &self.vao);

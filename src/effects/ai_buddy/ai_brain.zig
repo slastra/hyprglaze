@@ -50,6 +50,7 @@ pub fn tick(ctx: *context_mod.Context, dt: f32) void {
     if (ctx.ai_pending) {
         ctx.ai_pending_timer += dt;
         if (ctx.ai_pending_timer > 10.0) {
+            logAwsStderr(ctx);
             log.warn("AI ! timeout after {d:.1}s, falling back to wander", .{ctx.ai_pending_timer});
             ctx.ai_pending = false;
             ctx.ai_pending_timer = 0;
@@ -61,15 +62,27 @@ pub fn tick(ctx: *context_mod.Context, dt: f32) void {
         ctx.calls_this_minute < ctx.max_calls_per_minute)
     {
         ctx.ai_timer = 0;
-        ctx.calls_this_minute += 1;
-        callHaiku(ctx);
+        // Only spend rate-limit budget on calls that actually spawned.
+        if (callHaiku(ctx)) ctx.calls_this_minute += 1;
     }
+}
+
+/// Surface whatever the aws CLI wrote to stderr; without this, auth or
+/// region problems look like an endless series of silent timeouts.
+fn logAwsStderr(ctx: *context_mod.Context) void {
+    var err_buf: PathBuf = undefined;
+    const path = aiPath(&err_buf, ctx.ai_seq, "err") orelse return;
+    const contents = iohelp.readFileAlloc(ctx.allocator, path, 4096) catch return;
+    defer ctx.allocator.free(contents);
+    const trimmed = std.mem.trim(u8, contents, " \n\t");
+    if (trimmed.len > 0) log.warn("aws stderr: {s}", .{trimmed});
 }
 
 /// Build the prompt, write it to a temp file, fork `aws bedrock-runtime
 /// invoke-model`, and mark the AI as pending. Non-blocking: the response
 /// is picked up by `checkAiResponse` once the child writes `tmp_done`.
-pub fn callHaiku(ctx: *context_mod.Context) void {
+/// Returns false when the call never spawned (so it costs no budget).
+pub fn callHaiku(ctx: *context_mod.Context) bool {
     // Recent-events context.
     var context_buf: [512]u8 = undefined;
     var pos: usize = 0;
@@ -155,7 +168,7 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
                 @abs(ctx.y - (ctx.cached_focused.y + ctx.cached_focused.h)) < 5;
             break :blk if (on_focused) "yes" else "no";
         },
-    }) catch return;
+    }) catch return false;
 
     // Escape for JSON embedding.
     var escaped_prompt: [2048]u8 = undefined;
@@ -186,7 +199,7 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
     var body_buf: [4096]u8 = undefined;
     const body = std.fmt.bufPrint(&body_buf,
         \\{{"anthropic_version":"bedrock-2023-05-31","max_tokens":100,"messages":[{{"role":"user","content":"{s}"}}]}}
-    , .{escaped_prompt[0..ep]}) catch return;
+    , .{escaped_prompt[0..ep]}) catch return false;
 
     // New sequence generation: orphan any in-flight call and clean up the
     // previous generation's files.
@@ -197,12 +210,12 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
     var resp_buf: PathBuf = undefined;
     var done_buf: PathBuf = undefined;
     var err_buf: PathBuf = undefined;
-    const tmp_request = aiPath(&req_buf, ctx.ai_seq, "req") orelse return;
-    const tmp_response = aiPath(&resp_buf, ctx.ai_seq, "resp") orelse return;
-    const tmp_done = aiPath(&done_buf, ctx.ai_seq, "done") orelse return;
-    const tmp_err = aiPath(&err_buf, ctx.ai_seq, "err") orelse return;
+    const tmp_request = aiPath(&req_buf, ctx.ai_seq, "req") orelse return false;
+    const tmp_response = aiPath(&resp_buf, ctx.ai_seq, "resp") orelse return false;
+    const tmp_done = aiPath(&done_buf, ctx.ai_seq, "done") orelse return false;
+    const tmp_err = aiPath(&err_buf, ctx.ai_seq, "err") orelse return false;
 
-    iohelp.writeFileAbsolute(tmp_request, body) catch return;
+    iohelp.writeFileAbsolute(tmp_request, body) catch return false;
 
     log.debug("AI > standing={s} focused={s} visited={d} mood={s} time={s}({d}:00)", .{
         if (ctx.current_window_len > 0) ctx.current_window[0..ctx.current_window_len] else "ground",
@@ -222,13 +235,14 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
         "--model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 " ++
         "--content-type application/json " ++
         "--body file://{s} {s} 2>{s} 1>/dev/null && " ++
-        "touch {s}) &", .{ tmp_request, tmp_response, tmp_err, tmp_done }) catch return;
+        "touch {s}) &", .{ tmp_request, tmp_response, tmp_err, tmp_done }) catch return false;
     if (csystem(cmd) != 0) {
         log.warn("AI shell launch failed", .{});
-        return;
+        return false;
     }
     ctx.ai_pending = true;
     ctx.ai_pending_timer = 0;
+    return true;
 }
 
 /// Poll for the marker file; if present, parse the Bedrock response and

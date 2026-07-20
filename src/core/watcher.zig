@@ -86,11 +86,6 @@ pub const FileWatcher = struct {
         return matched;
     }
 
-    pub fn rewatch(self: *FileWatcher) void {
-        // Directory watch survives renames — no-op, kept for API compat
-        _ = self;
-    }
-
     pub fn deinit(self: *FileWatcher) void {
         _ = linux.inotify_rm_watch(self.inotify_fd, self.watch_fd);
         closeFd(self.inotify_fd);

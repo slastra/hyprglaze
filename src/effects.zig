@@ -29,6 +29,8 @@ const ivy = @import("effects/ivy.zig");
 const whorl = @import("effects/whorl.zig");
 const weft = @import("effects/weft.zig");
 
+/// Class and title of one mapped window (truncated copies), parallel to
+/// `FrameState.windows` by index.
 pub const WindowInfo = struct {
     class: [64]u8 = undefined,
     class_len: u8 = 0,
@@ -36,6 +38,10 @@ pub const WindowInfo = struct {
     title_len: u8 = 0,
 };
 
+/// Per-frame snapshot of the desktop handed to every effect's `update`.
+/// The slice fields (`windows`, `collision_rects`, `window_info`) and the
+/// `palette` pointer are only valid for the duration of the call - effects
+/// that need them later (e.g. in `upload`) must copy what they keep.
 pub const FrameState = struct {
     dt: f32,
     time: f32,
@@ -51,6 +57,18 @@ pub const FrameState = struct {
     palette: ?*const palette_mod.Palette = null,
 };
 
+/// The active desktop effect. Method contract for every variant Context:
+/// - `init` may be called WITHOUT a current GL context, so GL resource
+///   creation belongs in the first `upload` call (milkdrop is the lone
+///   exception and requires a current context at init; see the note in
+///   milkdrop/context.zig).
+/// - `update(state)` runs once per frame before rendering; it may assume a
+///   monotonically advancing clock but nothing about GL. FrameState slices
+///   are only valid during the call (see FrameState).
+/// - `upload(prog)` runs with the GL context current and pushes uniforms
+///   (and any lazily created GL state) to the program.
+/// - `deinit` must release everything init/update/upload acquired,
+///   including stopping any background threads.
 pub const Effect = union(enum) {
     particles: particles.Context,
     windowglow: windowglow.Context,
@@ -73,65 +91,37 @@ pub const Effect = union(enum) {
     whorl: whorl.Context,
     weft: weft.Context,
 
+    /// Config section an effect reads its params from. Defaults to the
+    /// variant name; the exceptions: starfield and milkdrop intentionally
+    /// read the shared [visualizer] section (same audio knobs, e.g. sink),
+    /// and ai_buddy shares [buddy] with the plain buddy.
+    fn paramSection(comptime field_name: []const u8) []const u8 {
+        if (std.mem.eql(u8, field_name, "starfield")) return "visualizer";
+        if (std.mem.eql(u8, field_name, "milkdrop")) return "visualizer";
+        if (std.mem.eql(u8, field_name, "ai_buddy")) return "buddy";
+        return field_name;
+    }
+
+    /// Call `T.init` with whichever of the standard argument shapes it
+    /// declares (arity-dispatched at comptime). The `!T` return normalizes
+    /// plain and error-union inits.
+    fn initContext(comptime T: type, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config, comptime section: []const u8) !T {
+        const n_args = @typeInfo(@TypeOf(T.init)).@"fn".params.len;
+        if (comptime n_args == 0) return T.init();
+        const params = config_mod.effectParams(cfg, section);
+        return switch (comptime n_args) {
+            1 => T.init(params),
+            2 => T.init(allocator, params),
+            4 => T.init(allocator, width, height, params),
+            else => @compileError("unsupported Context.init signature on " ++ @typeName(T)),
+        };
+    }
+
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
-        if (std.mem.eql(u8, name, "particles")) {
-            const params = config_mod.effectParams(cfg, "particles");
-            return .{ .particles = particles.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "windowglow")) {
-            const params = config_mod.effectParams(cfg, "windowglow");
-            return .{ .windowglow = try windowglow.Context.init(allocator, params) };
-        } else if (std.mem.eql(u8, name, "glitch")) {
-            const params = config_mod.effectParams(cfg, "glitch");
-            return .{ .glitch = try glitch.Context.init(allocator, params) };
-        } else if (std.mem.eql(u8, name, "buddy")) {
-            const params = config_mod.effectParams(cfg, "buddy");
-            return .{ .buddy = buddy.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "ai-buddy")) {
-            const params = config_mod.effectParams(cfg, "buddy");
-            return .{ .ai_buddy = ai_buddy.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "cellbloom")) {
-            const params = config_mod.effectParams(cfg, "cellbloom");
-            return .{ .cellbloom = try cellbloom.Context.init(allocator, params) };
-        } else if (std.mem.eql(u8, name, "concentric")) {
-            return .{ .concentric = concentric.Context.init() };
-        } else if (std.mem.eql(u8, name, "fluid")) {
-            const params = config_mod.effectParams(cfg, "fluid");
-            return .{ .fluid = try fluid.Context.init(allocator, params) };
-        } else if (std.mem.eql(u8, name, "starfield")) {
-            const params = config_mod.effectParams(cfg, "visualizer");
-            return .{ .starfield = try starfield.Context.init(allocator, params) };
-        } else if (std.mem.eql(u8, name, "visualizer")) {
-            const params = config_mod.effectParams(cfg, "visualizer");
-            return .{ .visualizer = try visualizer.Context.init(allocator, params) };
-        } else if (std.mem.eql(u8, name, "milkdrop")) {
-            const params = config_mod.effectParams(cfg, "visualizer");
-            return .{ .milkdrop = try milkdrop.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "tide")) {
-            const params = config_mod.effectParams(cfg, "tide");
-            return .{ .tide = tide.Context.init(params) };
-        } else if (std.mem.eql(u8, name, "fire")) {
-            return .{ .fire = fire.Context.init() };
-        } else if (std.mem.eql(u8, name, "swarm")) {
-            const params = config_mod.effectParams(cfg, "swarm");
-            return .{ .swarm = try swarm.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "voltaic")) {
-            const params = config_mod.effectParams(cfg, "voltaic");
-            return .{ .voltaic = try voltaic.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "moire")) {
-            const params = config_mod.effectParams(cfg, "moire");
-            return .{ .moire = try moire.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "fable")) {
-            const params = config_mod.effectParams(cfg, "fable");
-            return .{ .fable = try fable.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "ivy")) {
-            const params = config_mod.effectParams(cfg, "ivy");
-            return .{ .ivy = try ivy.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "whorl")) {
-            const params = config_mod.effectParams(cfg, "whorl");
-            return .{ .whorl = try whorl.Context.init(allocator, width, height, params) };
-        } else if (std.mem.eql(u8, name, "weft")) {
-            const params = config_mod.effectParams(cfg, "weft");
-            return .{ .weft = try weft.Context.init(allocator, params) };
+        inline for (@typeInfo(Effect).@"union".fields) |f| {
+            if (std.mem.eql(u8, name, comptime cliName(f.name))) {
+                return @unionInit(Effect, f.name, try initContext(f.type, allocator, width, height, cfg, comptime paramSection(f.name)));
+            }
         }
         log.err("unknown effect: '{s}'. Available: {s}", .{ name, effect_names_csv });
         return error.UnknownEffect;
@@ -155,31 +145,26 @@ pub const Effect = union(enum) {
         }
     }
 
+    /// Fragment shader an effect loads by default: shaders/<variant>.frag,
+    /// except ai_buddy which renders with buddy's frag.
     pub fn defaultShader(self: *const Effect) []const u8 {
         return switch (self.*) {
-            .particles => "shaders/particles.frag",
-            .windowglow => "shaders/windowglow.frag",
-            .glitch => "shaders/glitch.frag",
-            .buddy => "shaders/buddy.frag",
-            .ai_buddy => "shaders/buddy.frag",
-            .cellbloom => "shaders/cellbloom.frag",
-            .concentric => "shaders/concentric.frag",
-            .fluid => "shaders/fluid.frag",
-            .starfield => "shaders/starfield.frag",
-            .visualizer => "shaders/visualizer.frag",
-            .milkdrop => "shaders/milkdrop.frag",
-            .tide => "shaders/tide.frag",
-            .fire => "shaders/fire.frag",
-            .swarm => "shaders/swarm.frag",
-            .voltaic => "shaders/voltaic.frag",
-            .moire => "shaders/moire.frag",
-            .fable => "shaders/fable.frag",
-            .ivy => "shaders/ivy.frag",
-            .whorl => "shaders/whorl.frag",
-            .weft => "shaders/weft.frag",
+            inline else => |_, tag| comptime blk: {
+                const base = if (std.mem.eql(u8, @tagName(tag), "ai_buddy")) "buddy" else @tagName(tag);
+                break :blk "shaders/" ++ base ++ ".frag";
+            },
         };
     }
 };
+
+/// CLI-style effect name: the union field name with `_` rewritten to `-`
+/// (e.g. `ai_buddy` -> `ai-buddy`). Comptime only.
+fn cliName(comptime field_name: []const u8) []const u8 {
+    var out: [field_name.len]u8 = undefined;
+    for (field_name, 0..) |ch, i| out[i] = if (ch == '_') '-' else ch;
+    const final = out;
+    return &final;
+}
 
 /// Comma-joined list of all effect names with `_` rewritten to `-`.
 /// Derived at comptime from the `Effect` union so error messages and CLI
@@ -188,10 +173,7 @@ pub const effect_names_csv: []const u8 = blk: {
     var out: []const u8 = "";
     for (@typeInfo(Effect).@"union".fields, 0..) |f, i| {
         if (i > 0) out = out ++ ", ";
-        var name: [f.name.len]u8 = undefined;
-        for (f.name, 0..) |ch, j| name[j] = if (ch == '_') '-' else ch;
-        const final = name;
-        out = out ++ final[0..];
+        out = out ++ cliName(f.name);
     }
     break :blk out;
 };
@@ -207,11 +189,7 @@ pub fn listEffects() !void {
     const w = &stdout_writer.interface;
 
     inline for (@typeInfo(Effect).@"union".fields) |f| {
-        var name_buf: [64]u8 = undefined;
-        for (f.name, 0..) |ch, i| {
-            name_buf[i] = if (ch == '_') '-' else ch;
-        }
-        try w.print("{s}\n", .{name_buf[0..f.name.len]});
+        try w.print("{s}\n", .{comptime cliName(f.name)});
     }
     try w.flush();
 }

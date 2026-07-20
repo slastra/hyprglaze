@@ -26,12 +26,7 @@ pub const Context = struct {
 
     pub fn init(allocator: std.mem.Allocator, params: config_mod.EffectParams) !Context {
         var audio: ?*audio_mod.AudioCapture = null;
-        if (params.getBool("music", true)) {
-            const cap = try allocator.create(audio_mod.AudioCapture);
-            cap.* = audio_mod.AudioCapture.init(params.getString("sink", null));
-            cap.start();
-            audio = cap;
-        }
+        if (params.getBool("music", true)) audio = try audio_mod.spawn(allocator, params);
         return .{ .allocator = allocator, .audio = audio };
     }
 
@@ -56,9 +51,6 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        if (self.audio) |audio| {
-            audio.stop();
-            self.allocator.destroy(audio);
-        }
+        if (self.audio) |audio| audio_mod.shutdown(audio, self.allocator);
     }
 };

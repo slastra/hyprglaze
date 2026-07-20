@@ -72,9 +72,9 @@ pub fn step(ctx: *context_mod.Context, state: effects.FrameState, dt: f32) void 
                     if (wi < ctx.cached_window_count) {
                         const clen = ctx.cached_window_class_lens[wi];
                         if (clen > 0) {
-                            const copy_len = @min(clen, 64);
+                            const copy_len = @min(clen, ctx.cached_window_classes[wi].len);
                             @memcpy(ctx.current_window[0..copy_len], ctx.cached_window_classes[wi][0..copy_len]);
-                            ctx.current_window_len = copy_len;
+                            ctx.current_window_len = @intCast(copy_len);
                         } else {
                             const label = "window";
                             @memcpy(ctx.current_window[0..label.len], label);

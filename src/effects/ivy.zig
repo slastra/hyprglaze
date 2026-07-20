@@ -4,6 +4,7 @@ const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
 const audio_mod = @import("visualizer/audio.zig");
 const spectral = @import("spectral.zig");
+const bands_mod = @import("bands.zig");
 
 const c = @cImport({
     @cInclude("GLES3/gl3.h");
@@ -79,10 +80,7 @@ fn fhash(a: f32, b: f32) f32 {
     return x - @floor(x);
 }
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
-    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
+const smoothstep = bands_mod.smoothstep;
 
 /// Point on a rect's border at perimeter offset `t` (wraps), walking
 /// bottom -> right -> top -> left (voltaic pattern), plus the outward
@@ -202,10 +200,7 @@ pub const Context = struct {
     loc_bright: c.GLint = -1,
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
-        const sink = params.getString("sink", null);
-        const audio = try allocator.create(audio_mod.AudioCapture);
-        audio.* = audio_mod.AudioCapture.init(sink);
-        audio.start();
+        const audio = try audio_mod.spawn(allocator, params);
 
         return .{
             .allocator = allocator,
@@ -802,7 +797,6 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        self.audio.stop();
-        self.allocator.destroy(self.audio);
+        audio_mod.shutdown(self.audio, self.allocator);
     }
 };
