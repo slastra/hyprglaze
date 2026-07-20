@@ -6,8 +6,8 @@ pkgdesc="Wayland shader wallpaper daemon for Hyprland with window-aware effects 
 arch=('x86_64' 'aarch64')
 url="https://github.com/slastra/hyprglaze"
 license=('MIT')
-depends=('hyprland' 'wayland' 'mesa' 'libglvnd' 'libpulse')
-makedepends=('git' 'zig' 'wayland-protocols' 'stb')
+depends=('hyprland>=0.55' 'wayland' 'mesa' 'libglvnd' 'libpulse')
+makedepends=('git' 'zig>=0.16' 'wayland-protocols' 'stb')
 optdepends=('aws-cli-v2: AI buddy via AWS Bedrock')
 provides=('hyprglaze')
 conflicts=('hyprglaze')
