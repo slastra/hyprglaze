@@ -97,41 +97,20 @@ pub const HyprIpc = struct {
         return buf[0..total];
     }
 
-    pub fn cursorPos(self: *const HyprIpc) !CursorPos {
-        var buf: [64]u8 = undefined;
-        const response = try self.query("cursorpos", &buf);
+    /// Evaluate a Lua chunk in Hyprland's config Lua state. Requires the
+    /// Lua config manager (Hyprland ≥0.55). Returns error.EvalRejected
+    /// when the compositor reports anything other than "ok" — typically a
+    /// Lua error, or a classic hyprlang config where eval is unsupported.
+    pub fn eval(self: *const HyprIpc, code: []const u8) !void {
+        var cmd_buf: [8192]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "eval {s}", .{code}) catch return error.CodeTooLong;
 
-        // Parse "x, y\n"
-        var x: i32 = 0;
-        var y: i32 = 0;
-        var neg = false;
-        var i: usize = 0;
-
-        // Parse x
-        if (i < response.len and response[i] == '-') {
-            neg = true;
-            i += 1;
+        var reply_buf: [4096]u8 = undefined;
+        const reply = try self.query(cmd, &reply_buf);
+        if (!std.mem.eql(u8, std.mem.trimEnd(u8, reply, "\n"), "ok")) {
+            std.log.scoped(.hypr_ipc).err("eval rejected: {s}", .{reply});
+            return error.EvalRejected;
         }
-        while (i < response.len and response[i] >= '0' and response[i] <= '9') : (i += 1) {
-            x = x * 10 + @as(i32, @intCast(response[i] - '0'));
-        }
-        if (neg) x = -x;
-
-        // Skip ", "
-        while (i < response.len and (response[i] == ',' or response[i] == ' ')) : (i += 1) {}
-
-        // Parse y
-        neg = false;
-        if (i < response.len and response[i] == '-') {
-            neg = true;
-            i += 1;
-        }
-        while (i < response.len and response[i] >= '0' and response[i] <= '9') : (i += 1) {
-            y = y * 10 + @as(i32, @intCast(response[i] - '0'));
-        }
-        if (neg) y = -y;
-
-        return .{ .x = x, .y = y };
     }
 
     pub fn activeWindow(self: *const HyprIpc, allocator: std.mem.Allocator) !?WindowGeometry {
@@ -171,80 +150,6 @@ pub const HyprIpc = struct {
                 @memcpy(result.title[0..len], title[0..len]);
                 result.title_len = len;
             }
-        }
-
-        return result;
-    }
-
-    pub fn visibleWindows(self: *const HyprIpc, allocator: std.mem.Allocator) !VisibleWindows {
-        // Get active workspace ID
-        var ws_buf: [2048]u8 = undefined;
-        const ws_response = try self.query("j/activeworkspace", &ws_buf);
-        const ws_parsed = std.json.parseFromSlice(std.json.Value, allocator, ws_response, .{}) catch
-            return VisibleWindows{};
-        defer ws_parsed.deinit();
-        const active_ws_id = ws_parsed.value.object.get("id") orelse return VisibleWindows{};
-        const ws_id = active_ws_id.integer;
-
-        // Get all clients — response can be large, use allocator
-        const clients_buf = try allocator.alloc(u8, 128 * 1024);
-        defer allocator.free(clients_buf);
-        const clients_response = try self.query("j/clients", clients_buf);
-
-        const clients_parsed = std.json.parseFromSlice(std.json.Value, allocator, clients_response, .{}) catch
-            return VisibleWindows{};
-        defer clients_parsed.deinit();
-
-        var result = VisibleWindows{};
-
-        for (clients_parsed.value.array.items) |client| {
-            if (result.count >= max_visible_windows) break;
-
-            const obj = client.object;
-
-            // Filter: same workspace, mapped, not hidden
-            const client_ws = obj.get("workspace") orelse continue;
-            const client_ws_id = client_ws.object.get("id") orelse continue;
-            if (client_ws_id.integer != ws_id) continue;
-
-            const mapped = obj.get("mapped") orelse continue;
-            if (mapped != .bool or !mapped.bool) continue;
-
-            const hidden = obj.get("hidden") orelse continue;
-            if (hidden != .bool or hidden.bool) continue;
-
-            const at = obj.get("at") orelse continue;
-            const size = obj.get("size") orelse continue;
-
-            var win = WindowGeometry{
-                .x = @intCast(at.array.items[0].integer),
-                .y = @intCast(at.array.items[1].integer),
-                .w = @intCast(size.array.items[0].integer),
-                .h = @intCast(size.array.items[1].integer),
-            };
-
-            if (obj.get("address")) |addr_val| win.address = parseAddress(addr_val);
-
-            if (obj.get("class")) |class_val| {
-                if (class_val == .string) {
-                    const class = class_val.string;
-                    const len: u8 = @intCast(@min(class.len, 128));
-                    @memcpy(win.class[0..len], class[0..len]);
-                    win.class_len = len;
-                }
-            }
-
-            if (obj.get("title")) |title_val| {
-                if (title_val == .string) {
-                    const title = title_val.string;
-                    const len: u8 = @intCast(@min(title.len, 128));
-                    @memcpy(win.title[0..len], title[0..len]);
-                    win.title_len = len;
-                }
-            }
-
-            result.windows[result.count] = win;
-            result.count += 1;
         }
 
         return result;

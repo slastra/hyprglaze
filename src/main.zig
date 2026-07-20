@@ -201,7 +201,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Frame state
     var prev_time_f64: f64 = 0.0;
     var frame_count: u32 = 0;
-    var ipc_skip: u32 = 0;
     var cached_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var cached_collision_rects: [hypr.max_visible_windows]particles.Rect = undefined;
     var cached_window_count: u8 = 0;
@@ -221,13 +220,36 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const initial_addr: u64 = if (initial_focus) |w| w.address else 0;
     events.focused_address.store(initial_addr, .release);
 
-    const initial_cursor = ipc.cursorPos() catch hypr.CursorPos{ .x = 0, .y = 0 };
+    // Start the reader, then install the in-compositor Lua watcher. Its
+    // first tick emits cursor + geometry unconditionally, so waiting
+    // briefly for the first snapshot gives us a real seed state.
+    events.start() catch |err| {
+        log.err("Hyprland events thread failed to start: {}", .{err});
+        return err;
+    };
+    installWatcher(&ipc, &events) catch |err| {
+        log.err("hyprglaze requires Hyprland >= 0.55 with the Lua config manager (hyprland.lua)", .{});
+        return err;
+    };
+    var wait_ms: u32 = 0;
+    while (events.snapshotGen() == 0 and wait_ms < 300) : (wait_ms += 5) {
+        iohelp.sleepNs(5 * std.time.ns_per_ms);
+    }
+    if (events.snapshotGen() == 0)
+        log.warn("no snapshot from watcher within 300ms — starting with empty state", .{});
+    _ = events.takeDirty(); // clear the initial resync flag — we just installed
+
+    const initial_cursor = events.cursorPos();
     const seed_cursor = [2]f32{
         @floatFromInt(initial_cursor.x),
         surf_h - @as(f32, @floatFromInt(initial_cursor.y)),
     };
 
-    const raw0 = queryRawState(&ipc, allocator, surf_h, initial_addr);
+    var cached_snapshot = hypr.VisibleWindows{};
+    var last_snapshot_gen = events.snapshotGen();
+    events.copySnapshot(&cached_snapshot);
+
+    const raw0 = deriveRawState(&cached_snapshot, surf_h, initial_addr);
     trans.seed(raw0.win, seed_cursor, raw0.win_address);
     cacheWindows(&cached_windows, &cached_collision_rects, &cached_window_count, &raw0);
     for (0..raw0.window_count) |i| cached_window_info[i] = raw0.window_info[i];
@@ -238,25 +260,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var cached_raw_win = raw0.win;
     var cached_win_address: u64 = raw0.win_address;
 
-    // Start the event reader after bootstrap so the initial dirty flag
-    // doesn't trigger a redundant first-iteration re-poll.
-    _ = events.takeDirty();
-    events.start() catch |err| {
-        log.warn("Hyprland events thread failed to start: {} — falling back to polling only", .{err});
-    };
-
     // Raw window targets for smoothing
     var target_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var target_window_count: u8 = raw0.window_count;
     for (0..raw0.window_count) |i| target_windows[i] = raw0.windows[i];
 
-    // Cursor target — refreshed at most once per `cursor_query_period`. The
-    // smoothing in transition.zig is frame-rate independent and effects don't
-    // visibly react faster than the display, so polling above 60 Hz is pure
-    // IPC waste on high-refresh monitors.
     var cached_cursor: [2]f32 = seed_cursor;
-    var last_cursor_query_time: f64 = 0;
-    const cursor_query_period: f64 = 1.0 / 60.0;
+
+    // Watcher health: reinstall when the heartbeat lapses (config reload
+    // recreates the Lua state; someone may also eval it away). Attempts
+    // are rate-limited so a genuinely broken install doesn't spam.
+    const hb_lapse_ms: i64 = 6000;
+    const reinstall_min_gap: f64 = 3.0;
+    var last_install_attempt: f64 = 0;
 
     // Initial render
     effect.upload(&shader_prog);
@@ -310,19 +326,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // sin/cos, which are periodic.
             const time: f32 = @floatCast(@mod(time_f64, 10_000.0));
 
-            // Cursor: Hyprland emits no cursor events on socket2, so we poll.
-            // Capped at 60 Hz — finer sampling buys nothing visible because
-            // the smoothing in transition.zig is frame-rate independent.
-            if (time_f64 - last_cursor_query_time >= cursor_query_period) {
-                const cursor = ipc.cursorPos() catch hypr.CursorPos{ .x = 0, .y = 0 };
-                cached_cursor[0] = @floatFromInt(cursor.x);
-                cached_cursor[1] = surf_h - @as(f32, @floatFromInt(cursor.y));
-                last_cursor_query_time = time_f64;
-            }
+            // Cursor arrives as push (`hg:cur` events) — reading the
+            // atomics is free, so sample every frame.
+            const cursor = events.cursorPos();
+            cached_cursor[0] = @floatFromInt(cursor.x);
+            cached_cursor[1] = surf_h - @as(f32, @floatFromInt(cursor.y));
             const raw_cursor = cached_cursor;
 
             // Pull focus from the event stream. A change forces an
-            // immediate re-poll so geometry/metadata for the new focus
+            // immediate re-derive so geometry/metadata for the new focus
             // arrive on the same frame as the address change.
             const focused_addr = events.focusedAddress();
             const focus_changed = focused_addr != 0 and focused_addr != cached_win_address;
@@ -332,18 +344,32 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (dirty.monitor) {
                 log.info("monitor topology changed — restart hyprglaze if displays are reconfigured", .{});
             }
-            if (dirty.config) {
-                log.info("Hyprland reloaded its config", .{});
+            // Config reload recreates Hyprland's Lua state (killing the
+            // watcher); a socket2 reconnect means change-only events may
+            // have been missed. Both are fixed by an idempotent reinstall,
+            // which re-emits the full state on its first tick. The
+            // heartbeat lapse catches anything else that kills the watcher.
+            const hb_stale = hypr_events.nowMs() - events.lastHeartbeatMs() > hb_lapse_ms;
+            if ((dirty.config or dirty.resync or hb_stale) and time_f64 - last_install_attempt >= reinstall_min_gap) {
+                last_install_attempt = time_f64;
+                if (dirty.config) log.info("Hyprland reloaded its config — reinstalling watcher", .{});
+                if (hb_stale) log.warn("watcher heartbeat lapsed — reinstalling", .{});
+                installWatcher(&ipc, &events) catch |err| {
+                    log.warn("watcher reinstall failed: {} — retrying in {d}s", .{ err, @as(u32, @intFromFloat(reinstall_min_gap)) });
+                };
             }
 
-            // Re-query `j/clients` when an event signals the visible-windows
-            // list may have changed, OR every 6 frames as a backstop —
-            // Hyprland is silent during interactive drag/resize, so polling
-            // is the only way to track in-progress geometry changes.
-            ipc_skip += 1;
-            if (focus_changed or dirty.windows or dirty.workspace or ipc_skip >= 6) {
-                ipc_skip = 0;
-                const raw = queryRawState(&ipc, allocator, surf_h, cached_win_address);
+            // Re-derive window state when the watcher pushed a new
+            // snapshot or focus moved. No polling: during interactive
+            // drag/resize the in-compositor watcher sees geometry change
+            // every 16ms tick and pushes a fresh snapshot.
+            const gen = events.snapshotGen();
+            if (focus_changed or gen != last_snapshot_gen) {
+                if (gen != last_snapshot_gen) {
+                    last_snapshot_gen = gen;
+                    events.copySnapshot(&cached_snapshot);
+                }
+                const raw = deriveRawState(&cached_snapshot, surf_h, cached_win_address);
                 target_window_count = raw.window_count;
                 for (0..raw.window_count) |i| {
                     target_windows[i] = raw.windows[i];
@@ -550,16 +576,27 @@ const RawState = struct {
     focused_title_len: u8,
 };
 
-/// Query the visible-windows list and derive the focused window's geometry
-/// + metadata by looking up `focused_address` in the result. The address
-/// comes from the event stream (or a one-time bootstrap query at startup),
-/// so we no longer need separate `j/activewindow` and `j/cursorpos` calls
-/// here — caller handles those.
+/// The in-compositor Lua watcher, installed into Hyprland's config Lua
+/// state. Pushes `custom>>hg:*` events on socket2 (see hypr_events.zig).
+const watcher_lua = @embedFile("core/watcher.lua");
+
+/// (Re)install the watcher. Idempotent — the chunk disables any previous
+/// timer first, and its first tick re-emits cursor + geometry
+/// unconditionally. Seeds the heartbeat clock so the lapse detector
+/// measures from now.
+fn installWatcher(ipc: *const hypr.HyprIpc, events: *hypr_events.HyprEvents) !void {
+    try ipc.eval(watcher_lua);
+    events.noteHeartbeat();
+    log.info("lua watcher installed", .{});
+}
+
+/// Derive the focused window's geometry + metadata from the latest
+/// watcher snapshot by looking up `focused_address`. The address comes
+/// from the event stream (or a one-time bootstrap query at startup).
 ///
 /// `win_address` in the result is 0 when the focused window is not present
 /// in the visible list (e.g. focus is on another monitor's workspace).
-fn queryRawState(ipc: *const hypr.HyprIpc, allocator: std.mem.Allocator, surf_h: f32, focused_address: u64) RawState {
-    const visible = ipc.visibleWindows(allocator) catch hypr.VisibleWindows{};
+fn deriveRawState(visible: *const hypr.VisibleWindows, surf_h: f32, focused_address: u64) RawState {
     var windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var win_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
     var focused_idx: ?usize = null;

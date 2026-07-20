@@ -1,7 +1,13 @@
 const std = @import("std");
 const hypr = @import("core/hypr.zig");
+const hypr_events = @import("core/hypr_events.zig");
 const iohelp = @import("core/io_helper.zig");
 
+const watcher_lua = @embedFile("core/watcher.lua");
+
+/// Diagnostic for the push pipeline: installs the in-compositor Lua
+/// watcher, then prints the pushed cursor/window state for ~10 seconds.
+/// Move the cursor and drag windows — the numbers should follow live.
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -24,43 +30,50 @@ pub fn main() !void {
         return err;
     };
 
-    // One-shot monitor info
+    // One-shot monitor info (startup-only query, same as the daemon)
     const mon = try ipc.primaryMonitor(allocator);
     try stdout.print("Monitor: {d}x{d} at ({d},{d})\n", .{ mon.width, mon.height, mon.x, mon.y });
 
-    // Poll loop — 30fps for ~5 seconds (150 frames)
-    try stdout.print("\nPolling cursor + active window (150 frames @ 30fps)...\n", .{});
-    try stdout.print("{s:<20} {s:<30} {s}\n", .{ "cursor", "window pos/size", "class" });
+    var events = try hypr_events.HyprEvents.init();
+    try events.start();
+    defer events.deinit();
+
+    try ipc.eval(watcher_lua);
+    events.noteHeartbeat();
+    try stdout.print("Lua watcher installed. Streaming pushed state for ~10s...\n\n", .{});
+    try stdout.print("{s:<16} {s:<8} {s:<30} {s}\n", .{ "cursor", "windows", "focused/first pos/size", "class" });
     try stdout.print("{s:-<80}\n", .{""});
     try stdout.flush();
 
-    const t_start = iohelp.nowNs();
-    _ = t_start;
-
+    var snap = hypr.VisibleWindows{};
     var frame: u32 = 0;
-    while (frame < 150) : (frame += 1) {
-        const cursor = ipc.cursorPos() catch |err| {
-            try stderr.print("cursorpos error: {}\n", .{err});
-            try stderr.flush();
-            continue;
-        };
+    while (frame < 300) : (frame += 1) {
+        events.copySnapshot(&snap);
+        const cur = events.cursorPos();
 
         var class_name: []const u8 = "(none)";
         var win_str_buf: [64]u8 = undefined;
         var win_str: []const u8 = "(none)";
-
-        if (ipc.activeWindow(allocator) catch null) |win| {
-            class_name = win.className();
-            win_str = std.fmt.bufPrint(&win_str_buf, "{d},{d} {d}x{d}", .{ win.x, win.y, win.w, win.h }) catch "(fmt err)";
+        if (snap.count > 0) {
+            const focused = events.focusedAddress();
+            var idx: usize = 0;
+            for (0..snap.count) |i| {
+                if (snap.windows[i].address == focused) idx = i;
+            }
+            const w = snap.windows[idx];
+            class_name = w.className();
+            win_str = std.fmt.bufPrint(&win_str_buf, "{d},{d} {d}x{d}", .{ w.x, w.y, w.w, w.h }) catch "(fmt err)";
         }
 
-        try stdout.print("\r{d:>5},{d:<5}       {s:<30} {s}", .{ cursor.x, cursor.y, win_str, class_name });
+        try stdout.print("\r{d:>6},{d:<6}   {d:<8} {s:<30} {s}          ", .{ cur.x, cur.y, snap.count, win_str, class_name });
         try stdout.flush();
 
-        // Sleep ~33ms (30fps)
         iohelp.sleepNs(33 * std.time.ns_per_ms);
     }
 
-    try stdout.print("\n\nDone. {d} frames polled.\n", .{frame});
+    try stdout.print("\n\nDone. gen={d} last_hb_age={d}ms\n", .{
+        events.snapshotGen(),
+        hypr_events.nowMs() - events.lastHeartbeatMs(),
+    });
     try stdout.flush();
 }
