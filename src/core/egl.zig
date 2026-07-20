@@ -76,10 +76,15 @@ pub const EglState = struct {
         };
     }
 
+    /// Idempotent: a second call is a no-op. recreateGraphics relies on
+    /// this — it tears down before rebuilding, and if the rebuild fails
+    /// the deferred deinit in main() runs against the same struct.
     pub fn deinit(self: *EglState) void {
+        if (self.display == c.EGL_NO_DISPLAY) return;
         _ = c.eglMakeCurrent(self.display, c.EGL_NO_SURFACE, c.EGL_NO_SURFACE, c.EGL_NO_CONTEXT);
         _ = c.eglDestroySurface(self.display, self.surface);
         _ = c.eglDestroyContext(self.display, self.context);
         _ = c.eglTerminate(self.display);
+        self.display = c.EGL_NO_DISPLAY;
     }
 };

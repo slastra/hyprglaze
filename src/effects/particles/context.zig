@@ -23,8 +23,7 @@ pub const Context = struct {
     frame_count: u32 = 0,
 
     pub fn init(_: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) Context {
-        var count: u32 = @intCast(params.getInt("count", 60));
-        count = @min(count, MAX_TRAIL_PARTICLES);
+        const count: u32 = @intCast(std.math.clamp(params.getInt("count", 60), 0, MAX_TRAIL_PARTICLES));
         var sys = system.ParticleSystem.init(count, width, height);
         sys.damping = params.getFloat("damping", 0.999);
         sys.pop_threshold = params.getFloat("pop_threshold", 50.0);

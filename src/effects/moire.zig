@@ -130,8 +130,7 @@ pub const Context = struct {
         audio.* = audio_mod.AudioCapture.init(sink);
         audio.start();
 
-        var count: u32 = @intCast(params.getInt("count", max_bodies));
-        count = @min(count, max_bodies);
+        const count: u32 = @intCast(std.math.clamp(params.getInt("count", max_bodies), 0, max_bodies));
 
         return .{
             .allocator = allocator,

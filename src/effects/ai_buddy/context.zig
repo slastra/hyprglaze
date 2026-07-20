@@ -180,6 +180,9 @@ pub const Context = struct {
     ai_timer: f32 = 0,
     ai_pending: bool = false,
     ai_pending_timer: f32 = 0,
+    /// Scratch-file sequence generation; bumped per Bedrock call so a
+    /// timed-out call's output can never be mistaken for the current one.
+    ai_seq: u32 = 0,
 
     action_queue: [8]ai_mod.QueuedAction = undefined,
     queue_len: u8 = 0,
@@ -230,7 +233,7 @@ pub const Context = struct {
         const walk_spd = (32.0 * scale) / (6.0 / 8.0);
         const run_spd = (32.0 * scale * 2.0) / (6.0 / 12.0);
         const cooldown: f32 = params.getFloat("ai_cooldown", 5.0);
-        const max_calls: u8 = @intCast(params.getInt("max_calls_per_minute", 6));
+        const max_calls: u8 = @intCast(std.math.clamp(params.getInt("max_calls_per_minute", 6), 0, 255));
 
         return .{
             .x = width * 0.5,
@@ -612,6 +615,7 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
+        ai_brain.cleanup(self);
         if (self.sprite_tex) |*tex| tex.deinit();
     }
 };

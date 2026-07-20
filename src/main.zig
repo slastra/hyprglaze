@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const iohelp = @import("core/io_helper.zig");
 const wayland = @import("core/wayland.zig");
 const egl_mod = @import("core/egl.zig");
@@ -37,9 +38,11 @@ const CliArgs = struct {
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
+    // Leak-checking allocator in Debug; lock-cheap smp_allocator in
+    // release, where DebugAllocator's metadata and mutex are pure cost.
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.smp_allocator;
 
     const sig_act = std.posix.Sigaction{
         .handler = .{ .handler = onSignal },
@@ -137,8 +140,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     defer events.deinit();
 
-    // Wayland
-    var wl = wayland.WaylandState.init() catch |err| {
+    // Wayland. Two-phase init: `wl`'s address becomes listener userdata,
+    // so it must live here, not in a temporary inside init().
+    var wl: wayland.WaylandState = undefined;
+    wl.init() catch |err| {
         log.err("Wayland init failed: {}", .{err});
         return err;
     };

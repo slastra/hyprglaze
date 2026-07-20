@@ -269,8 +269,7 @@ pub const Context = struct {
         const accum = try allocator.create(Accum);
         accum.* = std.mem.zeroes(Accum);
 
-        var count: u32 = @intCast(params.getInt("count", 240));
-        count = @min(count, boids_mod.max_boids);
+        const count: u32 = @intCast(std.math.clamp(params.getInt("count", 240), 0, boids_mod.max_boids));
 
         var sys = boids_mod.BoidSystem.init(count, width, height);
         sys.base_speed = params.getFloat("speed", 220.0);

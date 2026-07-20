@@ -13,10 +13,28 @@ fn csystem(cmd: [*:0]const u8) c_int {
 
 const log = std.log.scoped(.ai_buddy);
 
-const tmp_request = "/tmp/hyprglaze-ai-request.json";
-const tmp_response = "/tmp/hyprglaze-ai-response.json";
-const tmp_done = "/tmp/hyprglaze-ai-done";
-const tmp_err = "/tmp/hyprglaze-ai-err";
+/// Scratch files live under $XDG_RUNTIME_DIR (0700, per-user) rather than
+/// /tmp: prompts and responses contain window titles, and fixed /tmp names
+/// are symlink-attackable and collide across instances. Names carry the
+/// pid plus a per-call sequence number; bumping the sequence orphans any
+/// still-running aws process from a timed-out call, so it can never
+/// complete into the files the poller is watching.
+const PathBuf = [192]u8;
+
+fn aiPath(buf: *PathBuf, seq: u32, comptime suffix: []const u8) ?[]const u8 {
+    const dir_z = std.c.getenv("XDG_RUNTIME_DIR") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/hyprglaze-ai-{d}-{d}.{s}", .{
+        std.mem.span(dir_z), std.c.getpid(), seq, suffix,
+    }) catch null;
+}
+
+/// Best-effort removal of one sequence generation's scratch files.
+fn removeSeqFiles(seq: u32) void {
+    var buf: PathBuf = undefined;
+    inline for (.{ "req", "resp", "done", "err" }) |suffix| {
+        if (aiPath(&buf, seq, suffix)) |p| iohelp.deleteFileAbsolute(p) catch {};
+    }
+}
 
 /// Per-frame AI rate-limit + decision driver. Increments timers, polls the
 /// in-flight Bedrock response if any, otherwise fires a fresh `callHaiku`
@@ -170,9 +188,21 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
         \\{{"anthropic_version":"bedrock-2023-05-31","max_tokens":100,"messages":[{{"role":"user","content":"{s}"}}]}}
     , .{escaped_prompt[0..ep]}) catch return;
 
-    iohelp.writeFileAbsolute(tmp_request, body) catch return;
+    // New sequence generation: orphan any in-flight call and clean up the
+    // previous generation's files.
+    removeSeqFiles(ctx.ai_seq);
+    ctx.ai_seq +%= 1;
 
-    iohelp.deleteFileAbsolute(tmp_done) catch {};
+    var req_buf: PathBuf = undefined;
+    var resp_buf: PathBuf = undefined;
+    var done_buf: PathBuf = undefined;
+    var err_buf: PathBuf = undefined;
+    const tmp_request = aiPath(&req_buf, ctx.ai_seq, "req") orelse return;
+    const tmp_response = aiPath(&resp_buf, ctx.ai_seq, "resp") orelse return;
+    const tmp_done = aiPath(&done_buf, ctx.ai_seq, "done") orelse return;
+    const tmp_err = aiPath(&err_buf, ctx.ai_seq, "err") orelse return;
+
+    iohelp.writeFileAbsolute(tmp_request, body) catch return;
 
     log.debug("AI > standing={s} focused={s} visited={d} mood={s} time={s}({d}:00)", .{
         if (ctx.current_window_len > 0) ctx.current_window[0..ctx.current_window_len] else "ground",
@@ -186,14 +216,13 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
     // Background-spawn the AWS CLI via libc `system`. Async-detach with
     // trailing `&` so the call returns before AWS completes; the marker file
     // (`tmp_done`) signals completion to `checkAiResponse`.
-    const cmd =
-        "export $(cat ~/.config/hypr/hyprglaze-aws.env | xargs) && " ++
+    var cmd_buf: [1024]u8 = undefined;
+    const cmd = std.fmt.bufPrintZ(&cmd_buf, "export $(cat ~/.config/hypr/hyprglaze-aws.env | xargs) && " ++
         "(aws bedrock-runtime invoke-model --region us-east-1 " ++
         "--model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 " ++
         "--content-type application/json " ++
-        "--body file://" ++ tmp_request ++ " " ++
-        tmp_response ++ " 2>" ++ tmp_err ++ " 1>/dev/null && " ++
-        "touch " ++ tmp_done ++ ") &";
+        "--body file://{s} {s} 2>{s} 1>/dev/null && " ++
+        "touch {s}) &", .{ tmp_request, tmp_response, tmp_err, tmp_done }) catch return;
     if (csystem(cmd) != 0) {
         log.warn("AI shell launch failed", .{});
         return;
@@ -205,6 +234,11 @@ pub fn callHaiku(ctx: *context_mod.Context) void {
 /// Poll for the marker file; if present, parse the Bedrock response and
 /// populate the action queue, speech bubble, mood, and emote on `ctx`.
 pub fn checkAiResponse(ctx: *context_mod.Context) void {
+    var done_buf: PathBuf = undefined;
+    var resp_buf: PathBuf = undefined;
+    const tmp_done = aiPath(&done_buf, ctx.ai_seq, "done") orelse return;
+    const tmp_response = aiPath(&resp_buf, ctx.ai_seq, "resp") orelse return;
+
     if (!iohelp.accessAbsolute(tmp_done)) return;
 
     const resp = iohelp.readFileAlloc(ctx.allocator, tmp_response, 64 * 1024) catch return;
@@ -213,8 +247,14 @@ pub fn checkAiResponse(ctx: *context_mod.Context) void {
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, resp, .{}) catch return;
     defer parsed.deinit();
 
+    // Bedrock error payloads are valid JSON of a different shape; check
+    // every union tag on the way down rather than panicking.
+    if (parsed.value != .object) return;
     const content = parsed.value.object.get("content") orelse return;
-    const text = content.array.items[0].object.get("text") orelse return;
+    if (content != .array or content.array.items.len == 0) return;
+    const first = content.array.items[0];
+    if (first != .object) return;
+    const text = first.object.get("text") orelse return;
     if (text != .string) return;
 
     // Strip any markdown fence around the JSON.
@@ -227,6 +267,7 @@ pub fn checkAiResponse(ctx: *context_mod.Context) void {
 
     const ai_resp = std.json.parseFromSlice(std.json.Value, ctx.allocator, ai_text, .{}) catch return;
     defer ai_resp.deinit();
+    if (ai_resp.value != .object) return;
 
     ctx.queue_len = 0;
     ctx.queue_pos = 0;
@@ -295,8 +336,15 @@ pub fn checkAiResponse(ctx: *context_mod.Context) void {
     }
 
     ctx.ai_pending = false;
-    iohelp.deleteFileAbsolute(tmp_done) catch {};
-    iohelp.deleteFileAbsolute(tmp_request) catch {};
+    removeSeqFiles(ctx.ai_seq);
+}
+
+/// Remove this instance's scratch files. Called from Context.deinit; an
+/// in-flight aws process (detached via `&`) cannot be reaped from here,
+/// but bumping nothing further means its output lands in files no one
+/// reads, under the pid-scoped names removed on the next run.
+pub fn cleanup(ctx: *context_mod.Context) void {
+    removeSeqFiles(ctx.ai_seq);
 }
 
 fn parseOneAction(ctx: *context_mod.Context, obj: std.json.ObjectMap) void {

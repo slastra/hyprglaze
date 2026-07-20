@@ -121,15 +121,19 @@ pub const HyprIpc = struct {
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch return null;
         defer parsed.deinit();
 
+        // Never trust reply shape: an error string, empty object, or a
+        // truncated reply (fixed 4KiB buffer) must yield null, not a
+        // union-tag panic.
+        if (parsed.value != .object) return null;
         const root = parsed.value.object;
-        const at = root.get("at") orelse return null;
-        const size = root.get("size") orelse return null;
+        const at = jsonIntPair(root.get("at")) orelse return null;
+        const size = jsonIntPair(root.get("size")) orelse return null;
 
         var result = WindowGeometry{
-            .x = @intCast(at.array.items[0].integer),
-            .y = @intCast(at.array.items[1].integer),
-            .w = @intCast(size.array.items[0].integer),
-            .h = @intCast(size.array.items[1].integer),
+            .x = at[0],
+            .y = at[1],
+            .w = size[0],
+            .h = size[1],
         };
 
         if (root.get("address")) |addr_val| result.address = parseAddress(addr_val);
@@ -162,8 +166,14 @@ pub const HyprIpc = struct {
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
         defer parsed.deinit();
 
-        // Use first monitor
-        const mon = parsed.value.array.items[0].object;
+        // Use first monitor. Guard every access: an error reply or an
+        // empty monitor list must error out, not panic.
+        if (parsed.value != .array or parsed.value.array.items.len == 0)
+            return error.BadMonitorReply;
+        const first = parsed.value.array.items[0];
+        if (first != .object) return error.BadMonitorReply;
+        const mon = first.object;
+
         const scale_val = mon.get("scale");
         const scale: f32 = if (scale_val) |sv| switch (sv) {
             .float => @floatCast(sv.float),
@@ -172,11 +182,26 @@ pub const HyprIpc = struct {
         } else 1.0;
 
         return .{
-            .x = @intCast(mon.get("x").?.integer),
-            .y = @intCast(mon.get("y").?.integer),
-            .width = @intCast(mon.get("width").?.integer),
-            .height = @intCast(mon.get("height").?.integer),
+            .x = jsonInt(mon.get("x")) orelse return error.BadMonitorReply,
+            .y = jsonInt(mon.get("y")) orelse return error.BadMonitorReply,
+            .width = jsonInt(mon.get("width")) orelse return error.BadMonitorReply,
+            .height = jsonInt(mon.get("height")) orelse return error.BadMonitorReply,
             .scale = scale,
         };
     }
 };
+
+fn jsonInt(val: ?std.json.Value) ?i32 {
+    const v = val orelse return null;
+    if (v != .integer) return null;
+    return std.math.cast(i32, v.integer);
+}
+
+fn jsonIntPair(val: ?std.json.Value) ?[2]i32 {
+    const v = val orelse return null;
+    if (v != .array or v.array.items.len < 2) return null;
+    return .{
+        jsonInt(v.array.items[0]) orelse return null,
+        jsonInt(v.array.items[1]) orelse return null,
+    };
+}

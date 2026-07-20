@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const hypr = @import("core/hypr.zig");
 const hypr_events = @import("core/hypr_events.zig");
 const iohelp = @import("core/io_helper.zig");
@@ -11,7 +12,7 @@ const watcher_lua = @embedFile("core/watcher.lua");
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.smp_allocator;
 
     const io_local = std.Io.Threaded.global_single_threaded.io();
     const io = io_local;

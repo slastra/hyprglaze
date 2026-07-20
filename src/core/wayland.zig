@@ -22,25 +22,29 @@ pub const WaylandState = struct {
     frame_done: bool = true,
     resize_pending: bool = false,
 
-    pub fn init() !WaylandState {
+    /// Two-phase init: `self` must be caller-owned storage that outlives
+    /// the connection, because its address is registered as listener
+    /// userdata — registry events (e.g. monitor hotplug) arrive through
+    /// that pointer for the lifetime of the display.
+    pub fn init(self: *WaylandState) !void {
         const display = c.wl_display_connect(null) orelse return error.DisplayConnectFailed;
+        errdefer c.wl_display_disconnect(display);
         const registry = c.wl_display_get_registry(display) orelse return error.RegistryFailed;
+        errdefer c.wl_registry_destroy(registry);
 
-        var state = WaylandState{
+        self.* = .{
             .display = display,
             .registry = registry,
         };
 
-        if (c.wl_registry_add_listener(registry, &registry_listener, &state) != 0)
+        if (c.wl_registry_add_listener(registry, &registry_listener, self) != 0)
             return error.RegistryListenerFailed;
 
         // Round-trip to get globals
         if (c.wl_display_roundtrip(display) == -1) return error.RoundtripFailed;
 
-        if (state.compositor == null) return error.NoCompositor;
-        if (state.layer_shell == null) return error.NoLayerShell;
-
-        return state;
+        if (self.compositor == null) return error.NoCompositor;
+        if (self.layer_shell == null) return error.NoLayerShell;
     }
 
     pub fn createLayerSurface(self: *WaylandState) !void {
