@@ -50,6 +50,8 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 
 hyprglaze talks to Hyprland through its Lua config manager, which means Hyprland 0.55 or newer configured with `hyprland.lua` rather than the classic `hyprland.conf`. At startup the daemon installs a watcher into the compositor's Lua state; if your Hyprland runs a classic config, hyprglaze will refuse to start.
 
+Developed and tested against 0.56.1. The watcher reads the monitor list through `hl.get_monitors()`; where that is unavailable it degrades to emitting only a heartbeat, which leaves the wallpaper running but tracking nothing, so prefer a recent Hyprland.
+
 ## Install (Arch Linux)
 
 ### From AUR
@@ -250,7 +252,7 @@ The watcher emits one geometry event per monitor, carrying that monitor's active
 
 | Uniform | Type | Description |
 |---------|------|-------------|
-| `iResolution` | `vec3` | Surface dimensions |
+| `iResolution` | `vec3` | Buffer dimensions in pixels. On a scaled display this is larger than the surface's logical size — a 3840x2160 monitor at scale 1.25 has a 3072x1728 surface and renders a 3840x2160 buffer. Window rects and the cursor arrive in the same space, so nothing has to convert; just don't assume it equals what `hyprctl monitors` calls the size |
 | `iTime` | `float` | Seconds since start |
 | `iMouse` | `vec4` | Cursor position (smoothed) |
 | `iWindow` | `vec4` | Focused window rect (smoothed) |
@@ -275,6 +277,31 @@ The watcher emits one geometry event per monitor, carrying that monitor's active
 5. Configure via a `[myeffect]` section in TOML, read params with `config_mod.EffectParams`
 
 New effects are picked up by `--list-effects` automatically via comptime reflection on the `Effect` union.
+
+## Testing
+
+`zig build test` covers the parsers, the coordinate transform, and the config.
+Anything involving a compositor runs in a nested Hyprland instead, so a single
+physical monitor is enough to test the multi-monitor paths:
+
+```
+zig build
+scripts/hypr-harness.sh scripts/multimonitor.test.sh   # output pinning, coordinates, two instances
+scripts/hypr-harness.sh scripts/lifecycle.test.sh      # resize, effect rebuild, output loss
+```
+
+The harness boots a second Hyprland with two outputs, the right-hand one at a
+non-zero origin, and drives only that instance — the host session is never
+touched. Effects are replaced by `tools/harness_probe.frag`, which draws a ring
+around every window rect and a crosshair at the cursor instead of anything
+pretty, so a screenshot is a coordinate readout and assertions are exact rather
+than approximate.
+
+Your host compositor must leave the nested output's window alone, or it will be
+resized and every fixed test coordinate lands off-monitor; the harness says
+which rule to add when that happens. `scripts/*.probe.sh` are not tests but
+recorded measurements of compositor behaviour that the scenarios depend on —
+run one when an assumption needs settling rather than reasoning about it.
 
 ## Credits
 
