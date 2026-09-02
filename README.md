@@ -43,6 +43,7 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 | `weft` | Windows shine through a grainy diffraction weave; the audio waveform threads through the fringes |
 | `whorl` | Cyclic cellular automaton on a phosphor CRT: two-tone spiral waves break around windows, music wired into the rules |
 | `fur` | A short combed pile: the cursor parts it, windows crush it flat and heap a ridge at their edges, bass shivers the coat |
+| `amorphous` | Flat liquid blobs in two layers, colors rolled from the theme; they drift, meet gentle resistance at windows, wrap across the screen, loosen and ripple with music, and the cursor is a lamp on their edges |
 | `crystal` | A ray-traced cluster of quartz shards with real refraction and dispersion; your windows are the lights, and the focused one is the key light |
 
 ## Requirements
@@ -74,10 +75,19 @@ zig build run
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
-#          voltaic, moire, ivy, whorl, weft, crystal, fur
+#          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
+
+[amorphous]
+# size     = 1.0        # blob radius multiplier
+# speed    = 1.0        # wobble and drift rate multiplier
+# opacity  = 0.55       # front layer over back: 1.0 is opaque, 0 fully tinted
+# music    = true       # loudness loosens surface tension; each lobe rides a band
+# sink     = "..."      # PulseAudio monitor source (auto-detected by default)
+# front    = 2          # fixed layer colors: a theme slot (1-16, the color_NN numbers
+# back     = "#C4A7E7"  # in themes.json) or a hex string; omit either to roll it
 
 [fur]
 # spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise
