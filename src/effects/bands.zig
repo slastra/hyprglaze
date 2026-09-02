@@ -1,7 +1,7 @@
 //! Shared time-domain band splitter + spectral-flux beat detector.
 //!
 //! This is the original 6-band split grown in starfield/glitch and later
-//! pasted into voltaic, fable, swarm, and moire. It slices AudioCapture's
+//! pasted into voltaic, swarm, and moire. It slices AudioCapture's
 //! TIME-DOMAIN window by sample index, so the "bands" are correlated
 //! loudness envelopes, not real frequencies (spectral.zig does the FFT
 //! version). Extracted verbatim; the numbers are tuned art, do not touch.

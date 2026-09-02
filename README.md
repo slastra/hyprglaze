@@ -39,7 +39,6 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 | `voltaic` | Lightning arcs between window borders, St. Elmo's fire on the focused frame, beat-driven discharges |
 | `moire` | Wave-interference ripples from invisible bodies orbiting windows, gravitationally lensed, audio-reactive |
 | `swarm` | Boid murmuration in pixel-block ink; a hawk dives on beats, silence settles the birds onto windows |
-| `fable` | Claude's self-portrait: a coral starburst that attends the focused window, rides the audio bands, sheds thought-sparks |
 | `ivy` | Bioluminescent vines climb window frames and screen edges, spread frame to frame, wilt in place when windows move |
 | `weft` | Windows shine through a grainy diffraction weave; the audio waveform threads through the fringes |
 | `whorl` | Cyclic cellular automaton on a phosphor CRT: two-tone spiral waves break around windows, music wired into the rules |
@@ -75,7 +74,7 @@ zig build run
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
-#          voltaic, moire, fable, ivy, whorl, weft, crystal, fur
+#          voltaic, moire, ivy, whorl, weft, crystal, fur
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -129,11 +128,6 @@ arc_rate = 1.0        # ambient strike frequency multiplier
 [moire]
 count = 60            # wave sources / orbiting bodies (max 60)
 fuzz = true           # wave-interference field; false = comet dots + trails
-# sink = "..."        # PulseAudio monitor source (auto-detected by default)
-
-[fable]
-scale = 1.0           # starburst size multiplier
-brightness = 1.0      # glow multiplier
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [ivy]

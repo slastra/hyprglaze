@@ -24,7 +24,6 @@ const fire = @import("effects/fire.zig");
 const swarm = @import("effects/swarm/context.zig");
 const voltaic = @import("effects/voltaic.zig");
 const moire = @import("effects/moire.zig");
-const fable = @import("effects/fable.zig");
 const ivy = @import("effects/ivy.zig");
 const whorl = @import("effects/whorl.zig");
 const weft = @import("effects/weft.zig");
@@ -91,7 +90,6 @@ pub const Effect = union(enum) {
     swarm: swarm.Context,
     voltaic: voltaic.Context,
     moire: moire.Context,
-    fable: fable.Context,
     ivy: ivy.Context,
     whorl: whorl.Context,
     weft: weft.Context,
