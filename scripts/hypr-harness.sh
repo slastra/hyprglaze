@@ -113,6 +113,7 @@ theme  = "Rosé Pine"
 
 [transition]
 duration = 0.0
+fade_in = 0.0   # screenshots are taken right after start; no launch fade
 
 # smoothAlpha clamps to [0.001, 0.999]; 0.001 => alpha ~1, i.e. snap in one
 # frame. Nothing to wait out, and consecutive frames stay byte-identical.
@@ -148,6 +149,12 @@ done
 [ "$NESTED_SIG" != "$HOST_SIG" ] || die "resolved to the HOST instance — aborting"
 NESTED_WL=$(hyprctl -j instances | jq -r --arg s "$NESTED_SIG" \
     '.[]|select(.instance==$s)|.wl_socket')
+# The nested compositor renders only while the host paints its windows,
+# and the host paints only the active workspace. They open on whichever
+# workspace is active now; if the user switches away mid-run every
+# screenshot stalls (grim waits on a frame that never comes), so `shot`
+# waits for the host to be back on this workspace before grabbing.
+HOST_WS=$(hyprctl -j activeworkspace | jq -r .id)
 
 hc()  { hyprctl -i "$NESTED_SIG" "$@"; }
 hcj() { hyprctl -i "$NESTED_SIG" -j "$@"; }
@@ -231,11 +238,16 @@ wl_ptr -100000 -100000
 
 # ---------------------------------------------------------------- helpers ---
 start_daemon() {   # OUTPUT TAG
+    # Hooks for the lifecycle scenarios: HG_CFG points at an alternative
+    # config file, HG_PIN=0 starts the daemon unpinned (no --output; the
+    # OUTPUT argument is then only what the layer is expected to land on).
+    local cfg="${HG_CFG:-$OUT/cfg/hypr/hyprglaze.toml}" pin=()
+    [ "${HG_PIN:-1}" != 0 ] && pin=(--output "$1")
     env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
         XDG_CONFIG_HOME="$OUT/cfg" XDG_STATE_HOME="$OUT/state" \
-        "$BIN" --config "$OUT/cfg/hypr/hyprglaze.toml" \
+        "$BIN" --config "$cfg" \
                --effect windowglow --shader tools/harness_probe.frag \
-               --output "$1" >"$OUT/hyprglaze-$2.log" 2>&1 &
+               "${pin[@]}" >"$OUT/hyprglaze-$2.log" 2>&1 &
     DAEMON_PIDS+=($!)
     eval "DAEMON_${2}_PID=$!"
     wait_for "hcj layers | jq -e --arg m '$1' '.[\$m].levels[\"0\"][]?|select(.namespace==\"hyprglaze\")' >/dev/null" 15
@@ -315,7 +327,32 @@ wait_exit() {   # PID [SECS] -> EXIT_CODE, or signals a timeout with EXIT_CODE=-
     return 1
 }
 
-shot() { sleep 0.4; WAYLAND_DISPLAY="$NESTED_WL" grim -o "$2" "$OUT/shots/$1.png" 2>>"$OUT/grim.log"; }
+host_visible() {   # block until the nested windows are on the host's active workspace
+    local ws noted=0
+    while :; do
+        ws=$(hyprctl -j activeworkspace 2>/dev/null | jq -r .id)
+        [ "$ws" = "$HOST_WS" ] && return 0
+        if [ "$noted" = 0 ]; then
+            echo "    (host is on workspace $ws; the nested compositor is on $HOST_WS and only renders" >&2
+            echo "     while visible — waiting for it to be switched back)" >&2
+            noted=1
+        fi
+        sleep 1
+    done
+}
+# grab: immediate; shot: settles 0.4s first. Both wait for host visibility
+# and bound grim, so a stall is a failed check rather than a hung run.
+grab() {           # NAME OUTPUT — up to 3 tries: a workspace switch mid-grab
+                   # stalls grim, and the timeout then lands on the retry.
+    local try
+    for try in 1 2 3; do
+        host_visible
+        WAYLAND_DISPLAY="$NESTED_WL" timeout 20 grim -o "$2" "$OUT/shots/$1.png" 2>>"$OUT/grim.log" && return 0
+        echo "    (screenshot $1 stalled, retry $try)" >&2
+    done
+    return 1
+}
+shot() { sleep 0.4; grab "$1" "$2"; }
 scan() { python3 tools/harness_scan.py "$1" "$2"; }
 
 # The focused window's ring is red; unfocused tracked windows are green.

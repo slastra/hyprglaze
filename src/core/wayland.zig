@@ -81,15 +81,24 @@ pub const WaylandState = struct {
 
     outputs: [max_outputs]OutputEntry = undefined,
     output_count: u8 = 0,
-    /// Our target output was removed from the registry. The compositor also
-    /// closes the layer surface, so this exists purely so main can say why.
+    /// Our target output was removed from the registry. The compositor
+    /// usually closes the layer surface too, but not always, so main watches
+    /// both: either one means the surface is gone and has to be rebuilt once
+    /// the output is back (`resurrect`). Cleared when an output with the
+    /// target name is announced again.
     target_gone: bool = false,
 
     configured: bool = false,
     width: u31 = 0,
     height: u31 = 0,
+    /// The compositor closed the layer surface. One-shot: `destroySurface`
+    /// clears it, and a new surface gets its own `closed`.
     should_close: bool = false,
     frame_done: bool = true,
+    /// The pending frame callback, so a surface teardown can destroy it: a
+    /// callback for a destroyed surface never fires, and without this
+    /// `frame_done` would stay false forever after a resurrect.
+    frame_callback: ?*c.wl_callback = null,
     resize_pending: bool = false,
 
     pub fn targetName(self: *const WaylandState) []const u8 {
@@ -183,9 +192,30 @@ pub const WaylandState = struct {
     ///
     /// `output_name` is empty to let the compositor pick.
     pub fn init(self: *WaylandState, output_name: []const u8) !void {
+        self.setTarget(output_name);
+        try self.connect();
+    }
+
+    /// Point the daemon at a different output. Only meaningful before the
+    /// next `createLayerSurface`/`resurrect`; the live surface stays where
+    /// it is. Clears `target_gone`, since the loss was of the old target.
+    pub fn setTarget(self: *WaylandState, output_name: []const u8) void {
         self.target_len = @intCast(@min(output_name.len, max_output_name));
         @memcpy(self.target_name[0..self.target_len], output_name[0..self.target_len]);
-        try self.connect();
+        self.target_gone = false;
+    }
+
+    /// Whether the target output is currently advertised by the compositor.
+    pub fn hasTarget(self: *const WaylandState) bool {
+        return self.targetOutput() != null;
+    }
+
+    /// Whether any advertised output carries this name.
+    pub fn hasOutput(self: *const WaylandState, name: []const u8) bool {
+        for (self.outputs[0..self.output_count]) |*e| {
+            if (std.mem.eql(u8, e.outputName(), name)) return true;
+        }
+        return false;
     }
 
     fn targetOutput(self: *const WaylandState) ?*c.wl_output {
@@ -283,11 +313,38 @@ pub const WaylandState = struct {
         const callback = c.wl_surface_frame(self.surface) orelse return error.FrameCallbackFailed;
         if (c.wl_callback_add_listener(callback, &frame_listener, self) != 0)
             return error.FrameListenerFailed;
+        self.frame_callback = callback;
         self.frame_done = false;
     }
 
     pub fn dispatch(self: *WaylandState) !void {
         if (c.wl_display_dispatch(self.display) == -1) return error.DispatchFailed;
+    }
+
+    /// Dispatch with a timeout, for the waiting state where no surface
+    /// exists and `dispatch` would block until the compositor happened to
+    /// say something. libwayland's read protocol: prepare, flush, poll the
+    /// fd, then read (or cancel) and dispatch what arrived. Returns whether
+    /// any events arrived. `timeout_ms` is bounded by the caller's need to
+    /// notice a shutdown signal, so keep it at a second or less.
+    pub fn dispatchTimeout(self: *WaylandState, timeout_ms: i32) !bool {
+        while (c.wl_display_prepare_read(self.display) != 0) {
+            if (c.wl_display_dispatch_pending(self.display) == -1) return error.DispatchFailed;
+        }
+        _ = c.wl_display_flush(self.display);
+        var fds = [_]std.posix.pollfd{.{
+            .fd = c.wl_display_get_fd(self.display),
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = std.posix.poll(&fds, timeout_ms) catch 0;
+        if (ready > 0) {
+            if (c.wl_display_read_events(self.display) == -1) return error.DispatchFailed;
+        } else {
+            c.wl_display_cancel_read(self.display);
+        }
+        if (c.wl_display_dispatch_pending(self.display) == -1) return error.DispatchFailed;
+        return ready > 0;
     }
 
     /// True once the pinned output has gone away. Losing it does not always
@@ -309,6 +366,55 @@ pub const WaylandState = struct {
         try self.createEglWindow();
     }
 
+    /// Rebuild the layer surface on the SAME connection: the display never
+    /// went away, only the output under the surface did. Cheaper than
+    /// `reconnect`, and it keeps the registry (and the output table) that
+    /// told us the output is back. Caller must destroy the EGL surface
+    /// first and recreate graphics after, exactly as for `reconnect`.
+    /// `error.OutputNotFound` means the target is not (yet) advertised,
+    /// `error.NotConfigured` that the compositor did not configure the new
+    /// surface; both are "not now", not "never".
+    pub fn resurrect(self: *WaylandState) !void {
+        self.destroySurface();
+        try self.createLayerSurface();
+        if (!self.configured) return error.NotConfigured;
+        try self.createEglWindow();
+    }
+
+    /// Destroy the surface and everything scoped to it, leaving the
+    /// connection and the output table alive, and reset every field that
+    /// describes the surface so a later `createLayerSurface` starts clean.
+    /// Idempotent. Safe against a surface the compositor already closed:
+    /// destroying a closed layer surface is a normal request.
+    pub fn destroySurface(self: *WaylandState) void {
+        if (self.connected) {
+            if (self.frame_callback) |cb| c.wl_callback_destroy(cb);
+            if (self.fractional_scale) |fs| c.wp_fractional_scale_v1_destroy(fs);
+            if (self.viewport) |vp| c.wp_viewport_destroy(vp);
+            if (self.egl_window) |win| c.wl_egl_window_destroy(win);
+            if (self.layer_surface) |ls| c.zwlr_layer_surface_v1_destroy(ls);
+            if (self.surface) |sf| c.wl_surface_destroy(sf);
+        }
+        self.frame_callback = null;
+        self.fractional_scale = null;
+        self.viewport = null;
+        self.egl_window = null;
+        self.layer_surface = null;
+        self.surface = null;
+        self.configured = false;
+        self.width = 0;
+        self.height = 0;
+        self.buffer_width = 0;
+        self.buffer_height = 0;
+        self.scale_120 = 0;
+        self.should_close = false;
+        // No surface, no pending callback: let the first post-resurrect
+        // frame draw without waiting on a `done` that will never come.
+        self.frame_done = true;
+        self.resize_pending = false;
+        self.scale_changed = false;
+    }
+
     fn releaseOutputs(self: *WaylandState) void {
         for (self.outputs[0..self.output_count]) |*e| releaseOutput(e.proxy);
         self.output_count = 0;
@@ -325,12 +431,8 @@ pub const WaylandState = struct {
         // `wl_display_disconnect`, and touching any proxy that was bound on
         // that display — the wl_outputs from the first roundtrip, in
         // particular — dereferences freed memory.
+        self.destroySurface();
         if (self.connected) {
-            if (self.fractional_scale) |fs| c.wp_fractional_scale_v1_destroy(fs);
-            if (self.viewport) |vp| c.wp_viewport_destroy(vp);
-            if (self.egl_window) |win| c.wl_egl_window_destroy(win);
-            if (self.layer_surface) |ls| c.zwlr_layer_surface_v1_destroy(ls);
-            if (self.surface) |s| c.wl_surface_destroy(s);
             // Before the display goes: they belong to the connection being
             // torn down, and `connect` rebuilds the table from the new
             // registry.
@@ -342,11 +444,6 @@ pub const WaylandState = struct {
         // must not survive as dangling pointers for a second teardown.
         self.output_count = 0;
 
-        self.fractional_scale = null;
-        self.viewport = null;
-        self.egl_window = null;
-        self.layer_surface = null;
-        self.surface = null;
         self.compositor = null;
         self.layer_shell = null;
         self.viewporter = null;
@@ -541,5 +638,6 @@ const frame_listener = c.wl_callback_listener{
 fn frameDone(data: ?*anyopaque, callback: ?*c.wl_callback, _: u32) callconv(.c) void {
     const state: *WaylandState = @ptrCast(@alignCast(data));
     state.frame_done = true;
+    state.frame_callback = null;
     if (callback) |cb| c.wl_callback_destroy(cb);
 }

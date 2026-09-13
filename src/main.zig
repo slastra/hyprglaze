@@ -126,7 +126,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return err;
     };
 
-    const mon = ipc.monitor(allocator, cfg.output) catch |err| {
+    // `var`: an unpinned daemon that loses its output may move to another.
+    var mon = ipc.monitor(allocator, cfg.output) catch |err| {
         if (err == error.MonitorNotFound) {
             log.err("no output named '{s}'", .{cfg.output.?});
             ipc.logMonitorNames(allocator);
@@ -266,6 +267,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var cached_focused_title_len: u8 = 0;
     var fps_timer = try iohelp.Timer.start();
     var timer = try iohelp.Timer.start();
+    // Launch fade: reset whenever the surface is rebuilt, so a rebuild fades
+    // in from the background like a launch instead of popping.
+    var fade_start: f64 = 0.0;
 
     // Seed: bootstrap the focused-window address once via `j/activewindow`
     // because the event stream only carries future changes, never the
@@ -334,6 +338,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         slide.axis,
         if (slide.axis == .vertical) surf_h else surf_w,
         surf_scale,
+        null,
+        0,
     );
     trans.seed(raw0.win, seed_cursor, raw0.win_address);
     cacheWindows(&cached_windows, &cached_collision_rects, &cached_window_count, &raw0);
@@ -359,10 +365,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const reinstall_min_gap: f64 = 3.0;
     var last_install_attempt: f64 = 0;
 
-    // Initial render
+    // Initial render: time 0 into the fade is the bare background.
     effect.upload(&shader_prog);
     try wl.requestFrame();
-    drawFrame(&shader_prog, &egl_state, surf_w, surf_h, 0.0, &trans, &cached_windows, cached_window_count);
+    drawFrame(&shader_prog, &egl_state, surf_w, surf_h, 0.0, &trans, &cached_windows, cached_window_count, transition.fadeIn(0.0, cfg.fade_in), fadeBg(pal));
     egl_state.swapBuffers() catch |err| log.warn("initial swapBuffers error: {}", .{err});
 
     // Bounded retries for a failed effect resize; see the resize block.
@@ -371,19 +377,43 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // window rects: they hold surface-space coordinates flipped about the old
     // height, and a resize produces no watcher snapshot to trigger that.
     var surface_resized = false;
+    // Workspace slide bookkeeping. `outgoing` is the window set of the
+    // workspace being LEFT, captured at the switch and parked one span
+    // behind the camera while the slide runs, so what slides out is what
+    // Hyprland slides out. The watcher's strip parks the nearest-id
+    // neighbor there instead, which is a different workspace whenever the
+    // switch jumps more than one (1 → 5 with 3 in between slid 3's windows
+    // out). `strip_dirty` forces one re-derive when the slide settles, so
+    // the outgoing set is swapped back for the normal strip instead of
+    // lingering off-screen as collision rects.
+    var prev_snapshot: hypr.VisibleWindows = .{};
+    var outgoing: hypr.VisibleWindows = .{};
+    var slide_was_active = false;
+    var strip_dirty = false;
 
-    // Main loop.
-    //
-    // `target_gone` is part of the CONDITION, not a check in the body. In the
-    // body it raced `should_close` — an output going away usually closes the
-    // layer surface in the same dispatch, so the condition ended the loop
-    // first and the body never ran. Purely after the loop it was worse: an
-    // output can be removed WITHOUT the surface closing, and then nothing
-    // ended the loop at all and the daemon spun forever on a monitor that no
-    // longer existed. Here, whichever happens first stops the loop, and the
-    // check after it decides how to exit.
-    while (!wl.should_close and !wl.target_gone and !should_exit.load(.acquire)) {
-        wl.dispatch() catch |err| {
+    // Losing the output. A monitor power cycle (a TV dropping hot-plug
+    // detect, a mode change) removes the wl_output and closes the layer
+    // surface; the output usually comes back moments later under the same
+    // name. Rather than exit, the loop drops the surface, waits for an
+    // output, and rebuilds on the same connection. `surface_lost` carries
+    // that state across iterations: once the surface is destroyed both
+    // Wayland flags are clear again, and the blocking `dispatch` must be
+    // skipped (nothing would wake it) in favour of the polled wait.
+    var surface_lost = false;
+    var lost_since: f64 = 0;
+    var last_resurrect_try: f64 = -10;
+    const pinned = cfg.output != null;
+    // Consecutive eglSwapBuffers failures that were NOT a reported context
+    // loss; a driver that wedges the surface without saying so looks like
+    // this, and after a few the pipeline is rebuilt anyway.
+    var swap_failures: u8 = 0;
+
+    while (!should_exit.load(.acquire)) {
+        // Bounded rather than blocking: a compositor that has stopped
+        // painting this output (a monitor that is off, a nested session on
+        // a hidden workspace) sends no frame callbacks, and a blocking
+        // dispatch would then never return to notice a shutdown signal.
+        if (!surface_lost) _ = wl.dispatchTimeout(1000) catch |err| {
             if (should_exit.load(.acquire)) break;
             log.warn("Wayland dispatch error: {} — reconnecting in 1s", .{err});
             iohelp.sleepNs(1 * std.time.ns_per_s);
@@ -402,14 +432,76 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 log.err("graphics reinit failed after Wayland reconnect: {} — exiting", .{e2});
                 return e2;
             };
-            surf_w = @floatFromInt(wl.buffer_width);
-            surf_h = @floatFromInt(wl.buffer_height);
-            surf_scale = wl.scale();
-            wl.resize_pending = false;
-            wl.scale_changed = false;
-            try wl.requestFrame();
+            afterGraphicsReset(&wl, &surf_w, &surf_h, &surf_scale, &surface_resized, &resize_retries, &fade_start, &timer);
+            try primeSurface(&wl, &shader_prog, &egl_state, &effect, surf_w, surf_h, &trans, &cached_windows, cached_window_count, &cfg, pal);
             continue;
         };
+
+        if (wl.should_close or wl.target_gone or surface_lost) {
+            const now_s = timerSeconds(&timer);
+            if (!surface_lost) {
+                surface_lost = true;
+                lost_since = now_s;
+                // EGL first, for the same reason as in the reconnect path:
+                // the EGL surface sits on the wl_egl_window about to go.
+                egl_state.deinit();
+                wl.destroySurface();
+                if (cfg.output_wait > 0) {
+                    log.warn("output '{s}' lost — waiting up to {d:.0}s for it", .{ wl.targetName(), cfg.output_wait });
+                } else {
+                    log.warn("output '{s}' lost — waiting indefinitely for an output", .{wl.targetName()});
+                }
+            }
+            const outcome = awaitOutput(&wl, &ipc, allocator, pinned, cfg.output_wait, lost_since, &timer) catch |err| switch (err) {
+                // The connection itself died: let the dispatch branch above
+                // run its reconnect (which fails and exits if the compositor
+                // is truly gone).
+                error.DispatchFailed => {
+                    surface_lost = false;
+                    continue;
+                },
+                else => return err,
+            };
+            switch (outcome) {
+                .exit => break,
+                .same => {},
+                .retarget => |new_mon| {
+                    mon = new_mon;
+                    wl.setTarget(mon.outputName());
+                    events.setMonitor(mon.outputName());
+                    events.setOrigin(mon.x, mon.y);
+                    log.info("moving to output '{s}'", .{mon.outputName()});
+                },
+            }
+            // A resurrect right after a failed one hammers the compositor
+            // with surface churn; space retries out a little.
+            const since_try = timerSeconds(&timer) - last_resurrect_try;
+            if (since_try < 0.25) iohelp.sleepNs(@intFromFloat((0.25 - since_try) * std.time.ns_per_s));
+            last_resurrect_try = timerSeconds(&timer);
+            wl.resurrect() catch |err| switch (err) {
+                error.OutputNotFound, error.NotConfigured => {
+                    log.warn("surface rebuild not possible yet ({}) — still waiting", .{err});
+                    continue;
+                },
+                else => return err,
+            };
+            recreateGraphics(allocator, &egl_state, &shader_prog, &effect, &cfg, &pal, &wl, shader_path_expanded) catch |e2| {
+                log.err("graphics reinit failed after the output returned: {} — exiting", .{e2});
+                return e2;
+            };
+            // A moved daemon needs the watcher scoped to its new monitor;
+            // for the same output the reinstall is idempotent and re-emits
+            // the full state, which the fresh surface needs anyway.
+            installWatcher(&ipc, &events) catch |err| {
+                log.warn("watcher reinstall after output return failed: {} — the heartbeat check will retry", .{err});
+            };
+            last_install_attempt = timerSeconds(&timer);
+            afterGraphicsReset(&wl, &surf_w, &surf_h, &surf_scale, &surface_resized, &resize_retries, &fade_start, &timer);
+            try primeSurface(&wl, &shader_prog, &egl_state, &effect, surf_w, surf_h, &trans, &cached_windows, cached_window_count, &cfg, pal);
+            surface_lost = false;
+            log.info("output '{s}' is back — surface recreated at {d}x{d}", .{ wl.targetName(), wl.buffer_width, wl.buffer_height });
+            continue;
+        }
 
         if (wl.resize_pending or wl.scale_changed) {
             const new_w: f32 = @floatFromInt(wl.buffer_width);
@@ -522,17 +614,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // every 16ms tick and pushes a fresh snapshot.
             const gen = events.snapshotGen();
             var force_snap = false;
-            if (focus_changed or gen != last_snapshot_gen or surface_resized) {
+            if (focus_changed or gen != last_snapshot_gen or surface_resized or strip_dirty) {
                 surface_resized = false;
+                strip_dirty = false;
                 if (gen != last_snapshot_gen) {
                     last_snapshot_gen = gen;
+                    prev_snapshot = cached_snapshot;
                     events.copySnapshot(&cached_snapshot);
                     // Workspace switch? The strip below rebases around
                     // the new active workspace (every rel shifts by one),
-                    // and the camera cancels the resulting jump. Nothing
-                    // to capture: neighbor windows stay live throughout.
+                    // and the camera cancels the resulting jump. The set
+                    // that slides out is the one that was active a moment
+                    // ago, captured here from the previous snapshot; the
+                    // strip's own -1/+1 buckets are the nearest ids, which
+                    // is only the same thing for a one-step switch.
                     switch (slide.noteWorkspace(cached_snapshot.workspace_id, time_f64)) {
-                        .slide => {},
+                        .slide => {
+                            captureOutgoing(&outgoing, &prev_snapshot, slide.dir);
+                            log.debug("slide: ws {d} -> {d}, {d} outgoing windows", .{ prev_snapshot.workspace_id, cached_snapshot.workspace_id, outgoing.count });
+                        },
                         // Workspace changed without a slidable direction
                         // (special workspace, unknown id, slides off):
                         // snap — never glide across a workspace boundary.
@@ -547,6 +647,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     slide.axis,
                     if (slide.axis == .vertical) surf_h else surf_w,
                     surf_scale,
+                    if (slide.active) &outgoing else null,
+                    if (slide.active) -@as(i8, @intFromFloat(slide.dir)) else 0,
                 );
                 target_window_count = raw.window_count;
                 for (0..raw.window_count) |i| {
@@ -571,6 +673,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // below reuse the same offset.
             const span: f32 = if (slide.axis == .vertical) surf_h else surf_w;
             const camera = slide.sample(time_f64, span);
+            // Settled: swap the outgoing set back for the normal strip on
+            // the next frame.
+            if (camera == null and slide_was_active) strip_dirty = true;
+            slide_was_active = camera != null;
 
             // While sliding, keep iWindow tracking the focused window's
             // slid-in position instead of pre-snapping to where it will
@@ -667,16 +773,28 @@ pub fn main(init: std.process.Init.Minimal) !void {
             });
             effect.upload(&shader_prog);
 
-            drawFrame(&shader_prog, &egl_state, surf_w, surf_h, time, &trans, &cached_windows, cached_window_count);
+            const fade = transition.fadeIn(time_f64 - fade_start, cfg.fade_in);
+            drawFrame(&shader_prog, &egl_state, surf_w, surf_h, time, &trans, &cached_windows, cached_window_count, fade, fadeBg(pal));
             try wl.requestFrame();
-            egl_state.swapBuffers() catch |err| {
+            if (egl_state.swapBuffers()) |_| {
+                swap_failures = 0;
+            } else |err| {
                 if (err == error.EglContextLost) {
                     log.warn("EGL context lost — reinitialising graphics", .{});
                     try recreateGraphics(allocator, &egl_state, &shader_prog, &effect, &cfg, &pal, &wl, shader_path_expanded);
+                    afterGraphicsReset(&wl, &surf_w, &surf_h, &surf_scale, &surface_resized, &resize_retries, &fade_start, &timer);
+                    swap_failures = 0;
                 } else {
+                    swap_failures +|= 1;
                     log.warn("eglSwapBuffers error: {}", .{err});
+                    if (swap_failures >= 3) {
+                        log.warn("eglSwapBuffers failed {d}x in a row — reinitialising graphics", .{swap_failures});
+                        try recreateGraphics(allocator, &egl_state, &shader_prog, &effect, &cfg, &pal, &wl, shader_path_expanded);
+                        afterGraphicsReset(&wl, &surf_w, &surf_h, &surf_scale, &surface_resized, &resize_retries, &fade_start, &timer);
+                        swap_failures = 0;
+                    }
                 }
-            };
+            }
 
             // FPS tracking
             if (cli.fps) {
@@ -689,18 +807,125 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
         }
     }
+}
 
-    // Asked here rather than inside the loop, because losing an output sets
-    // `target_gone` and closes the layer surface in the same dispatch: any
-    // in-loop check races the `should_close` condition and loses. After the
-    // loop it does not matter which flag ended it.
-    //
-    // A clean exit would be exit 0, which `Restart=on-failure` ignores — and
-    // for one instance per monitor, a monitor going away and coming back is
-    // the routine case rather than an exceptional one.
-    if (wl.target_gone) {
-        log.err("output '{s}' was removed", .{wl.targetName()});
-        return error.OutputRemoved;
+/// First frame on a fresh surface: draw and swap BEFORE waiting on a
+/// frame callback. A compositor sends no callbacks for a surface that has
+/// never committed a buffer, so requesting one first and then waiting for
+/// it in the loop deadlocks the daemon on a surface that never draws.
+/// Same order as the initial render at startup; the frame is the bare
+/// background (fade 0), which the fade then rises out of.
+fn primeSurface(
+    wl: *wayland.WaylandState,
+    shader_prog: *shader_mod.ShaderProgram,
+    egl_state: *egl_mod.EglState,
+    effect: *effects.Effect,
+    surf_w: f32,
+    surf_h: f32,
+    trans: *transition.TransitionState,
+    windows: *const [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect,
+    window_count: u8,
+    cfg: *const config_mod.Config,
+    pal: ?palette_mod.Palette,
+) !void {
+    effect.upload(shader_prog);
+    try wl.requestFrame();
+    drawFrame(shader_prog, egl_state, surf_w, surf_h, 0.0, trans, windows, window_count, transition.fadeIn(0.0, cfg.fade_in), fadeBg(pal));
+    egl_state.swapBuffers() catch |err| log.warn("first swapBuffers on the rebuilt surface failed: {}", .{err});
+}
+
+fn timerSeconds(timer: *iohelp.Timer) f64 {
+    return @as(f64, @floatFromInt(timer.read())) / 1_000_000_000.0;
+}
+
+/// The color the launch fade starts from: the theme background, or a
+/// near-black when no theme is loaded.
+fn fadeBg(pal: ?palette_mod.Palette) [3]f32 {
+    if (pal) |p| return .{ p.background.r, p.background.g, p.background.b };
+    return .{ 0.02, 0.02, 0.02 };
+}
+
+/// Bookkeeping every graphics rebuild needs, whichever path triggered it:
+/// the surface may have new dimensions, the cached window rects are flipped
+/// about the old height, and the fresh pipeline fades in like a launch.
+fn afterGraphicsReset(
+    wl: *wayland.WaylandState,
+    surf_w: *f32,
+    surf_h: *f32,
+    surf_scale: *f32,
+    surface_resized: *bool,
+    resize_retries: *u8,
+    fade_start: *f64,
+    timer: *iohelp.Timer,
+) void {
+    surf_w.* = @floatFromInt(wl.buffer_width);
+    surf_h.* = @floatFromInt(wl.buffer_height);
+    surf_scale.* = wl.scale();
+    // The flags are consumed here; the effect was already rebuilt at the
+    // new size by recreateGraphics.
+    wl.resize_pending = false;
+    wl.scale_changed = false;
+    surface_resized.* = true;
+    resize_retries.* = 0;
+    fade_start.* = timerSeconds(timer);
+}
+
+const AwaitOutcome = union(enum) {
+    /// A shutdown signal arrived while waiting.
+    exit,
+    /// The target output is advertised again.
+    same,
+    /// Unpinned daemon: the target never returned, but another output is
+    /// there; move to it.
+    retarget: hypr.MonitorInfo,
+};
+
+/// Wait, with the surface gone, until there is an output to rebuild it on.
+/// Polls the display with a timeout (nothing else would wake a blocking
+/// dispatch) with a little backoff, and for an unpinned daemon also asks
+/// Hyprland now and then which monitor is focused, adopting it once it
+/// shows up in the Wayland registry. A pinned daemon only ever waits for
+/// its own name: instances are one per monitor and must not double up.
+///
+/// `deadline_s` <= 0 waits forever; otherwise expiry exits non-zero via
+/// `error.OutputRemoved`, so a supervisor's `Restart=on-failure` fires.
+fn awaitOutput(
+    wl: *wayland.WaylandState,
+    ipc: *const hypr.HyprIpc,
+    allocator: std.mem.Allocator,
+    pinned: bool,
+    deadline_s: f32,
+    lost_since: f64,
+    timer: *iohelp.Timer,
+) !AwaitOutcome {
+    var poll_ms: i32 = 250;
+    var next_probe: f64 = timerSeconds(timer);
+    var probe_gap: f64 = 1.0;
+    while (true) {
+        if (should_exit.load(.acquire)) return .exit;
+        if (wl.hasTarget()) return .same;
+
+        const now = timerSeconds(timer);
+        if (!pinned and now >= next_probe) {
+            next_probe = now + probe_gap;
+            probe_gap = @min(probe_gap * 2.0, 8.0);
+            if (ipc.monitor(allocator, null)) |m| {
+                const name = m.outputName();
+                // Hyprland's placeholder while no real monitor exists is
+                // not somewhere to move to.
+                if (!std.mem.eql(u8, name, "FALLBACK") and wl.hasOutput(name)) return .{ .retarget = m };
+            } else |err| {
+                log.debug("monitor probe while waiting failed: {}", .{err});
+            }
+        }
+        if (deadline_s > 0 and now - lost_since >= deadline_s) {
+            log.err("output '{s}' was removed", .{wl.targetName()});
+            return error.OutputRemoved;
+        }
+
+        const got_events = try wl.dispatchTimeout(poll_ms);
+        // Events reset the backoff: a hotplug tends to come as a burst.
+        poll_ms = if (got_events) 250 else @min(poll_ms * 2, 1000);
     }
 }
 
@@ -770,6 +995,8 @@ fn drawFrame(
     trans: *transition.TransitionState,
     windows: *const [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect,
     window_count: u8,
+    fade: f32,
+    fade_bg: [3]f32,
 ) void {
     // Resolve focused / previously-focused window indices by address — reliable
     // during motion where smoothed iWindow.xy lags behind raw positions.
@@ -797,6 +1024,8 @@ fn drawFrame(
         .window_count = window_count,
         .focused_index = focused_index,
         .prev_index = prev_index,
+        .fade = fade,
+        .fade_bg = fade_bg,
     });
 }
 
@@ -896,41 +1125,40 @@ fn installWatcher(ipc: *const hypr.HyprIpc, events: *hypr_events.HyprEvents) !vo
 ///
 /// `win_address` in the result is 0 when the focused window is not present
 /// in the visible list (e.g. focus is on another monitor's workspace).
-fn deriveRawState(
-    visible: *const hypr.VisibleWindows,
+/// Copy the active-workspace windows of `from` into `out`, parked at
+/// `rel = -dir`: the set the camera will slide out. Same monitor, same
+/// origin, so the coordinates carry over untouched.
+fn captureOutgoing(out: *hypr.VisibleWindows, from: *const hypr.VisibleWindows, dir: f32) void {
+    out.* = .{ .workspace_id = from.workspace_id, .origin_x = from.origin_x, .origin_y = from.origin_y };
+    const rel: i8 = if (dir > 0) -1 else 1;
+    for (from.windows[0..from.count]) |vw| {
+        if (vw.rel != 0) continue;
+        out.windows[out.count] = vw;
+        out.windows[out.count].rel = rel;
+        out.count += 1;
+    }
+}
+
+/// Accumulates strip windows in GL surface space with their rel offsets
+/// applied, in the order the caller emits them, capped at the uniform
+/// array size.
+const StripBuilder = struct {
+    windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined,
+    win_info: [hypr.max_visible_windows]effects.WindowInfo = undefined,
+    focused_idx: ?usize = null,
+    count: u8 = 0,
     surf_h: f32,
     focused_address: u64,
     axis: workspace_slide.Axis,
     span: f32,
     scale: f32,
-) RawState {
-    var windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
-    var win_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
-    var focused_idx: ?usize = null;
-    var count: u8 = 0;
 
-    for (0..visible.count) |i| {
-        const vw = visible.windows[i];
-        if (axis == .none and vw.rel != 0) continue;
-        const out = count;
-        const r = geometry.toGl(
-            vw.x,
-            vw.y,
-            vw.w,
-            vw.h,
-            visible.origin_x,
-            visible.origin_y,
-            surf_h,
-            scale,
-        );
-        windows[out] = .{
-            .x = r.x,
-            .y = r.y,
-            .w = r.w,
-            .h = r.h,
-            .address = vw.address,
-        };
-        applyOffset(&windows[out].x, &windows[out].y, axis, @as(f32, @floatFromInt(vw.rel)) * span);
+    fn add(self: *StripBuilder, vw: *const hypr.WindowGeometry, origin_x: i32, origin_y: i32) void {
+        if (self.count >= hypr.max_visible_windows) return;
+        const out = self.count;
+        const r = geometry.toGl(vw.x, vw.y, vw.w, vw.h, origin_x, origin_y, self.surf_h, self.scale);
+        self.windows[out] = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h, .address = vw.address };
+        applyOffset(&self.windows[out].x, &self.windows[out].y, self.axis, @as(f32, @floatFromInt(vw.rel)) * self.span);
         var info = effects.WindowInfo{};
         const clen: u8 = @intCast(@min(vw.class_len, 64));
         if (clen > 0) @memcpy(info.class[0..clen], vw.class[0..clen]);
@@ -938,13 +1166,53 @@ fn deriveRawState(
         const tlen: u8 = @intCast(@min(vw.title_len, 64));
         if (tlen > 0) @memcpy(info.title[0..tlen], vw.title[0..tlen]);
         info.title_len = tlen;
-        win_info[out] = info;
-        count += 1;
+        self.win_info[out] = info;
+        self.count += 1;
+        if (self.focused_address != 0 and vw.address == self.focused_address) self.focused_idx = out;
+    }
+};
 
-        if (focused_address != 0 and vw.address == focused_address) {
-            focused_idx = out;
+/// Build the window strip from a snapshot. With `outgoing` set (a slide is
+/// running), the snapshot's `skip_rel` bucket is replaced by it: the
+/// workspace being left slides out, not whichever workspace happens to
+/// have the nearest id. Emission order is active, outgoing, far side, so
+/// the cap drops what is off-screen anyway.
+fn deriveRawState(
+    visible: *const hypr.VisibleWindows,
+    surf_h: f32,
+    focused_address: u64,
+    axis: workspace_slide.Axis,
+    span: f32,
+    scale: f32,
+    outgoing: ?*const hypr.VisibleWindows,
+    skip_rel: i8,
+) RawState {
+    var b = StripBuilder{
+        .surf_h = surf_h,
+        .focused_address = focused_address,
+        .axis = axis,
+        .span = span,
+        .scale = scale,
+    };
+
+    for (visible.windows[0..visible.count]) |*vw| {
+        if (vw.rel == 0) b.add(vw, visible.origin_x, visible.origin_y);
+    }
+    if (axis != .none) {
+        if (outgoing) |og| {
+            for (og.windows[0..og.count]) |*vw| b.add(vw, og.origin_x, og.origin_y);
+        }
+        for (visible.windows[0..visible.count]) |*vw| {
+            if (vw.rel == 0) continue;
+            if (outgoing != null and vw.rel == skip_rel) continue;
+            b.add(vw, visible.origin_x, visible.origin_y);
         }
     }
+
+    const windows = b.windows;
+    const win_info = b.win_info;
+    const focused_idx = b.focused_idx;
+    const count = b.count;
 
     var fc: [64]u8 = [_]u8{0} ** 64;
     var fc_len: u8 = 0;
@@ -995,7 +1263,10 @@ fn loadConfig(allocator: std.mem.Allocator, cli: *const CliArgs) !config_mod.Con
                 .shader = shader_dup,
                 .theme = theme_dup,
                 .output = output_dup,
+                .output_wait = config_mod.defaultOutputWait(cli.output),
+                .output_wait_set = false,
                 .transition_duration = 0.3,
+                .fade_in = 1.0,
                 .cursor_smoothing = 0.15,
                 .geometry_smoothing = 0.12,
                 .workspace_slide = .auto,
@@ -1024,6 +1295,8 @@ fn loadConfig(allocator: std.mem.Allocator, cli: *const CliArgs) !config_mod.Con
     if (cli.output) |o| {
         if (cfg.output) |old| allocator.free(old);
         cfg.output = try allocator.dupe(u8, o);
+        // Pinning from the command line changes the wait default too.
+        if (!cfg.output_wait_set) cfg.output_wait = config_mod.defaultOutputWait(cfg.output);
     }
 
     return cfg;

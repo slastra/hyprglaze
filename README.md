@@ -79,6 +79,8 @@ zig build run
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
+# output_wait = 60    # seconds to wait for a removed output to come back before
+#                     # exiting non-zero; 0 = forever (the default when unpinned)
 
 [amorphous]
 # size     = 1.0        # blob radius multiplier
@@ -100,6 +102,8 @@ theme = "Rosé Pine"
 
 [transition]
 duration = 0.25
+# fade_in = 1.0                 # seconds to fade in from the theme background on
+#                               # launch and when the surface is rebuilt; 0 disables
 
 # Workspace switches slide the effect field, mirroring Hyprland's own
 # workspace animation (direction, duration, and easing are detected from
@@ -201,11 +205,14 @@ reaches. If Hyprland is started directly, from a display manager or a
 because of `--now` and are gone after the next login. Use the `exec_cmd` form
 there.
 
-One thing the unit buys that `exec_cmd` does not: when a monitor is unplugged,
-the instance pinned to it exits non-zero, and `Restart=on-failure` brings the
-wallpaper back when the monitor returns. Launched bare from `exec_cmd` nothing
-supervises it, so that screen stays empty until you rerun the command. If you
-care about hotplug and cannot reach `graphical-session.target`, wrap the
+When a monitor goes away (a power cycle, a mode change, an unplug) the daemon
+keeps running: it drops its surface, waits for the output to come back, and
+rebuilds on the same connection, fading in as if launched. An unpinned
+instance waits indefinitely and, if a different monitor becomes the focused
+one meanwhile, moves there. A pinned instance waits only for its own output,
+for `output_wait` seconds (default 60), then exits non-zero so the unit's
+`Restart=on-failure` brings it back later. Launched bare from `exec_cmd`
+nothing supervises that exit, so either set `output_wait = 0` or wrap the
 launch in a loop:
 
 ```lua
@@ -292,6 +299,7 @@ physical monitor is enough to test the multi-monitor paths:
 zig build
 scripts/hypr-harness.sh scripts/multimonitor.test.sh   # output pinning, coordinates, two instances
 scripts/hypr-harness.sh scripts/lifecycle.test.sh      # resize, effect rebuild, output loss
+scripts/hypr-harness.sh scripts/output-loss.test.sh    # output removed and returned, launch fade
 ```
 
 The harness boots a second Hyprland with two outputs, the right-hand one at a

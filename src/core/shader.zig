@@ -169,10 +169,20 @@ pub const ShaderProgram = struct {
         window_count: u8 = 0,
         focused_index: i32 = -1,
         prev_index: i32 = -1,
+        /// Launch fade, 0..1. Below 1 the frame is blended over `fade_bg`
+        /// with a constant alpha, so every shader fades without knowing.
+        fade: f32 = 1.0,
+        fade_bg: [3]f32 = .{ 0.02, 0.02, 0.02 },
     };
 
     pub fn draw(self: *const ShaderProgram, u: FrameUniforms) void {
         c.glViewport(0, 0, @intFromFloat(u.width), @intFromFloat(u.height));
+        // The fullscreen triangle covers every pixel, so the clear only
+        // matters while fading: it is the background the frame is blended
+        // onto. Alpha 1 — the EGL config has an alpha channel and a
+        // translucent clear would show the compositor's own color through.
+        const fading = u.fade < 1.0;
+        if (fading) c.glClearColor(u.fade_bg[0], u.fade_bg[1], u.fade_bg[2], 1.0);
         c.glClear(c.GL_COLOR_BUFFER_BIT);
 
         c.glUseProgram(self.program);
@@ -202,7 +212,18 @@ pub const ShaderProgram = struct {
         if (self.i_window_count >= 0)
             c.glUniform1i(self.i_window_count, @intCast(u.window_count));
 
+        // Constant-alpha blend rather than SRC_ALPHA: the fragment alpha is
+        // whatever the shader wrote (buddy passes a sprite's through), and
+        // the fade must not depend on it. Effects that blend in their own
+        // offscreen passes (milkdrop) do so in `upload`, before this, and
+        // leave GL_BLEND off, which is the state this expects.
+        if (fading) {
+            c.glEnable(c.GL_BLEND);
+            c.glBlendColor(0.0, 0.0, 0.0, u.fade);
+            c.glBlendFunc(c.GL_CONSTANT_ALPHA, c.GL_ONE_MINUS_CONSTANT_ALPHA);
+        }
         c.glDrawArrays(c.GL_TRIANGLES, 0, 3);
+        if (fading) c.glDisable(c.GL_BLEND);
     }
 
     /// Idempotent: glDelete* on handle 0 is a spec'd no-op, and handles

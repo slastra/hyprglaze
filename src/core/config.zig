@@ -82,7 +82,20 @@ pub const Config = struct {
     /// `hyprctl monitors`. null = the focused monitor at startup. Bound when
     /// the layer surface is created, so a change needs a restart.
     output: ?[]const u8,
+    /// `output_wait` — seconds to wait for the output to come back after it
+    /// is removed (a monitor power cycle, a mode change) before giving up
+    /// and exiting non-zero. 0 = wait forever. Default 60 when `output` is
+    /// set (a pinned instance has a supervisor that restarts it), 0
+    /// otherwise (an unpinned one usually does not).
+    output_wait: f32,
+    /// Whether `output_wait` was written in the file. The default depends
+    /// on `output`, which `--output` can set after parsing.
+    output_wait_set: bool,
     transition_duration: f32,
+    /// `[transition] fade_in` — seconds to fade in from the theme
+    /// background on launch and whenever the surface is rebuilt (a
+    /// reconnect, a lost context, the output coming back). 0 disables.
+    fade_in: f32,
     cursor_smoothing: f32,
     geometry_smoothing: f32,
     /// `[transition] workspace_slide` — axis override, default auto.
@@ -154,6 +167,12 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8, source_path: []cons
         break :blk null;
     } else null;
 
+    const output_wait = if (t.get("output_wait")) |v| switch (v) {
+        .float => |f| @as(f32, @floatCast(f)),
+        .integer => |i| @as(f32, @floatFromInt(i)),
+        else => defaultOutputWait(output_str),
+    } else defaultOutputWait(output_str);
+
     // Read core sections
     const transition_params = effectParamsFromTable(t, "transition");
     const cursor_params = effectParamsFromTable(t, "cursor");
@@ -173,7 +192,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8, source_path: []cons
         .shader = shader_dup,
         .theme = theme_dup,
         .output = output_dup,
+        .output_wait = @max(0.0, output_wait),
+        .output_wait_set = t.get("output_wait") != null,
         .transition_duration = transition_params.getFloat("duration", 0.3),
+        .fade_in = @max(0.0, transition_params.getFloat("fade_in", 1.0)),
         .cursor_smoothing = cursor_params.getFloat("smoothing", 0.15),
         .geometry_smoothing = geometry_params.getFloat("smoothing", 0.12),
         .workspace_slide = parseSlideOverride(transition_params.getString("workspace_slide", null)),
@@ -183,6 +205,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8, source_path: []cons
         .raw_arena = result.arena,
         .raw_table = t,
     };
+}
+
+pub fn defaultOutputWait(output: ?[]const u8) f32 {
+    return if (output != null) 60.0 else 0.0;
 }
 
 fn parseSlideOverride(value: ?[]const u8) WorkspaceSlideOverride {
@@ -398,10 +424,27 @@ test "parse config defaults when fields missing" {
 
     try std.testing.expectEqualStrings("particles", cfg.effect);
     try std.testing.expectApproxEqAbs(@as(f32, 0.3), cfg.transition_duration, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), cfg.fade_in, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.15), cfg.cursor_smoothing, 0.001);
     try std.testing.expectEqual(WorkspaceSlideOverride.auto, cfg.workspace_slide);
     try std.testing.expectEqual(@as(f32, 0), cfg.workspace_duration);
     try std.testing.expectEqual(@as(?workspace_slide.Spring, null), cfg.workspace_spring);
+    // Unpinned: wait for the output forever.
+    try std.testing.expectEqual(@as(f32, 0), cfg.output_wait);
+}
+
+test "output_wait defaults to 60 for a pinned instance and parses either number form" {
+    var pinned = try parse(std.testing.allocator, "output = \"DP-1\"\n", "/tmp/p.toml");
+    defer deinit(&pinned, std.testing.allocator);
+    try std.testing.expectEqual(@as(f32, 60), pinned.output_wait);
+
+    var explicit = try parse(std.testing.allocator, "output = \"DP-1\"\noutput_wait = 7.5\n", "/tmp/e.toml");
+    defer deinit(&explicit, std.testing.allocator);
+    try std.testing.expectApproxEqAbs(@as(f32, 7.5), explicit.output_wait, 0.001);
+
+    var whole = try parse(std.testing.allocator, "output_wait = 30\n", "/tmp/w.toml");
+    defer deinit(&whole, std.testing.allocator);
+    try std.testing.expectEqual(@as(f32, 30), whole.output_wait);
 }
 
 test "parse workspace slide overrides" {
@@ -414,12 +457,14 @@ test "parse workspace slide overrides" {
         \\workspace_slide = "none"
         \\workspace_duration = 0.6
         \\workspace_spring = "1, 71.26, 15.83"
+        \\fade_in = 0.4
         \\
     ;
     var cfg = try parse(std.testing.allocator, src, "/tmp/ws.toml");
     defer deinit(&cfg, std.testing.allocator);
 
     try std.testing.expectEqual(WorkspaceSlideOverride.none, cfg.workspace_slide);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), cfg.fade_in, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.6), cfg.workspace_duration, 0.001);
     const sp = cfg.workspace_spring.?;
     try std.testing.expectApproxEqAbs(@as(f32, 71.26), sp.stiffness, 0.001);

@@ -41,34 +41,26 @@ sleep 1.5
 read_monitors
 
 echo
-echo "L2  losing the pinned output exits non-zero"
-# The check used to sit inside the loop body, where should_close — set by the
-# same dispatch that sets target_gone — ended the loop first, so the process
-# exited 0 and Restart=on-failure ignored it.
+echo "L2  losing the pinned output drops the surface and waits"
+# Losing the output used to end the process (exit 0 when the re-add landed
+# in the same dispatch batch, which is what a monitor power cycle does). Now
+# the daemon destroys its surface and waits for the output to return; the
+# deadline exit and the rebuild are exercised in scripts/output-loss.test.sh,
+# where the output can be removed outright.
 start_daemon $MON_A gone
 E "hl.monitor({ output = '$MON_A', disabled = true })" >/dev/null
-wait_exit "$DAEMON_gone_PID" 45
-echo "    exit code=$EXIT_CODE"
-if [ "$EXIT_CODE" -gt 0 ]; then
-    expect "[ $EXIT_CODE -gt 0 ]" "exit code is non-zero so Restart=on-failure fires"
-    expect "grep -q \"output '$MON_A' was removed\" $OUT/hyprglaze-gone.log" \
-           "and it named the output that went"
+sleep 3
+if grep -q 'lost — waiting' "$OUT/hyprglaze-gone.log"; then
+    expect "kill -0 $DAEMON_gone_PID 2>/dev/null" "the daemon is still running without its output"
+    expect "! hcj layers | jq -e --arg m '$MON_A' '.[\$m].levels[\"0\"][]?|select(.namespace==\"hyprglaze\")' >/dev/null 2>&1" \
+           "and holds no layer on it"
 else
     # NOT a product failure, and not a passing test either: disabling a monitor
     # takes it out of `hyprctl monitors` but does not appear to withdraw its
     # wl_output global from an already-connected client, so there is nothing
     # for the daemon to detect and nothing here is being exercised.
-    # (scripts/facts.probe.sh cannot settle this: wayland-info opens a NEW
-    # connection, which would not be offered a disabled output either way.)
-    #
-    # The exit path itself IS proven — when the outputs genuinely go, at
-    # compositor teardown, the daemon logs the removal and returns
-    # error.OutputRemoved. What is untested is the unplug that a user actually
-    # performs. Needs a second physical output, or a backend that can withdraw
-    # a global on demand.
     echo "    SKIP: disabling did not withdraw the wl_output global from a live"
-    echo "          client, so this scenario has nothing to observe. The exit"
-    echo "          path is covered at compositor teardown; a real unplug is not."
+    echo "          client, so this scenario has nothing to observe."
 fi
 E "hl.monitor({ output = '$MON_A', mode = '800x600', position = '0x0', scale = 1, disabled = false })" >/dev/null
 sleep 1

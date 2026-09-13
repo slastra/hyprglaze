@@ -2,9 +2,12 @@
 """Bounding box of a marker colour in a harness screenshot.
 
     harness_scan.py <shot.png> <green|red|blue|white|magenta>
+    harness_scan.py <shot.png> mean <x> <y> <w> <h>
 
 Prints "x_min y_min x_max y_max pixel_count" in PNG coordinates (y down from
-the top-left), or "none" when the colour is absent.
+the top-left), or "none" when the colour is absent. The `mean` form prints
+"r g b", the average colour of the given patch, for checks on flat areas
+such as the launch fade.
 
 The harness shader (tools/harness_probe.frag) paints in pure primaries, so a
 generous per-channel tolerance still cannot confuse one marker for another.
@@ -30,8 +33,15 @@ KEYS = {
 
 
 def main() -> int:
+    if len(sys.argv) == 7 and sys.argv[2] == "mean":
+        img = np.asarray(Image.open(sys.argv[1]).convert("RGB")).astype(int)
+        x, y, w, h = (int(v) for v in sys.argv[3:7])
+        patch = img[y : y + h, x : x + w].reshape(-1, 3)
+        r, g, b = patch.mean(axis=0)
+        print(f"{r:.0f} {g:.0f} {b:.0f}")
+        return 0
     if len(sys.argv) != 3 or sys.argv[2] not in KEYS:
-        print(f"usage: {sys.argv[0]} <shot.png> <{'|'.join(KEYS)}>", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} <shot.png> <{'|'.join(KEYS)}> | <shot.png> mean x y w h", file=sys.stderr)
         return 2
 
     img = np.asarray(Image.open(sys.argv[1]).convert("RGB")).astype(int)

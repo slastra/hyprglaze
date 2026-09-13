@@ -87,6 +87,15 @@ pub const HyprEvents = struct {
         @memcpy(self.monitor_name[0..self.monitor_name_len], name[0..self.monitor_name_len]);
     }
 
+    /// Layout origin of the monitor this daemon follows, taken under the
+    /// snapshot mutex so the reader thread cannot interleave a rebase.
+    pub fn setOrigin(self: *HyprEvents, x: i32, y: i32) void {
+        lockSpin(&self.snapshot_mutex);
+        defer self.snapshot_mutex.unlock();
+        self.snapshot.origin_x = x;
+        self.snapshot.origin_y = y;
+    }
+
     pub fn init() !HyprEvents {
         const xdg_z = std.c.getenv("XDG_RUNTIME_DIR") orelse return error.NoXdgRuntime;
         const xdg = std.mem.span(xdg_z);
