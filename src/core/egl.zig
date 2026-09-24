@@ -62,6 +62,15 @@ pub const EglState = struct {
         if (c.eglMakeCurrent(display, surface, surface, context) != c.EGL_TRUE)
             return error.EglMakeCurrentFailed;
 
+        // Swap interval 0: the main loop already paces itself on its own
+        // wl_surface.frame callback. At the default of 1, egl-wayland makes
+        // eglSwapBuffers block on a second, private frame callback with no
+        // timeout, and if the output vanishes mid-swap (a TV sleeping) the
+        // compositor never answers it: the daemon hung there for good on
+        // 2026-09-23, alive enough that the wake script's pgrep never
+        // respawned it. Non-fatal; a driver that refuses keeps the old risk.
+        _ = c.eglSwapInterval(display, 0);
+
         return .{
             .display = display,
             .context = context,
