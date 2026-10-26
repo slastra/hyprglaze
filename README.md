@@ -1,6 +1,6 @@
 # hyprglaze
 
-A Wayland shader wallpaper daemon for Hyprland that reacts to your windows, cursor, and music.
+Wayland shader wallpaper daemon for Hyprland that reacts to your windows, cursor, and music.
 
 
 https://github.com/user-attachments/assets/5eb43773-07c5-4cc6-905c-358fdd956964
