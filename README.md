@@ -2,7 +2,9 @@
 
 A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on the background layer. The wallpaper knows what is happening above it: window geometry, focus, cursor position, and system audio all feed the shaders in real time.
 
-https://github.com/user-attachments/assets/158aa0b7-2450-4e77-91af-21982a822f41
+
+https://github.com/user-attachments/assets/5eb43773-07c5-4cc6-905c-358fdd956964
+
 
 ## Features
 
