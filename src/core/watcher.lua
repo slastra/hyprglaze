@@ -135,7 +135,10 @@ __hyprglaze.t = hl.timer(function()
     for _, other in ipairs(hl.get_workspaces()) do
         local om, oid = other.monitor, other.id
         local mi = om and midx[om.id]
-        if mi and oid > 0 then
+        -- A workspace being created or torn down (a nested compositor's
+        -- special:harness coming and going) can be listed without an id yet;
+        -- comparing that nil raised "attempt to compare number with nil".
+        if mi and type(oid) == "number" and oid > 0 then
             local a = active[mi]
             if a > 0 and oid ~= a then
                 if oid < a and (not prev_id[mi] or oid > prev_id[mi]) then prev_id[mi] = oid end
