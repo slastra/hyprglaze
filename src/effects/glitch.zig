@@ -7,9 +7,7 @@ const iohelp = @import("../core/io_helper.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // A circuit-bent video feedback loop: a camera pointed at its own monitor,
 // with the desktop's window frames as the only light in the room. Each sim

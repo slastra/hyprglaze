@@ -6,9 +6,7 @@ const spectral = @import("spectral.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // A short combed pile the desktop sits on. The strands are shader-side —
 // a follicle grid marched shell by shell from the tips down to the skin —

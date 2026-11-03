@@ -8,9 +8,7 @@ const bands_mod = @import("bands.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 const WindowRect = shader_mod.ShaderProgram.WindowRect;
 
@@ -262,10 +260,10 @@ pub const Context = struct {
     vines: []Vine,
     spawn_timer: f32 = 0,
 
-    fall: [max_fall]FallingLeaf = [_]FallingLeaf{.{}} ** max_fall,
+    fall: [max_fall]FallingLeaf = @splat(.{}),
     next_fall: u8 = 0,
 
-    known: [max_known]KnownWin = [_]KnownWin{.{}} ** max_known,
+    known: [max_known]KnownWin = @splat(.{}),
     last_ws_switches: u32 = 0,
     last_slide: f32 = 1.0,
 
@@ -1403,7 +1401,7 @@ pub const Context = struct {
             // (x, y, angle, size) — a fast attack so a released leaf
             // appears the instant its stem copy vanishes (no blink), then a
             // fade over the last third of its fall.
-            var pv: [max_fall][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** max_fall;
+            var pv: [max_fall][4]f32 = @splat(.{ 0, 0, 0, 0 });
             for (self.fall, 0..) |p, i| {
                 if (!p.active) continue;
                 const env = @min(p.age * 10.0, 1.0) * (1.0 - smoothstep(p.life * 0.65, p.life, p.age));

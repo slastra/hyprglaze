@@ -185,9 +185,9 @@ pub fn deriveRawState(
         .windows = b.windows,
         .window_count = b.count,
         .window_info = b.win_info,
-        .focused_class = [_]u8{0} ** 64,
+        .focused_class = @splat(0),
         .focused_class_len = 0,
-        .focused_title = [_]u8{0} ** 64,
+        .focused_title = @splat(0),
         .focused_title_len = 0,
     };
     if (b.focused_idx) |fi| {
@@ -253,7 +253,7 @@ pub fn follow(
 /// `targets` reordered to line up with `shown` by address, or null when
 /// the two are not the same set (an unknown or zero address).
 fn matchByAddress(shown: []const WindowRect, targets: []const WindowRect) ?[max]WindowRect {
-    var used = [_]bool{false} ** max;
+    var used: [max]bool = @splat(false);
     var matched: [max]WindowRect = undefined;
     next: for (targets) |t| {
         if (t.address == 0) return null;

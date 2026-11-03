@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // release, where DebugAllocator's metadata and mutex are pure cost.
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .debug) gpa.allocator() else std.heap.smp_allocator;
 
     const sig_act = std.posix.Sigaction{
         .handler = .{ .handler = onSignal },
@@ -217,9 +217,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var cached_windows: [hypr.max_visible_windows]shader_mod.ShaderProgram.WindowRect = undefined;
     var cached_window_count: u8 = 0;
     var cached_window_info: [hypr.max_visible_windows]effects.WindowInfo = undefined;
-    var cached_focused_class: [64]u8 = [_]u8{0} ** 64;
+    var cached_focused_class: [64]u8 = @splat(0);
     var cached_focused_class_len: u8 = 0;
-    var cached_focused_title: [64]u8 = [_]u8{0} ** 64;
+    var cached_focused_title: [64]u8 = @splat(0);
     var cached_focused_title_len: u8 = 0;
     var fps_timer = try iohelp.Timer.start();
     var timer = try iohelp.Timer.start();

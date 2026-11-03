@@ -5,9 +5,7 @@ const effects = @import("../effects.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 const log = std.log.scoped(.whorl);
 
@@ -88,7 +86,7 @@ pub const Context = struct {
     /// rotation and stalls at the ring phase whose instrument is missing.
     /// Beats briefly open every gate (one surge in rhythm). 1.0 = open
     /// (music off), 0.10 floor = ambient drift in silence.
-    gates: [6]f32 = [_]f32{1.0} ** 6,
+    gates: [6]f32 = @splat(1.0),
     /// Mid-density excitability: probability that a near-miss cell
     /// (threshold-1 neighbors) fires anyway. Thick mids fatten the waves.
     soft: f32 = 0,

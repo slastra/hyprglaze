@@ -1,10 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("EGL/egl.h");
-    @cInclude("EGL/eglext.h");
-    @cInclude("GLES3/gl3.h");
-    @cInclude("wayland-egl.h");
-});
+const c = @import("c");
 
 pub const EglState = struct {
     display: c.EGLDisplay,

@@ -5,10 +5,7 @@ const effects = @import("../effects.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-    @cInclude("time.h");
-});
+const c = @import("c");
 
 /// Time-aware tide effect. A rising water line tracks wall-clock time:
 ///   start_hour → end_hour: fill rises 0 → 1

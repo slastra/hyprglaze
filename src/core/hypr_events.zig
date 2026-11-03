@@ -86,7 +86,7 @@ pub const HyprEvents = struct {
     /// `closed_head`. The main thread keeps its own tail (`drainClosed`).
     /// Absence from the geometry snapshot can't tell a closed window from
     /// one on another workspace; this is the event that can.
-    closed_ring: [closed_ring_len]std.atomic.Value(u64) = [_]std.atomic.Value(u64){.init(0)} ** closed_ring_len,
+    closed_ring: [closed_ring_len]std.atomic.Value(u64) = @splat(.init(0)),
     closed_head: std.atomic.Value(u64) = .init(0),
 
     pub const closed_ring_len = 64;

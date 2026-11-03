@@ -56,7 +56,7 @@ pub const max_entries = 64;
 
 pub const Tracker = struct {
     anim: Anim = .{},
-    entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
+    entries: [max_entries]Entry = @splat(.{}),
 
     /// Feed a new snapshot's goal rects. Windows missing from it are
     /// forgotten: whatever happened to them off-strip, Hyprland did not

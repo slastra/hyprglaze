@@ -20,7 +20,7 @@ pub const Event = struct {
 };
 
 pub const EventLog = struct {
-    events: [max_events]Event = [_]Event{.{}} ** max_events,
+    events: [max_events]Event = @splat(.{}),
     count: u8 = 0,
 
     pub fn log(self: *EventLog, comptime fmt: []const u8, args: anytype) void {

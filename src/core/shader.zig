@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 const shader_log = std.log.scoped(.shader);
 const palette_mod = @import("palette.zig");
@@ -88,7 +86,7 @@ pub const ShaderProgram = struct {
         var palette_locs: [palette_mod.max_palette_colors]c.GLint = undefined;
         var name_buf: [32]u8 = undefined;
         for (0..palette_mod.max_palette_colors) |i| {
-            const name = std.fmt.bufPrintZ(&name_buf, "iPalette[{d}]", .{i}) catch unreachable;
+            const name = std.mem.printSentinel(&name_buf, "iPalette[{d}]", .{i}, 0) catch unreachable;
             palette_locs[i] = c.glGetUniformLocation(program, name.ptr);
         }
 
@@ -103,7 +101,7 @@ pub const ShaderProgram = struct {
                 var locs: [max_windows]c.GLint = undefined;
                 var win_name_buf: [32]u8 = undefined;
                 for (0..max_windows) |i| {
-                    const n = std.fmt.bufPrintZ(&win_name_buf, "iWindows[{d}]", .{i}) catch unreachable;
+                    const n = std.mem.printSentinel(&win_name_buf, "iWindows[{d}]", .{i}, 0) catch unreachable;
                     locs[i] = c.glGetUniformLocation(program, n.ptr);
                 }
                 break :blk locs;
@@ -116,7 +114,7 @@ pub const ShaderProgram = struct {
                 var locs2: [max_particles]c.GLint = undefined;
                 var p_name_buf: [32]u8 = undefined;
                 for (0..max_particles) |i| {
-                    const n2 = std.fmt.bufPrintZ(&p_name_buf, "iParticles[{d}]", .{i}) catch unreachable;
+                    const n2 = std.mem.printSentinel(&p_name_buf, "iParticles[{d}]", .{i}, 0) catch unreachable;
                     locs2[i] = c.glGetUniformLocation(program, n2.ptr);
                 }
                 break :blk2 locs2;

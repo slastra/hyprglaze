@@ -76,7 +76,7 @@ To install system-wide (binary, shaders, sprite sheet and the systemd user
 units, the same layout as the package):
 
 ```
-sudo zig build -Doptimize=ReleaseSafe --prefix /usr
+sudo zig build --release=safe --prefix /usr
 ```
 
 ## Usage

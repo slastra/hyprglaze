@@ -2,10 +2,7 @@ const std = @import("std");
 const iohelp = @import("../core/io_helper.zig");
 const config_mod = @import("../core/config.zig");
 
-const c = @cImport({
-    @cInclude("pulse/simple.h");
-    @cInclude("pulse/error.h");
-});
+const c = @import("c");
 
 const log = std.log.scoped(.audio);
 
@@ -42,7 +39,7 @@ pub fn spawnIfMusic(allocator: std.mem.Allocator, params: config_mod.EffectParam
 /// This frame's waveform, or silence without capture: every effect's
 /// analysis decays to its no-music look on a zero signal.
 pub fn waveformOr0(cap: ?*AudioCapture) [256]f32 {
-    return if (cap) |a| a.getWaveform() else [_]f32{0} ** 256;
+    return if (cap) |a| a.getWaveform() else @splat(0);
 }
 
 pub const AudioCapture = struct {
@@ -56,7 +53,7 @@ pub const AudioCapture = struct {
     // other holds. The high bit on `ready` marks unread data; the reader
     // leaves it clear so it keeps re-reading its own slot until the next
     // publish.
-    waveform: [3][256]f32 = [_][256]f32{[_]f32{0} ** 256} ** 3,
+    waveform: [3][256]f32 = @splat(@splat(0)),
     ready: std.atomic.Value(u8) = std.atomic.Value(u8).init(1),
     write_slot: u8 = 0, // owned by the capture thread
     read_slot: u8 = 2, // owned by the render thread

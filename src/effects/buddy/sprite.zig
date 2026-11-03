@@ -6,7 +6,7 @@ const shader_mod = @import("../../core/shader.zig");
 const texture_mod = @import("../../core/texture.zig");
 const Uniforms = @import("../uniforms.zig").Uniforms;
 
-const c = @cImport({ @cInclude("GLES3/gl3.h"); });
+const c = @import("c");
 
 const log = std.log.scoped(.buddy);
 

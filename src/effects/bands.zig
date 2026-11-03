@@ -48,7 +48,7 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
 /// hang their own one-shot reactions (seeds, wobbles, punches) off it.
 pub const Splitter = struct {
     /// Smoothed energy bands (fast attack, slow decay).
-    bands: [6]f32 = [_]f32{0} ** 6,
+    bands: [6]f32 = @splat(0),
     bass: f32 = 0,
     mid: f32 = 0,
     treble: f32 = 0,

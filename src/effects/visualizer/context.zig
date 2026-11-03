@@ -4,9 +4,7 @@ const config_mod = @import("../../core/config.zig");
 const effects = @import("../../effects.zig");
 const audio_mod = @import("../audio.zig");
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 pub const Context = struct {
     audio: *audio_mod.AudioCapture,

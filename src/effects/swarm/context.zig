@@ -11,9 +11,7 @@ const particles_sys = @import("../particles/system.zig");
 
 const Uniforms = @import("../uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // Field resolution: the flock is splatted into this grid each frame and the
 // shader renders the field, not the boids — that's what turns dots into a

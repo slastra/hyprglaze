@@ -7,9 +7,7 @@ const bands_mod = @import("bands.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 const max_windows = 32;
 
@@ -82,7 +80,7 @@ pub const Context = struct {
     width: f32,
     height: f32,
 
-    bodies: [max_bodies]Body = [_]Body{.{}} ** max_bodies,
+    bodies: [max_bodies]Body = @splat(.{}),
     count: u32 = max_bodies,
     history: [max_bodies][trail_history][2]f32 = undefined,
     history_idx: u32 = 0,
@@ -92,7 +90,7 @@ pub const Context = struct {
     /// Six-band spectrum (sub-bass → air). Each body is assigned one band by
     /// its color index and pulses with that band, so the field splits the
     /// music across the swarm instead of every body reacting to everything.
-    bands: [6]f32 = [_]f32{0} ** 6,
+    bands: [6]f32 = @splat(0),
     /// Broadband energy envelope — drives the ring flow speed.
     energy: f32 = 0,
     /// Outward-ripple phase clock; advances faster with energy so the rings

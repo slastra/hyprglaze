@@ -6,9 +6,7 @@ const spectral = @import("spectral.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // The metaball topography is entirely shader-side; this context only
 // feeds it music. The six drifting ambient blobs map one-to-one onto the

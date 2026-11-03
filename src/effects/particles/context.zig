@@ -6,9 +6,7 @@ const system = @import("system.zig");
 
 const Uniforms = @import("../uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 /// Motion streak length: where the ball was this long ago.
 const trail_secs: f32 = 0.06;
@@ -17,7 +15,7 @@ pub const Context = struct {
     sys: system.ParticleSystem,
 
     // Last frame's window rects by address, for window velocities.
-    prev_addr: [system.max_colliders]u64 = [_]u64{0} ** system.max_colliders,
+    prev_addr: [system.max_colliders]u64 = @splat(0),
     prev_rect: [system.max_colliders]system.Rect = undefined,
     prev_count: usize = 0,
     last_ws_switches: u32 = 0,

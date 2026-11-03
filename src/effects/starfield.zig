@@ -8,9 +8,7 @@ const iohelp = @import("../core/io_helper.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // Flight through a 3D starfield. Stars live in a box ahead of the camera
 // and stream toward it; each is projected through the vanishing point and
@@ -168,7 +166,7 @@ pub const Context = struct {
     warp: f32 = 0,
     next_jump: f32 = 0,
 
-    colors: [16][3]f32 = [_][3]f32{.{ 0.8, 0.85, 1.0 }} ** 16,
+    colors: [16][3]f32 = @splat(.{ 0.8, 0.85, 1.0 }),
     color_count: usize = 0,
     fg: [3]f32 = .{ 0.92, 0.92, 0.96 },
 

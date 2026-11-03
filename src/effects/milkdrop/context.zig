@@ -15,9 +15,7 @@ const log = std.log.scoped(.milkdrop);
 
 const Uniforms = @import("../uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // MilkDrop, the way Ryan Geiss built it: a feedback buffer that every frame
 // is re-sampled through a per-pixel motion field (zoom, rotation, the
@@ -243,7 +241,7 @@ pub const Context = struct {
         const kick = self.music.update(dt);
 
         // Real waveform when there is one, the dream wave when quiet.
-        var wave = [_]f32{0} ** 256;
+        var wave: [256]f32 = @splat(0);
         if (self.music.audio) |a| wave = a.getWaveform();
         var rms: f32 = 0;
         for (wave) |v| rms += v * v;

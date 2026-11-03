@@ -13,26 +13,24 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 pub fn Uniforms(comptime spec: anytype) type {
     const Spec = @TypeOf(spec);
-    const fields = @typeInfo(Spec).@"struct".fields;
+    const fields = @typeInfo(Spec).@"struct".field_names;
     return struct {
         const Self = @This();
         pub const Name = std.meta.FieldEnum(Spec);
 
         program: c.GLuint = 0,
-        locs: [fields.len]c.GLint = [_]c.GLint{-1} ** fields.len,
+        locs: [fields.len]c.GLint = @splat(-1),
 
         pub fn use(self: *Self, program: c.GLuint) void {
             c.glUseProgram(program);
             if (self.program == program) return;
             self.program = program;
-            inline for (fields, 0..) |f, i| {
-                self.locs[i] = c.glGetUniformLocation(program, @field(spec, f.name));
+            inline for (fields, 0..) |f_name, i| {
+                self.locs[i] = c.glGetUniformLocation(program, @field(spec, f_name));
             }
         }
 

@@ -7,9 +7,7 @@ const smoothstep = @import("bands.zig").smoothstep;
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // Magnetic field lines: every window is a bar magnet, a north and a south
 // pole of unit charge inside it along its long axis, and the cursor is a

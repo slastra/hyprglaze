@@ -35,7 +35,7 @@ pub const FileWatcher = struct {
         const inotify_fd = try inotifyInit1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
         errdefer closeFd(inotify_fd);
 
-        const dir_path = try allocator.dupeZ(u8, path[0..sep]);
+        const dir_path = try allocator.dupeSentinel(u8, path[0..sep], 0);
         errdefer allocator.free(dir_path);
 
         const filename = try allocator.dupe(u8, path[sep + 1 ..]);

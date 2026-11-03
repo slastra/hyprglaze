@@ -8,9 +8,7 @@ const clock = @import("clock.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // The Voronoi tissue is shader-side; this context drives its ambient
 // cells and turns it into a dancefloor. Each ambient cell drifts and
@@ -35,7 +33,7 @@ pub const Context = struct {
     /// Per daughter (mother = i / 2, sister = i ^ 1): position in surface
     /// pixels, window weight, and the mother's split 0..1. Frame-constant,
     /// so it is built here once rather than in every pixel.
-    seeds: [n_seeds][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** n_seeds,
+    seeds: [n_seeds][4]f32 = @splat(.{ 0, 0, 0, 0 }),
 
     u: Uniforms(.{
         .flow = "iBloomFlow",

@@ -6,9 +6,7 @@ const spectral = @import("spectral.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // The glow itself is shader-side; this context only lets the focused
 // window's halo breathe with the music — a slow energy swell plus a

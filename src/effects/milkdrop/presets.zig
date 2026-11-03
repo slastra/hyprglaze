@@ -22,8 +22,8 @@ pub const Inputs = struct {
     beat: f32 = 0,
     beats: u32 = 0,
     /// 128 left then 128 right samples, about -1..1.
-    wave: [256]f32 = [_]f32{0} ** 256,
-    spectrum: [64]f32 = [_]f32{0} ** 64,
+    wave: [256]f32 = @splat(0),
+    spectrum: [64]f32 = @splat(0),
     aspect: f32 = 16.0 / 9.0,
     /// uv (0..1, y up).
     cursor: [2]f32 = .{ 0.5, 0.5 },
@@ -116,8 +116,8 @@ pub const Motion = struct {
 
     pub fn lerp(a: Motion, b: Motion, t: f32) Motion {
         var out: Motion = undefined;
-        inline for (@typeInfo(Motion).@"struct".fields) |f| {
-            @field(out, f.name) = @field(a, f.name) + (@field(b, f.name) - @field(a, f.name)) * t;
+        inline for (@typeInfo(Motion).@"struct".field_names) |f_name| {
+            @field(out, f_name) = @field(a, f_name) + (@field(b, f_name) - @field(a, f_name)) * t;
         }
         return out;
     }

@@ -52,9 +52,9 @@ pub const FrameState = struct {
     focused_win: transition_mod.Rect,
     windows: []const shader_mod.ShaderProgram.WindowRect,
     window_info: ?[]const WindowInfo = null,
-    focused_class: [64]u8 = [_]u8{0} ** 64,
+    focused_class: [64]u8 = @splat(0),
     focused_class_len: u8 = 0,
-    focused_title: [64]u8 = [_]u8{0} ** 64,
+    focused_title: [64]u8 = @splat(0),
     focused_title_len: u8 = 0,
     palette: ?*const palette_mod.Palette = null,
     /// Workspace slide settling: 0 = switch just happened, 1 = settled.
@@ -123,7 +123,7 @@ pub const Effect = union(enum) {
     /// declares (arity-dispatched at comptime). The `!T` return normalizes
     /// plain and error-union inits.
     fn initContext(comptime T: type, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config, comptime section: []const u8) !T {
-        const n_args = @typeInfo(@TypeOf(T.init)).@"fn".params.len;
+        const n_args = @typeInfo(@TypeOf(T.init)).@"fn".param_types.len;
         if (comptime n_args == 0) return T.init();
         const params = config_mod.effectParams(cfg, section);
         return switch (comptime n_args) {
@@ -135,9 +135,9 @@ pub const Effect = union(enum) {
     }
 
     pub fn init(name: []const u8, allocator: std.mem.Allocator, width: f32, height: f32, cfg: *const config_mod.Config) !Effect {
-        inline for (@typeInfo(Effect).@"union".fields) |f| {
-            if (std.mem.eql(u8, name, comptime cliName(f.name))) {
-                return @unionInit(Effect, f.name, try initContext(f.type, allocator, width, height, cfg, comptime paramSection(f.name)));
+        inline for (@typeInfo(Effect).@"union".field_names, @typeInfo(Effect).@"union".field_types) |f_name, f_type| {
+            if (std.mem.eql(u8, name, comptime cliName(f_name))) {
+                return @unionInit(Effect, f_name, try initContext(f_type, allocator, width, height, cfg, comptime paramSection(f_name)));
             }
         }
         log.err("unknown effect: '{s}'. Available: {s}", .{ name, effect_names_csv });
@@ -182,8 +182,8 @@ pub const Effect = union(enum) {
     /// The default shader for an effect by its CLI name, without building
     /// it (no audio thread, no GL); null for an unknown name.
     pub fn defaultShaderFor(name: []const u8) ?[]const u8 {
-        inline for (@typeInfo(Effect).@"union".fields) |f| {
-            if (std.mem.eql(u8, name, comptime cliName(f.name))) return comptime shaderOf(f.name);
+        inline for (@typeInfo(Effect).@"union".field_names) |f_name| {
+            if (std.mem.eql(u8, name, comptime cliName(f_name))) return comptime shaderOf(f_name);
         }
         return null;
     }
@@ -208,9 +208,9 @@ fn cliName(comptime field_name: []const u8) []const u8 {
 /// help can't drift from the actual variant set.
 pub const effect_names_csv: []const u8 = blk: {
     var out: []const u8 = "";
-    for (@typeInfo(Effect).@"union".fields, 0..) |f, i| {
+    for (@typeInfo(Effect).@"union".field_names, 0..) |f_name, i| {
         if (i > 0) out = out ++ ", ";
-        out = out ++ cliName(f.name);
+        out = out ++ cliName(f_name);
     }
     break :blk out;
 };
@@ -225,8 +225,8 @@ pub fn listEffects() !void {
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const w = &stdout_writer.interface;
 
-    inline for (@typeInfo(Effect).@"union".fields) |f| {
-        try w.print("{s}\n", .{comptime cliName(f.name)});
+    inline for (@typeInfo(Effect).@"union".field_names) |f_name| {
+        try w.print("{s}\n", .{comptime cliName(f_name)});
     }
     try w.flush();
 }

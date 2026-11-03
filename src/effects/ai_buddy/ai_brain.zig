@@ -230,12 +230,12 @@ pub fn callHaiku(ctx: *context_mod.Context) bool {
     // trailing `&` so the call returns before AWS completes; the marker file
     // (`tmp_done`) signals completion to `checkAiResponse`.
     var cmd_buf: [1024]u8 = undefined;
-    const cmd = std.fmt.bufPrintZ(&cmd_buf, "export $(cat ~/.config/hypr/hyprglaze-aws.env | xargs) && " ++
+    const cmd = std.mem.printSentinel(&cmd_buf, "export $(cat ~/.config/hypr/hyprglaze-aws.env | xargs) && " ++
         "(aws bedrock-runtime invoke-model --region us-east-1 " ++
         "--model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 " ++
         "--content-type application/json " ++
         "--body file://{s} {s} 2>{s} 1>/dev/null && " ++
-        "touch {s}) &", .{ tmp_request, tmp_response, tmp_err, tmp_done }) catch return false;
+        "touch {s}) &", .{ tmp_request, tmp_response, tmp_err, tmp_done }, 0) catch return false;
     if (csystem(cmd) != 0) {
         log.warn("AI shell launch failed", .{});
         return false;

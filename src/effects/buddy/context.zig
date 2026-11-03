@@ -7,7 +7,7 @@ const sprite = @import("sprite.zig");
 
 const log = std.log.scoped(.buddy);
 
-const c = @cImport({ @cInclude("GLES3/gl3.h"); });
+const c = @import("c");
 
 const Anim = sprite.Anim;
 const Behavior = sprite.Behavior;

@@ -8,9 +8,7 @@ const spectral = @import("spectral.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 /// Amorphous: flat liquid blobs in two independent layers, one behind the
 /// other. Each blob is a metaball cluster: a core circle plus satellites

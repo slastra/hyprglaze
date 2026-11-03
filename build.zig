@@ -21,6 +21,17 @@ pub fn build(b: *std.Build) void {
     // through LLVM matches the working ReleaseSafe path.
     const llvm_backend = true;
 
+    // --- C headers ---
+    // Zig 0.17 removed @cImport: the build translates src/c.h once and every
+    // file imports the result as "c".
+    const c_tc = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_tc.addIncludePath(wl_protocols.include_path);
+    const c_mod = c_tc.createModule();
+
     // --- main executable ---
     const exe = b.addExecutable(.{
         .name = "hyprglaze",
@@ -30,6 +41,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
+                .{ .name = "c", .module = c_mod },
             },
         }),
         .use_llvm = llvm_backend,
@@ -78,9 +90,9 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    // 0.17: the build graph no longer exposes b.args; the run step
+    // forwards whatever follows `zig build run --` itself.
+    run_cmd.addPassthruArgs();
 
     // --- ipc test utility ---
     const ipc_test = b.addExecutable(.{
@@ -108,6 +120,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
+                .{ .name = "c", .module = c_mod },
             },
         }),
         .use_llvm = llvm_backend,

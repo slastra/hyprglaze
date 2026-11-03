@@ -103,8 +103,8 @@ const max_contacts = 4096;
 // colliders by index.
 const pair_words = (max_balls + 63) / 64;
 const Touching = struct {
-    obstacle: [max_balls]u64 = [_]u64{0} ** max_balls,
-    pair: [max_balls][pair_words]u64 = [_][pair_words]u64{[_]u64{0} ** pair_words} ** max_balls,
+    obstacle: [max_balls]u64 = @splat(0),
+    pair: [max_balls][pair_words]u64 = @splat(@splat(0)),
 };
 
 pub const ParticleSystem = struct {
@@ -113,7 +113,7 @@ pub const ParticleSystem = struct {
     width: f32,
     height: f32,
     params: Params = .{},
-    pops: [max_pops]Pop = [_]Pop{.{}} ** max_pops,
+    pops: [max_pops]Pop = @splat(.{}),
     next_pop: u8 = 0,
     rng: std.Random.DefaultPrng,
 

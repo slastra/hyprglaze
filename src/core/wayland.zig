@@ -1,13 +1,6 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("wayland-client.h");
-    @cInclude("wayland-egl.h");
-    @cInclude("xdg-shell-client-protocol.h");
-    @cInclude("wlr-layer-shell-unstable-v1-client-protocol.h");
-    @cInclude("viewporter-client-protocol.h");
-    @cInclude("fractional-scale-v1-client-protocol.h");
-});
+const c = @import("c");
 
 const log = std.log.scoped(.wayland);
 

@@ -580,8 +580,8 @@ test "parseAnimations reads both halves from one reply" {
 test "SocketPath builds the instance path and rejects one too long for sockaddr_un" {
     const p = try SocketPath.format("/run/user/1000", "abc_123", ".socket2.sock");
     try std.testing.expectEqualStrings("/run/user/1000/hypr/abc_123/.socket2.sock", p.slice());
-    const long = "x" ** 100;
-    try std.testing.expectError(error.PathTooLong, SocketPath.format("/run/user/1000", long, ".socket.sock"));
+    const long: [100]u8 = @splat('x');
+    try std.testing.expectError(error.PathTooLong, SocketPath.format("/run/user/1000", &long, ".socket.sock"));
 }
 
 test "jsonInt rejects wrong tags and overflow" {
@@ -776,7 +776,7 @@ test "parseMonitor rejects malformed replies" {
 test "parseMonitor truncates an over-long name instead of failing" {
     std.testing.log_level = .err;
     defer std.testing.log_level = .warn;
-    const long = "A" ** 100;
+    const long: [100]u8 = @splat('A');
     const reply = "[{\"name\":\"" ++ long ++ "\",\"width\":1,\"height\":1,\"x\":0,\"y\":0,\"scale\":1.0}]";
     const mon = try parseMonitor(std.testing.allocator, reply, null);
     try std.testing.expectEqual(@as(u8, 64), mon.name_len);

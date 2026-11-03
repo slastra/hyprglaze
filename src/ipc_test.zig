@@ -12,7 +12,7 @@ const watcher_lua = @embedFile("core/watcher.lua");
 pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .debug) gpa.allocator() else std.heap.smp_allocator;
 
     const io = std.Io.Threaded.global_single_threaded.io();
 

@@ -8,9 +8,7 @@ const std = @import("std");
 
 const log = std.log.scoped(.geometry);
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 const prim_vert_src: [*:0]const u8 =
     \\#version 300 es

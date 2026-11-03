@@ -1,9 +1,6 @@
 const std = @import("std");
 const iohelp = @import("io_helper.zig");
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-    @cInclude("stb/stb_image.h");
-});
+const c = @import("c");
 
 const log = std.log.scoped(.texture);
 

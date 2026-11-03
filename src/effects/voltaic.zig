@@ -8,9 +8,7 @@ const bands_mod = @import("bands.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 const max_windows = 32;
 
@@ -162,12 +160,12 @@ pub const Context = struct {
     height: f32,
     now: f64 = 0,
 
-    arcs: [max_arcs]Arc = [_]Arc{.{}} ** max_arcs,
+    arcs: [max_arcs]Arc = @splat(.{}),
     next_slot: u8 = 0,
     spawn_timer: f32 = 0,
     arc_rate: f32 = 1.0,
 
-    crawls: [max_crawls]Crawl = [_]Crawl{.{}} ** max_crawls,
+    crawls: [max_crawls]Crawl = @splat(.{}),
     next_crawl: u8 = 0,
     crawl_timer: f32 = 0,
 
@@ -181,7 +179,7 @@ pub const Context = struct {
 
     // Afterglow: a pool of frozen channel snapshots from recent strong strikes,
     // each fading independently. The ionized air still glowing after each bolt.
-    embers: [max_embers]Ember = [_]Ember{.{}} ** max_embers,
+    embers: [max_embers]Ember = @splat(.{}),
     next_ember: u8 = 0,
     // Index in segs[] where the appended ember segments begin — the shader
     // tints everything past this index violet.
@@ -741,7 +739,7 @@ pub const Context = struct {
         self.u.f4v(.segs, @intCast(n), &self.segs[0]);
         if (self.u.loc(.segb) >= 0) {
             // Brightness packed 4-per-vec4; shader unpacks with [i>>2][i&3].
-            var packed_b: [seg_b_vec4s][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** seg_b_vec4s;
+            var packed_b: [seg_b_vec4s][4]f32 = @splat(.{ 0, 0, 0, 0 });
             for (0..n) |i| packed_b[i / 4][i % 4] = self.seg_b[i];
             self.u.f4v(.segb, @intCast((n + 3) / 4), &packed_b[0]);
         }

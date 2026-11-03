@@ -71,7 +71,7 @@ pub fn fftInPlace(re: *[fft_n]f32, im: *[fft_n]f32) void {
 /// 65 bin magnitudes out (bin width ~60Hz).
 pub fn magnitudes(wave: *const [256]f32) [n_bins]f32 {
     var re: [fft_n]f32 = undefined;
-    var im = [_]f32{0} ** fft_n;
+    var im: [fft_n]f32 = @splat(0);
     for (0..fft_n) |i| re[i] = (wave[i] + wave[fft_n + i]) * 0.5 * hann[i];
     fftInPlace(&re, &im);
     var mags: [n_bins]f32 = undefined;
@@ -88,8 +88,8 @@ pub fn magnitudes(wave: *const [256]f32) [n_bins]f32 {
 /// `k_sigma` is the sigma multiple a kick must clear (whorl exposes it).
 pub const Onset = struct {
     k_sigma: f32 = 2.0,
-    spec_prev: [n_bins]f32 = [_]f32{0} ** n_bins,
-    hist: [96]f32 = [_]f32{0} ** 96,
+    spec_prev: [n_bins]f32 = @splat(0),
+    hist: [96]f32 = @splat(0),
     pos: usize = 0,
     flux_last: f32 = 0,
     cooldown: f32 = 0,
@@ -136,9 +136,9 @@ pub const Onset = struct {
 /// signal every value decays to zero, so effects gating their music
 /// response on these fall back to their exact no-music look.
 pub const Bands = struct {
-    bands: [6]f32 = [_]f32{0} ** 6,
-    smooth: [6]f32 = [_]f32{0} ** 6,
-    peak: [6]f32 = [_]f32{0} ** 6,
+    bands: [6]f32 = @splat(0),
+    smooth: [6]f32 = @splat(0),
+    peak: [6]f32 = @splat(0),
     energy_ema: f32 = 0,
 
     pub fn update(self: *Bands, mags: *const [n_bins]f32, dt: f32) void {

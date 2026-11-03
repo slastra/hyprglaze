@@ -6,9 +6,7 @@ const audio_mod = @import("audio.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // Weft: windows shining through a diffraction weave. Three stripe
 // lattices interfere into large drifting moiré fringes, visible only
@@ -34,9 +32,9 @@ pub const Context = struct {
     /// Grain reseed clock (fixed film cadence).
     grain_clock: f64 = 0,
     /// Mono waveform, EMA-smoothed per sample (~50ms memory).
-    wave_s: [128]f32 = [_]f32{0} ** 128,
+    wave_s: [128]f32 = @splat(0),
     /// Peak-normalized copy shipped to the shader.
-    wave_n: [128]f32 = [_]f32{0} ** 128,
+    wave_n: [128]f32 = @splat(0),
     /// Slow AGC peak (~3s decay).
     wave_peak: f32 = 0,
 

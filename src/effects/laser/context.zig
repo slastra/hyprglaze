@@ -8,9 +8,7 @@ const trace = @import("trace.zig");
 
 const Uniforms = @import("../uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 pub const max_beams = 2;
 /// Legs per beam. At the default falloff a beam fades out in ~18.
@@ -51,7 +49,7 @@ pub const Context = struct {
     /// changes the wave's speed rather than jumping its position.
     phase: [max_beams]f32 = .{ 0, 0 },
     /// Kick pulse ages in seconds; >= pulse_life is idle.
-    pulses: [max_pulses]f32 = [_]f32{pulse_life} ** max_pulses,
+    pulses: [max_pulses]f32 = @splat(pulse_life),
     next_pulse: usize = 0,
 
     width: f32,

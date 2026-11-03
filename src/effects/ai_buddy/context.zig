@@ -13,10 +13,7 @@ const ai_brain = @import("ai_brain.zig");
 
 const log = std.log.scoped(.ai_buddy);
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-    @cInclude("time.h");
-});
+const c = @import("c");
 
 const Behavior = sprite.Behavior;
 
@@ -206,12 +203,12 @@ pub const Context = struct {
     time_update_timer: f32 = 60.0, // trigger immediate first update
 
     // Emote particles
-    emotes: [max_emotes]EmoteParticle = [_]EmoteParticle{.{}} ** max_emotes,
+    emotes: [max_emotes]EmoteParticle = @splat(.{}),
     emote_spawn_timer: f32 = 0,
 
     // Window metadata cache
     cached_window_classes: [32][32]u8 = undefined,
-    cached_window_class_lens: [32]u8 = [_]u8{0} ** 32,
+    cached_window_class_lens: [32]u8 = @splat(0),
     cached_focused_class: [32]u8 = undefined,
     cached_focused_class_len: u8 = 0,
     cached_focused_title: [48]u8 = undefined,

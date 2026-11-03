@@ -6,9 +6,7 @@ const spectral = @import("spectral.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 // A cleaved gem the desktop lives inside. The facets are shader-side —
 // drifting fracture planes, so faces are irregular convex polygons with

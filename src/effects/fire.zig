@@ -5,9 +5,7 @@ const bands_mod = @import("bands.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
 
-const c = @cImport({
-    @cInclude("GLES3/gl3.h");
-});
+const c = @import("c");
 
 const max_windows = 32;
 
@@ -40,7 +38,7 @@ const Sample = struct {
 };
 
 const History = struct {
-    samples: [hist_size]Sample = [_]Sample{.{}} ** hist_size,
+    samples: [hist_size]Sample = @splat(.{}),
     idx: u8 = 0,
 
     fn push(self: *History, t: f64, x: f32, y: f32) void {
@@ -83,16 +81,16 @@ const smoothstep = bands_mod.smoothstep;
 
 pub const Context = struct {
     now: f64 = 0,
-    win_hist: [max_windows]History = [_]History{.{}} ** max_windows,
-    win_vel: [max_windows][2]f32 = [_][2]f32{.{ 0, 0 }} ** max_windows,
+    win_hist: [max_windows]History = @splat(.{}),
+    win_vel: [max_windows][2]f32 = @splat(.{ 0, 0 }),
 
     /// Motion fade: 1 = stationary (full flame), 0 = moving (hidden).
     /// Asymmetric first-order filter so the flame doesn't snap back in.
-    win_fade: [max_windows]f32 = [_]f32{1.0} ** max_windows,
+    win_fade: [max_windows]f32 = @splat(1.0),
 
     /// Latched wipe axis (unit vector). Updated only when motion is meaningful,
     /// so the axis stays stable across the long fade-in after motion stops.
-    win_dir: [max_windows][2]f32 = [_][2]f32{.{ 1.0, 0.0 }} ** max_windows,
+    win_dir: [max_windows][2]f32 = @splat(.{ 1.0, 0.0 }),
 
     /// Cached uniform locations — resolved on first upload, then reused.
     u: Uniforms(.{
