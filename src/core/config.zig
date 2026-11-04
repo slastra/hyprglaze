@@ -147,6 +147,9 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8, source_path: []cons
             switch (info) {
                 .parse => |pos| log.warn("TOML parse error at line {d} (pos {d})", .{ pos.line, pos.pos }),
                 .struct_mapping => log.warn("TOML struct mapping error", .{}),
+                // Only raised under Options.disallow_unknown_fields, which we
+                // leave off: parsing into a generic Table has no fields to miss.
+                .unknown_fields => |uf| log.warn("TOML unknown keys: {d}", .{uf.keys.len}),
             }
         }
         return err;
