@@ -8,8 +8,16 @@ on:
 
 jobs:
   build-and-test:
-    name: build & test (archlinux)
+    name: build & test (zig ${{ matrix.zig || 'minimum' }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # '' = minimum_zig_version from build.zig.zon (what the package
+        # promises); latest = newest tagged release; master = nightly, as an
+        # early warning for the next release. Only master may fail.
+        zig: ['', latest, master]
+    continue-on-error: ${{ matrix.zig == 'master' }}
     container:
       image: archlinux:latest
     steps:
@@ -25,9 +33,10 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      # Zig from minimum_zig_version in build.zig.zon, not whatever Arch
-      # ships today, so CI builds with the version the package promises.
+      # Zig per the matrix above, not whatever Arch ships today.
       - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
 
       - name: Validate shaders
         run: |
@@ -43,4 +52,4 @@ jobs:
 
       - name: zig build (ReleaseSafe)
         # Matches the PKGBUILD optimize flag.
-        run: zig build -Doptimize=ReleaseSafe
+        run: zig build --release=safe
