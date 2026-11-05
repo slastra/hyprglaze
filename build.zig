@@ -47,6 +47,8 @@ pub fn build(b: *std.Build) void {
         .use_llvm = llvm_backend,
         .use_lld = llvm_backend,
     });
+    // Arch packaging guidelines want PIE (namcap flags its absence).
+    exe.pie = true;
 
     // Generated protocol headers
     exe.root_module.addIncludePath(wl_protocols.include_path);
