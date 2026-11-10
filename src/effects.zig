@@ -10,7 +10,6 @@ const palette_mod = @import("core/palette.zig");
 const particles = @import("effects/particles/context.zig");
 const windowglow = @import("effects/windowglow.zig");
 const glitch = @import("effects/glitch.zig");
-const cellbloom = @import("effects/cellbloom.zig");
 const concentric = @import("effects/concentric.zig");
 const fluid = @import("effects/fluid.zig");
 const starfield = @import("effects/starfield.zig");
@@ -89,7 +88,6 @@ pub const Effect = union(enum) {
     glitch: glitch.Context,
     buddy: buddy.Context,
     ai_buddy: ai_buddy.Context,
-    cellbloom: cellbloom.Context,
     concentric: concentric.Context,
     fluid: fluid.Context,
     starfield: starfield.Context,

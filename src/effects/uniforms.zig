@@ -1,6 +1,6 @@
 //! Cached uniform locations for an effect's own uniforms.
 //!
-//!     u: Uniforms(.{ .flow = "iBloomFlow", .bands = "iBloomBands[0]" }) = .{},
+//!     u: Uniforms(.{ .flow = "iFlow", .bands = "iBands[0]" }) = .{},
 //!     ...
 //!     self.u.use(prog.program);
 //!     self.u.f1(.flow, self.flow);
