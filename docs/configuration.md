@@ -9,7 +9,7 @@ has the short version.
 `~/.config/hypr/hyprglaze.toml`:
 
 ```toml
-# Effects: particles, windowglow, cellbloom, concentric, fluid, starfield,
+# Effects: particles, windowglow, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
 #          flux, coral
@@ -43,7 +43,7 @@ theme = "Rosé Pine"
 # back     = "#C4A7E7"  # in themes.json) or a hex string; omit either to roll it
 
 [fur]
-# spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise
+# spacing = 15.0      # follicle spacing in px; much finer shimmers and reads as noise
 # length  = 30.0      # hair length in px (up to 200); longer hair lies further over
 # brightness = 1.0
 # music   = true      # bass shivers the coat
@@ -53,7 +53,7 @@ theme = "Rosé Pine"
 # brightness = 1.0    # overall level
 # music   = true      # energy turns the light sweep; beats ripple across the faces
 
-# cellbloom and fluid read only `music` (default true) and `sink`.
+# fluid reads only `music` (default true) and `sink`.
 
 [windowglow]
 # grain   = 0.5       # film grain amplitude, 0-2; 0 disables
