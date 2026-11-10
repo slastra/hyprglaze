@@ -17,6 +17,7 @@ scripts/hypr-harness.sh scripts/ivy.probe.sh           # growth, workspace round
 scripts/hypr-harness.sh scripts/particles.probe.sh     # the gravity well, focus change, batting
 scripts/hypr-harness.sh scripts/laser.probe.sh         # beams aimed at a few points
 scripts/hypr-harness.sh scripts/flux-life.probe.sh     # magnets through open, close, workspace switch
+scripts/hypr-harness.sh scripts/coral.probe.sh         # reef through a move, a workspace round-trip, a close
 HG_EFFECT=flux scripts/hypr-harness.sh scripts/effect.probe.sh   # any effect, a run of grabs
 ```
 

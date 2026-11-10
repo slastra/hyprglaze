@@ -47,6 +47,7 @@ hyprglaze renders GLSL shaders and modular effects on the background layer. The 
 | `fur` | A short combed pile: the cursor parts it, windows crush it flat and heap a ridge at their edges, bass shivers the coat |
 | `amorphous` | Flat liquid blobs in two layers, colors rolled from the theme; they drift, meet gentle resistance at windows, wrap across the screen, loosen and ripple with music, and the cursor is a lamp on their edges |
 | `laser` | Lasers fired from opposite screen corners toward the cursor in two theme colours, reflecting off windows and the screen's edges and dimming with every bounce, through smoke they light up; one resonates with the lows, the other with the highs |
+| `coral` | Brain coral grown by Gray-Scott reaction-diffusion: flat folds creep out from window frames and fill the desktop with mazes and worms, coral under a window slowly dies back to bare rock and regrows when the window leaves, the cursor draws seed that buckles into folds, slow tides dissolve patches into spots and clearings so the reef never sets, and pulses of light run down the folds with the music |
 | `flux` | Magnetic field lines: every window is a bar magnet, the cursor a compass needle; pulses flow north to south with the music |
 | `crystal` | A ray-traced cluster of quartz shards with real refraction and dispersion; your windows are the lights, and the focused one is the key light |
 

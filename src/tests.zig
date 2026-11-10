@@ -14,5 +14,6 @@ test {
     _ = @import("effects/particles/system.zig");
     _ = @import("effects/laser/trace.zig");
     _ = @import("effects/clock.zig");
+    _ = @import("effects/coral.zig");
     _ = @import("effects/buddy/sprite.zig");
 }

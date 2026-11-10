@@ -12,7 +12,7 @@ has the short version.
 # Effects: particles, windowglow, cellbloom, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
-#          flux
+#          flux, coral
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -146,6 +146,15 @@ lines = 36            # field lines leaving each pole (4-64)
 compass = true        # the cursor is a compass needle that follows the field
 music = true          # pulses quicken and flash with the music
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
+
+[coral]
+scale = 70            # width of one fold and its gap, in px (24-400)
+speed = 1.0           # growth pace (0.1-8)
+drift = 1.0           # how fast the growth habits and the ebbs wander (0 = still)
+cursor = true         # the cursor draws seed as it moves
+music = true          # bass swells the folds, pulses of light run along them and flare on kicks
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
+# map = true          # diagnostic: feed rate along x, kill rate along y (Pearson's map)
 
 [glitch]
 lines = 720           # feedback loop's video resolution in lines (120-2160); fewer = chunkier
