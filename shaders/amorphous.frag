@@ -8,64 +8,72 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
-// Circle list from amorphous.zig, laid out once per frame: (x, y, r^2, -).
-// Screen units: short edge = 1.0, origin at the center. Two layers of 24:
-// three blobs of eight circles each.
-const int BALLS_PER_LAYER = 24;
-uniform vec4 iBalls[48];
+// Circle list from amorphous.zig, laid out once per frame: (x, y, r, k).
+// Screen units: short edge = 1.0, origin at the center. Two layers of 32:
+// four blobs of eight circles each, the first of each eight being the core.
+// k is the blob's blend radius.
+const int BLOBS_PER_LAYER = 4;
+const int BALLS_PER_BLOB = 8;
+const int BALLS_PER_LAYER = BLOBS_PER_LAYER * BALLS_PER_BLOB;
+uniform vec4 iBalls[64];
 uniform vec3 iBlobFront;   // layer colors, chosen in amorphous.zig
 uniform vec3 iBlobBack;
 uniform float iBlobOpacity;  // front over back: 1 opaque, 0 fully tinted
+uniform float iBlobGoo;      // blend radius between blobs of one layer
 
 out vec4 fragColor;
 
-// A metaball field with compact support: each circle contributes
-// k * (1 - d^2/S^2)^2 out to S = 2.2 r and nothing beyond, scaled so an
-// isolated circle's outline (f = 1) sits at d = r. Circles merge with a
-// neck as they approach, which is what liquid does, but a blob on the far
-// side of the screen adds nothing, which matters on a torus where nothing
-// is ever far away.
-const float SUPPORT = 2.2;
-const float NORM = 1.0 / ((1.0 - 1.0 / (SUPPORT * SUPPORT)) * (1.0 - 1.0 / (SUPPORT * SUPPORT)));
-
-// The screen is a torus: distance to a circle is the shortest way round,
-// so a blob leaving one edge is already coming in the opposite one.
-float layerField(vec2 p, int first, vec2 wrap) {
-    float f = 0.0;
-    for (int i = 0; i < BALLS_PER_LAYER; i++) {
-        vec4 b = iBalls[first + i];
-        vec2 d = p - b.xy;
-        d -= round(d / wrap) * wrap;
-        float s2 = b.z * SUPPORT * SUPPORT;
-        float q = max(0.0, 1.0 - dot(d, d) / s2);
-        f += NORM * q * q;
+// Signed distance to one layer's liquid, negative inside. A blob is the
+// smooth union of its circles (log-sum-exp, which unlike the polynomial
+// smooth minimum does not depend on the order of the circles): every joint
+// rounds into a fillet about k wide, so the outline has no creases and the
+// circles never show. The layer is the smooth union of its blobs with a
+// smaller radius, so two blobs that drift together grow a neck, merge, and
+// pinch apart again.
+//
+// The screen is a torus: each blob is measured the shortest way round, so
+// one leaving an edge is already coming in the opposite one.
+float layerDist(vec2 p, int first, vec2 wrap) {
+    float acc = 0.0;
+    for (int b = 0; b < BLOBS_PER_LAYER; b++) {
+        int at = first + b * BALLS_PER_BLOB;
+        vec4 core = iBalls[at];
+        float k = core.w;
+        vec2 dc = p - core.xy;
+        vec2 q = p - round(dc / wrap) * wrap;
+        // Too far to matter: beyond the blob's reach plus a few blend radii.
+        float far = length(q - core.xy) - core.z * 3.4;
+        if (far > iBlobGoo * 8.0) continue;
+        float sum = 0.0;
+        for (int i = 0; i < BALLS_PER_BLOB; i++) {
+            vec4 c = iBalls[at + i];
+            sum += exp(-(length(q - c.xy) - c.z) / k);
+        }
+        float d = -k * log(max(sum, 1e-30));
+        acc += exp(-d / iBlobGoo);
     }
-    return f;
+    return -iBlobGoo * log(max(acc, 1e-30));
 }
 
-// Coverage of one layer at this pixel, anti-aliased in field units:
-// fwidth(f) is how much f changes across one pixel here, so the outline is
-// always ~1.5px wide whatever the blob.
-float coverage(float f) {
-    float w = fwidth(f);
-    return smoothstep(1.0 - 0.75 * w, 1.0 + 0.75 * w, f);
+// Coverage of one layer at this pixel: the distance is in screen units, so
+// the edge is 1.5px wide whatever the blob.
+float coverage(float d, float px) {
+    return 1.0 - smoothstep(-0.75 * px, 0.75 * px, d);
 }
 
 // Rim light. Only the outline is lit: a thin band just inside the edge,
 // brighter where the edge faces the cursor, as if the pointer were a small
-// lamp held over the surface. The outline normal is the field gradient,
+// lamp held over the surface. The outline normal is the distance gradient,
 // taken from screen-space derivatives, so it costs nothing extra; and
-// since only pixels within a few px of f = 1 are touched, the interior
-// stays flat and the sub-circles never print through.
-float rim(float f, vec2 to_light) {
-    vec2 g = vec2(dFdx(f), dFdy(f));
+// since only pixels within a few px of the edge are touched, the interior
+// stays flat.
+float rim(float d, vec2 to_light, float px) {
+    vec2 g = vec2(dFdx(d), dFdy(d));
     float gl = length(g);
-    if (gl < 1e-6) return 0.0;
-    vec2 n = g / gl;                    // points inward (f grows inward)
-    float facing = max(dot(-n, to_light), 0.0);
-    // Band: f from 1 to about 1 + 4px worth of field change.
-    float w = fwidth(f);
-    float band = smoothstep(1.0 + 4.5 * w, 1.0 + 1.0 * w, f) * smoothstep(1.0 - 0.75 * w, 1.0 + 0.75 * w, f);
+    if (gl < 1e-9) return 0.0;
+    vec2 n = g / gl;                    // points outward
+    float facing = max(dot(n, to_light), 0.0);
+    float band = smoothstep(-4.5 * px, -1.0 * px, d) * coverage(d, px);
     return band * facing * facing;
 }
 
@@ -91,25 +99,26 @@ void main() {
     // Flat silhouettes, one color per layer, back layer painted first.
     // Layers are composited, not summed, so their blobs pass over each
     // other without merging.
-    float fb = layerField(p, BALLS_PER_LAYER, wrap);
-    float ff = layerField(p, 0, wrap);
+    float px = 1.0 / unit;
+    float db = layerDist(p, BALLS_PER_LAYER, wrap);
+    float df = layerDist(p, 0, wrap);
+    float cb = coverage(db, px);
+    float cf = coverage(df, px);
     // Soft shadow of the front layer, cast a little down and right onto
-    // whatever is behind it. One more field sum, at the offset point.
-    float fs = layerField(p - vec2(-0.012, 0.014), 0, wrap);
-    float shadow = smoothstep(0.6, 1.4, fs) * (1.0 - coverage(ff));
+    // whatever is behind it. One more distance, at the offset point.
+    float ds = layerDist(p - vec2(-0.012, 0.014), 0, wrap);
+    float shadow = smoothstep(0.016, -0.014, ds) * (1.0 - cf);
 
     // Translucent overlap: where the front layer passes over the back one
     // the front reads as tinted glass, taking on some of the back color.
-    float cb = coverage(fb);
-    float cf = coverage(ff);
     vec3 front_here = mix(front, mix(front, back, 1.0 - iBlobOpacity), cb);
     vec3 col = bg;
     col = mix(col, back, cb);
     col = mix(col, col * 0.82, shadow);
     col = mix(col, front_here, cf);
     // Rim light on both outlines, tinted toward the theme foreground.
-    col = mix(col, iPaletteFg, rim(fb, to_light) * lamp * 0.35 * cb * (1.0 - cf));
-    col = mix(col, iPaletteFg, rim(ff, to_light) * lamp * 0.35 * cf);
+    col = mix(col, iPaletteFg, rim(db, to_light, px) * lamp * 0.35 * cb * (1.0 - cf));
+    col = mix(col, iPaletteFg, rim(df, to_light, px) * lamp * 0.35 * cf);
 
     fragColor = vec4(col, 1.0);
 }

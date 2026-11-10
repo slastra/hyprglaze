@@ -11,12 +11,13 @@ const Uniforms = @import("uniforms.zig").Uniforms;
 const c = @import("c");
 
 /// Amorphous: flat liquid blobs in two independent layers, one behind the
-/// other. Each blob is a metaball cluster: a core circle plus satellites
-/// that orbit it slowly. Bodies drift in straight lines, meet gentle
+/// other. Each blob is a smooth union of circles: a core plus satellites
+/// that orbit it slowly, every joint rounded into a fillet, and blobs of
+/// one layer neck together where they meet. Bodies drift in straight lines, meet gentle
 /// resistance at window rects, and wrap across the screen edges (the shader measures distance
 /// on a torus, so a blob leaving one edge is already coming in the other).
 /// The cluster geometry is animated here, once per frame, and uploaded as
-/// a circle list; the shader only sums the field.
+/// a circle list; the shader only measures the distance to it.
 /// Layer colors are rolled once per start from the theme's usable accents,
 /// so each launch gets a fresh pair.
 ///
@@ -30,14 +31,24 @@ const c = @import("c");
 ///   front    = 2         # fixed layer colors: a theme slot (1-16, the color_NN
 ///   back     = "#C4A7E7" # numbers in themes.json) or a hex; omit to roll
 pub const layers = 2;
-pub const blobs = 3;
+pub const blobs = 4;
 pub const lobes = 7;
 pub const balls_per_blob = 1 + lobes;
 pub const balls_per_layer = blobs * balls_per_blob;
 pub const total_balls = layers * balls_per_layer;
 
 /// Screen-space units: the short screen edge is 1.0, origin at the center.
-const Ball = extern struct { x: f32, y: f32, r2: f32, pad: f32 = 0 };
+/// `k` is the blend radius of the blob the circle belongs to: how wide a
+/// fillet the shader rounds into every joint between its circles.
+const Ball = extern struct { x: f32, y: f32, r: f32, k: f32 };
+
+/// Blend radius inside a blob, as a fraction of its radius, and between
+/// blobs of one layer, in screen units at size 1.
+/// A size-1 blob's radius before blending, which swells it by about a
+/// third.
+const base_radius: f32 = 0.125;
+const blend_in: f32 = 0.22;
+const blend_between: f32 = 0.035;
 
 /// A drifting blob body.
 const Body = struct { x: f32, y: f32, vx: f32, vy: f32 };
@@ -93,6 +104,7 @@ pub const Context = struct {
         .front = "iBlobFront",
         .back = "iBlobBack",
         .opacity = "iBlobOpacity",
+        .goo = "iBlobGoo",
         .balls = "iBalls[0]",
     }) = .{},
 
@@ -134,7 +146,8 @@ pub const Context = struct {
     fn blobSize(i: usize) f32 {
         return switch (i) {
             0 => 1.8,
-            1 => 1.0,
+            1 => 1.1,
+            2 => 0.7,
             else => 0.45,
         };
     }
@@ -146,6 +159,7 @@ pub const Context = struct {
         const h: [2]f32 = switch (i) {
             0 => .{ 0.25, -0.02 },
             1 => .{ -0.35, 0.05 },
+            2 => .{ -0.10, 0.34 },
             else => .{ 0.05, -0.32 },
         };
         return if (layer == 1) .{ -h[0], -h[1] } else h;
@@ -296,7 +310,7 @@ pub const Context = struct {
         const half_h: f32 = 0.5;
         self.box_count = 0;
         // Largest reach any blob has, to decide which images matter.
-        const reach_max = 0.16 * blobSize(0) * self.size * 1.5;
+        const reach_max = base_radius * blobSize(0) * self.size * 1.5;
         var wi: usize = 0;
         for (windows) |w| {
             if (wi == max_windows) break;
@@ -322,7 +336,7 @@ pub const Context = struct {
         for (0..layers) |layer| {
             for (0..blobs) |i| {
                 const b = &self.bodies[layer * blobs + i];
-                const R = 0.16 * blobSize(i) * self.size;
+                const R = base_radius * blobSize(i) * self.size;
                 const bfirst = (layer * blobs + i) * balls_per_blob;
                 self.moveBody(b, R, self.offsets[bfirst..][0..balls_per_blob], drift_speed / @sqrt(blobSize(i)) * 1.5, dt);
             }
@@ -338,19 +352,19 @@ pub const Context = struct {
             for (0..blobs) |i| {
                 const fi: f32 = @floatFromInt(i);
                 const size = blobSize(i) * self.size;
-                const R = 0.16 * size;
+                const R = base_radius * size;
                 // Surface tension: small blobs tuck their satellites into
                 // the core (a droplet), large ones let them reach out. Music
                 // loosens it: loud passages let even the droplets go lumpy,
                 // silence relaxes everything back to its resting shape.
-                const slack = @min(1.0, smoothstep(0.4, 2.0, size) + self.music.bands.energy_ema * 0.9);
+                const slack = @min(1.0, 0.3 + 0.7 * smoothstep(0.4, 2.0, size) + self.music.bands.energy_ema * 0.9);
                 const body = self.bodies[layer * blobs + i];
                 const cx = body.x;
                 const cy = body.y;
                 const tb = tl + fi * 7.3;
 
                 const core_r = R * 0.62;
-                self.balls[k] = .{ .x = cx, .y = cy, .r2 = core_r * core_r };
+                self.balls[k] = .{ .x = cx, .y = cy, .r = core_r, .k = R * blend_in };
                 self.offsets[k] = .{ 0, 0, core_r };
                 k += 1;
                 for (0..lobes) |j| {
@@ -370,7 +384,7 @@ pub const Context = struct {
                     // only ever act on the bodies' velocities.
                     const ox = off * @cos(ang);
                     const oy = off * @sin(ang);
-                    self.balls[k] = .{ .x = cx + ox, .y = cy + oy, .r2 = rad * rad };
+                    self.balls[k] = .{ .x = cx + ox, .y = cy + oy, .r = rad, .k = R * blend_in };
                     self.offsets[k] = .{ ox, oy, rad };
                     k += 1;
                 }
@@ -462,6 +476,7 @@ pub const Context = struct {
         self.u.f3(.front, self.front[0], self.front[1], self.front[2]);
         self.u.f3(.back, self.back[0], self.back[1], self.back[2]);
         self.u.f1(.opacity, self.opacity);
+        self.u.f1(.goo, blend_between * self.size);
         self.u.f4v(.balls, total_balls, &self.balls[0]);
     }
 
