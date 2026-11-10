@@ -26,8 +26,9 @@ pub const Context = struct {
     flow: f64 = 0,
 
     /// Follicle spacing and pile length, both in pixels. Spacing is the
-    /// knob that matters for texture: fine strands shimmer as they move and
-    /// turn to noise behind text, so the default is deliberately coarse.
+    /// knob that matters for texture: very fine strands shimmer as they
+    /// move and turn to noise behind text, so the default stays on the
+    /// coarse side of what still reads as hair rather than as quills.
     /// Length is how far a strand reaches across the screen as it lies over.
     cell: f32,
     length: f32,
@@ -47,7 +48,7 @@ pub const Context = struct {
         return .{
             .allocator = allocator,
             .music = music,
-            .cell = std.math.clamp(params.getFloat("spacing", 23.0), 4.0, 60.0),
+            .cell = std.math.clamp(params.getFloat("spacing", 15.0), 4.0, 60.0),
             .length = std.math.clamp(params.getFloat("length", 30.0), 2.0, 200.0),
             .brightness = std.math.clamp(params.getFloat("brightness", 1.0), 0.0, 3.0),
         };

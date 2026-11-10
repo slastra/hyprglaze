@@ -27,11 +27,17 @@ uniform float iFurBright;
 
 out vec4 fragColor;
 
-// Shells marched per pixel at the default 30px pile. Longer pile carries
-// the ray further across the screen, so it gets proportionally more: with
-// too few, each step jumps past whole strands and they break into dots.
-const int SHELLS = 22;
+// Steps marched per pixel, from the tips down to the skin: at most STEP
+// of a follicle spacing apart along the ray, within these bounds.
+const float STEP = 0.40;
+// Depth of a strand's soft fringe, in px.
+const float FUZZ = 3.0;
+const int MIN_SHELLS = 6;
 const int MAX_SHELLS = 88;
+// The least a strand leans.
+const float MIN_LIE = 0.30;
+// Strand radius at the root, in follicle spacings.
+const float STRAND = 0.34;
 
 uint pcg(uint v) {
     v = v * 747796405u + 2891336453u;
@@ -56,17 +62,19 @@ float sdRoundBox(vec2 p, vec2 c, vec2 hs, float r) {
 // cursor pushes it aside without shortening it.
 void combAt(vec2 p, vec2 res, float t, float bass,
             out vec2 lie, out float flat_amt, out float ruffle) {
-    // Standing cowlicks: two slow incommensurate swirls, so the coat has
-    // a natural grain with partings in it before anything disturbs it.
+    // The coat lies one way overall, and the grain wanders: slow
+    // incommensurate waves turn the lie a little this way and that and
+    // lengthen or shorten it. They turn it and never add to it, so the
+    // resting coat has no point where the pushes cancel and the pile
+    // stands straight up. A strand seen end-on is a dot, and a patch of
+    // them reads as stippling instead of as hair.
     vec2 u = p / 420.0;
-    // A standing grain the whole coat shares, before any swirl is added.
-    // Without it the field passes through zero wherever the swirls cancel,
-    // and the pile there stands perfectly upright — seen end-on, a
-    // straight strand is a dot, so those regions read as scattered grains
-    // while the leaning ones read as hair. A coat lies one way overall.
-    lie = vec2(0.52, -0.30);
-    lie += vec2(sin(u.y * 1.10 + t * 0.31) + 0.45 * sin(u.y * 2.30 - t * 0.21),
-                cos(u.x * 0.95 - t * 0.27) + 0.45 * cos(u.x * 2.10 + t * 0.19)) * 0.30;
+    float turn = 0.55 * sin(u.y * 1.10 + t * 0.31)
+               + 0.35 * sin(u.x * 0.95 - t * 0.27)
+               + 0.25 * sin((u.x + u.y) * 1.90 + t * 0.20);
+    float reach_amt = 0.85 * (1.0 + 0.25 * sin(u.x * 1.30 - u.y * 0.70 + t * 0.17));
+    float heading = -0.5236 + turn;
+    lie = vec2(cos(heading), sin(heading)) * reach_amt;
     // A shiver runs through the whole coat on the low end.
     lie += vec2(sin(p.y * 0.011 + t * 3.1), cos(p.x * 0.010 - t * 2.7)) * bass * 0.20;
 
@@ -123,6 +131,10 @@ void combAt(vec2 p, vec2 res, float t, float bass,
     // quarter of the screen, and the coat stops reading as a surface.
     float ll = length(lie);
     if (ll > 1.6) lie *= 1.6 / ll;
+    // And how little. The cursor and the windows do add to the lie, so
+    // where they cancel it the pile would stand on end; keeping a little
+    // lean there leaves a small crown instead of a patch of dots.
+    lie *= sqrt(ll * ll + MIN_LIE * MIN_LIE) / max(ll, 1e-3);
 }
 
 void main() {
@@ -167,7 +179,7 @@ void main() {
     // of the screen, so the pile there is seen from the side and the
     // strands lean away. Without it the coat reads as a flat pattern
     // rather than as something with height.
-    vec2 par = (fc - res * 0.5) / res.y * 0.55;
+    vec2 par = (fc - res * 0.5) / res.y * 0.30;
 
     // Light, raised and to one side: low enough that the pile casts along
     // itself, high enough that the whole coat is lit rather than only the
@@ -190,7 +202,6 @@ void main() {
     // flat but is no shorter. 40/30 keeps the default 30px pile exactly as
     // it was tuned.
     vec2 reach = lean * (40.0 * pile / 30.0);
-    int shells = clamp(int(ceil(float(SHELLS) * pile / 30.0)), SHELLS, MAX_SHELLS);
 
     // Front-to-back compositing: strand edges get a pixel of soft coverage
     // and blend into whatever lies behind them, the next strand down or the
@@ -206,16 +217,26 @@ void main() {
     vec3 acc_base = vec3(0.0);
     float alpha_base = 0.0;
     vec2 off = reach + par * pile_h * 1.6;
+    // As many steps as the ray needs and no more: each step tests the
+    // follicle cell it lands in, over the whole stretch since the last
+    // step, so what matters is that no cell on the way is stepped over.
+    // A ray that barely leans crosses one or two cells; one lying nearly
+    // flat crosses a dozen. (1.45 is the curve's steepest stretch.)
+    // And only from as high as the pile stands here. Under a window it is
+    // crushed to a fraction of its height, and marching the empty air
+    // above it is most of the cost of a screen full of windows.
+    float h_top = min(pile_h / pile, 1.0);
+    int shells = clamp(int(ceil(length(off) * h_top * 1.45 / (STEP * cell))) + 2, MIN_SHELLS, MAX_SHELLS);
     // Where the previous step sampled, and at what height: each step tests
     // the whole stretch of ray since then, not just its end point.
-    vec2 s_prev = fc + off;
-    float h_prev = 1.0;
+    vec2 s_prev = fc + off * h_top * (0.55 + 0.45 * h_top);
+    float h_prev = h_top;
 
     // March from the tips down to the skin. The first strand met is the
     // topmost one along this ray, which is all an opaque strand needs.
     for (int i = 0; i < MAX_SHELLS; i++) {
         if (i >= shells) break;
-        float h = 1.0 - float(i) / float(shells - 1);
+        float h = h_top * (1.0 - float(i) / float(shells - 1));
         // Both the lean and the parallax are known functions of height, so
         // the sample point is moved instead of the strands. That keeps
         // every follicle inside its own grid cell: one hash per step, and
@@ -226,7 +247,9 @@ void main() {
         // round tips; carry it further and each strand is seen along its
         // length, crossing its neighbours, which is what turns dots into
         // overlapping hair.
-        vec2 s = fc + off * h;
+        // The offset grows faster than the height, so a strand curves
+        // over toward its tip instead of standing as a straight spine.
+        vec2 s = fc + off * h * (0.55 + 0.45 * h);
 
         vec2 g = (s + warp) / cell;
         vec2 ci = floor(g);
@@ -250,11 +273,12 @@ void main() {
         // narrows them below the step — the whole tip of a long strand —
         // the hair comes apart into a chain of circles.
         vec2 jit = vec2(hf(k ^ 0x9E3779B9u), hf(k ^ 0x85EBCA6Bu)) - 0.5;
-        vec2 fc0 = vec2(0.5) + jit * 0.48;
+        vec2 fc0 = vec2(0.5) + jit * 0.36;
         float t_lo = clamp((hp - len / pile) / max(hp - h, 1e-5), 0.0, 1.0);
         vec2 e = f - fp;
         float tt = clamp(dot(fc0 - fp, e) / max(dot(e, e), 1e-8), t_lo, 1.0);
-        float d = length(fp + e * tt - fc0);
+        vec2 across = fp + e * tt - fc0;
+        float d = length(across);
         float hz = mix(hp, h, tt) * pile;
         float up = hz / max(len, 1e-3);
         // Held near full thickness most of the way and drawn to a point
@@ -262,10 +286,25 @@ void main() {
         // pile so thin that most rays fall between the strands to the
         // skin, and the coat comes out as sparse bristle over black
         // rather than as anything you would want to touch.
-        float r = 0.37 * pow(max(1.0 - up, 0.0), 0.5);
+        float r = STRAND * pow(max(1.0 - up, 0.0), 0.5);
         // Coverage over one pixel of edge (d and r are in cells).
-        float a = clamp((r - d) * cell + 0.5, 0.0, 1.0);
-        if (a <= 0.0) continue;
+        // A strand is not a solid rod but a lock of finer hairs, so its
+        // edge is a soft fringe a few pixels deep, not a one-pixel
+        // line, and it feathers away toward the tip instead of ending in
+        // a point. This is most of what makes pile look fuzzy and not
+        // drawn.
+        // The fringe runs inward from the strand's outline: a strand only
+        // exists inside its own follicle cell, and a fringe reaching past
+        // the outline would be cut square at the cell's edge.
+        float a = smoothstep(-0.8, FUZZ, (r - d) * cell);
+        a *= 1.0 - 0.6 * smoothstep(0.6, 1.0, up);
+        if (a <= 0.004) continue;
+        // The finer hairs within the lock: light and dark lines running
+        // its length. Which side of the strand's axis the ray passed on
+        // (the sign of the cross product with the ray) orders them across
+        // its width.
+        float side = (across.x * e.y - across.y * e.x) / max(length(e), 1e-5);
+        float strands = sin(side * cell * 1.9 + hf(k ^ 0x68E31DA4u) * 6.2832);
         // A strand is usually met on several steps in a row, first near its
         // thin tip and then through its body. It covers the pixel as much
         // as its best encounter does: stacking every encounter would harden
@@ -302,6 +341,7 @@ void main() {
         vec3 fib = mix(under, tipc, up);
         // Each strand keeps its own tone so the coat has grain up close.
         fib *= 0.78 + hf(k ^ 0x2545F491u) * 0.40;
+        fib *= 1.0 + 0.16 * strands;
         col = fib * (sl * 0.45 + 0.62) * ao
             + mix(tipc, fg, 0.30) * spec * (0.14 + up * 0.34)
             + mix(accent, c_sec, 0.4) * rim * 0.55
