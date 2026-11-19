@@ -16,5 +16,6 @@ test {
     _ = @import("effects/clock.zig");
     _ = @import("effects/coral.zig");
     _ = @import("effects/voltaic.zig");
+    _ = @import("effects/swarm/flock.zig");
     _ = @import("effects/buddy/sprite.zig");
 }

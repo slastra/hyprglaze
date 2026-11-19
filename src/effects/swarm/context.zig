@@ -1,481 +1,344 @@
+//! swarm: a murmuration of starlings. The flock itself is flock.zig; this
+//! is its music, its day (when it flies and when it roosts) and its
+//! drawing. Every bird is one instanced quad whose fragment shader fills a
+//! tiny silhouette, body and two wings, into a full-size layer that
+//! shaders/swarm.frag lays over the background.
+
 const std = @import("std");
 const shader_mod = @import("../../core/shader.zig");
 const config_mod = @import("../../core/config.zig");
 const palette_mod = @import("../../core/palette.zig");
 const effects = @import("../../effects.zig");
-const audio_mod = @import("../audio.zig");
-const bands_mod = @import("../bands.zig");
-const boids_mod = @import("boids.zig");
-const hypr = @import("../../core/hypr.zig");
-const particles_sys = @import("../particles/system.zig");
+const spectral = @import("../spectral.zig");
+const geometry = @import("../geometry.zig");
+const flock_mod = @import("flock.zig");
 
 const Uniforms = @import("../uniforms.zig").Uniforms;
 
 const c = @import("c");
 
-// Field resolution: the flock is splatted into this grid each frame and the
-// shader renders the field, not the boids — that's what turns dots into a
-// continuous murmuration. ~19px cells at 3072x1728.
-const field_w = 160;
-const field_h = 90;
-const field_cells = field_w * field_h;
-
-// Velocity normalization for the RG channels (pixels/sec mapped to ±1).
-const vel_scale: f32 = 700.0;
+const log = std.log.scoped(.swarm);
 
 const max_windows = 32;
 
-// The heavy rendering runs in this compute pass at ONE FRAGMENT PER BLOCK
-// (canvas = screen / pixel_size), then shaders/swarm.frag nearest-upscales
-// the canvas to the screen. At the default 30px blocks that's ~6k fragments
-// doing the streaks/fbm/contour math instead of 5.3M — the pixelation IS
-// the optimization.
-const compute_frag: [:0]const u8 =
+/// The flock steps at this rate whatever the display's. A frame draws the
+/// birds on their way from the previous step to the last one, each carried
+/// along its velocity by the vertex shader, so motion is smooth and the
+/// CPU only touches the flock twenty times a second.
+const step: f32 = 1.0 / 20.0;
+
+const bird_vert: [*:0]const u8 =
     \\#version 300 es
-    \\precision highp float;
-    \\
-    \\// Screen resolution (real pixels) — the canvas is smaller; fragment
-    \\// coords are scaled up by iPixel so all math stays in screen space.
-    \\uniform vec3 iResolution;
-    \\uniform float iPixel;
-    \\uniform float iSwarmTime;
-    \\uniform vec4 iWindows[32];
-    \\uniform int iWindowCount;
-    \\
-    \\uniform vec3 iPalette[16];
-    \\uniform int iPaletteSize;
-    \\uniform vec3 iPaletteBg;
-    \\uniform vec3 iPaletteFg;
-    \\
-    \\// Flock field: RG = density-weighted velocity (biased), B = agitation
-    \\// (predator fear), A = density.
-    \\uniform sampler2D iField;
-    \\uniform float iBeat;
-    \\uniform float iBass;
-    \\uniform float iEnergy;
-    \\// Ink saturation: 0 = full palette color, 1 = greyscale.
-    \\uniform float iMute;
-    \\// 1 = topographic isolines, 0 = posterized field blocks.
-    \\uniform float iContour;
-    \\
-    \\out vec4 fragColor;
-    \\
-    \\float hash21(vec2 p) {
-    \\    p = fract(p * vec2(123.34, 456.21));
-    \\    p += dot(p, p + 45.32);
-    \\    return fract(p.x * p.y);
-    \\}
-    \\
-    \\float vnoise(vec2 p) {
-    \\    vec2 i = floor(p);
-    \\    vec2 f = fract(p);
-    \\    f = f * f * (3.0 - 2.0 * f);
-    \\    float a = hash21(i);
-    \\    float b = hash21(i + vec2(1.0, 0.0));
-    \\    float c = hash21(i + vec2(0.0, 1.0));
-    \\    float d = hash21(i + vec2(1.0, 1.0));
-    \\    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-    \\}
-    \\
-    \\float fbm(vec2 p) {
-    \\    float v = 0.0;
-    \\    float a = 0.5;
-    \\    for (int i = 0; i < 4; i++) {
-    \\        v += a * vnoise(p);
-    \\        p = p * 2.1 + 17.3;
-    \\        a *= 0.5;
-    \\    }
-    \\    return v;
-    \\}
-    \\
-    \\// Density streaked along local velocity — smears the cloud into
-    \\// ribbons that follow the flock's motion.
-    \\float streakDensity(vec2 uv, vec2 vel_uv) {
-    \\    float total = texture(iField, uv).a * 1.2;
-    \\    float wsum = 1.2;
-    \\    for (int k = 1; k <= 3; k++) {
-    \\        float t = float(k) / 3.0;
-    \\        float w = 1.0 - t * 0.65;
-    \\        total += texture(iField, uv - vel_uv * t).a * w;
-    \\        total += texture(iField, uv + vel_uv * t * 0.4).a * w * 0.6;
-    \\        wsum += w * 1.6;
-    \\    }
-    \\    return total / wsum;
-    \\}
-    \\
-    \\float sdRoundBox(vec2 p, vec2 center, vec2 half_size, float radius) {
-    \\    vec2 d = abs(p - center) - half_size + radius;
-    \\    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
-    \\}
-    \\
+    \\layout(location = 0) in vec2 aCorner;
+    \\layout(location = 1) in vec4 aPosBody;  // center, half the body
+    \\layout(location = 2) in vec4 aWing;     // wing axis, wing normal
+    \\layout(location = 3) in vec4 aLook;     // alpha, far, flash, size
+    \\layout(location = 4) in vec4 aMove;     // velocity px/s, wingbeat phase, rate
+    \\uniform vec2 uRes;
+    \\uniform float uLead;                   // seconds from the last step (<= 0)
+    \\out vec2 vP;
+    \\flat out vec2 vBody;
+    \\flat out vec4 vWings;
+    \\flat out vec4 vLook;
     \\void main() {
-    \\    // One fragment per block: scale canvas coords back to screen space.
-    \\    vec2 fc = gl_FragCoord.xy * iPixel;
-    \\    vec2 uv = fc / iResolution.xy;
-    \\
-    \\    vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.02, 0.025, 0.04);
-    \\    vec3 fg = (iPaletteSize > 0) ? iPaletteFg : vec3(0.9);
-    \\    // Hypsometric ramp from the theme's ANSI colors.
-    \\    vec3 elev0 = (iPaletteSize > 4) ? iPalette[4] : vec3(0.25, 0.35, 0.70);
-    \\    vec3 elev1 = (iPaletteSize > 6) ? iPalette[6] : vec3(0.30, 0.60, 0.80);
-    \\    vec3 elev2 = (iPaletteSize > 2) ? iPalette[2] : vec3(0.30, 0.70, 0.40);
-    \\    vec3 elev3 = (iPaletteSize > 3) ? iPalette[3] : vec3(0.80, 0.70, 0.30);
-    \\    vec3 hot   = (iPaletteSize > 9) ? iPalette[9] : vec3(1.0, 0.4, 0.3);
-    \\
-    \\    // Dusk sky: vertical falloff plus the faintest large-scale drift.
-    \\    float sky = 1.0 - uv.y * 0.25;
-    \\    vec3 col = bg * (0.8 * sky + 0.06 * fbm(uv * 3.0 + iSwarmTime * 0.02));
-    \\
-    \\    vec4 field = texture(iField, uv);
-    \\    vec2 vel = (field.rg - 0.5) * 2.0;
-    \\    float agit = field.b;
-    \\
-    \\    vec2 vel_uv = vel * 0.08;
-    \\    float dens = streakDensity(uv, vel_uv);
-    \\
-    \\    // Feathering: fbm advected against the flow plumes the cloud edge.
-    \\    float feather = fbm(fc * 0.013 - vel * 2.5 + vec2(0.0, iSwarmTime * 0.35));
-    \\    dens *= 0.55 + 0.9 * feather;
-    \\    dens *= 1.0 + iBass * 0.5; // bass thickens the murmuration
-    \\
-    \\    float panic = agit * (0.7 + 0.3 * vnoise(fc * 0.05 + iSwarmTime * 9.0));
-    \\
-    \\    const float levels = 4.0;
-    \\    float q = dens * levels;
-    \\    float level = floor(q);
-    \\    float g = fract(q);
-    \\    float line_d = min(g, 1.0 - g);
-    \\    float lw = fwidth(q) * 0.7 + 0.01;
-    \\    float iso = 1.0 - smoothstep(lw, lw * 1.8, line_d);
-    \\
-    \\    // Elevation tint, posterized into flat steps in field mode so
-    \\    // neighboring blocks snap to distinct colors.
-    \\    float lt = (iContour > 0.5)
-    \\        ? clamp(level / levels, 0.0, 1.0)
-    \\        : floor(clamp(dens, 0.0, 1.0) * 5.0 + 0.5) / 5.0;
-    \\    float e = lt * 4.0;
-    \\    vec3 ramp;
-    \\    if      (e < 1.0) ramp = mix(elev0, elev1, e);
-    \\    else if (e < 2.0) ramp = mix(elev1, elev2, e - 1.0);
-    \\    else if (e < 3.0) ramp = mix(elev2, elev3, e - 2.0);
-    \\    else              ramp = mix(elev3, fg, min(e - 3.0, 1.0));
-    \\    // Mute toward ink; panic stays vivid.
-    \\    float lum = dot(ramp, vec3(0.299, 0.587, 0.114));
-    \\    ramp = mix(ramp, vec3(lum), iMute);
-    \\    ramp = mix(ramp, fg, 0.15);
-    \\    ramp = mix(ramp, hot, clamp(panic * 1.4, 0.0, 0.75));
-    \\
-    \\    float present = smoothstep(0.02, 0.10, dens);
-    \\    if (iContour > 0.5) {
-    \\        // Pure line-work: crisp colored isolines, drawn cartography.
-    \\        col += ramp * iso * present * (0.8 + iEnergy * 0.4);
-    \\    } else {
-    \\        // Posterized field: brightness snaps to flat levels too.
-    \\        float fill = smoothstep(0.03, 0.75, dens);
-    \\        fill = floor(fill * 5.0 + 0.5) / 5.0;
-    \\        col += ramp * fill * (0.7 + iEnergy * 0.4);
-    \\    }
-    \\
-    \\    // The predator is deliberately invisible — you read its position
-    \\    // from the holes it tears and the hot panic of birds fleeing it.
-    \\
-    \\    // Window edges catch a faint glow from passing density.
-    \\    for (int i = 0; i < iWindowCount && i < 32; i++) {
-    \\        vec4 win = iWindows[i];
-    \\        if (win.z < 1.0 || win.w < 1.0) continue;
-    \\        float d = sdRoundBox(fc, win.xy + win.zw * 0.5, win.zw * 0.5, 8.0);
-    \\        if (d < 0.0 || d > 60.0) continue;
-    \\        col += ramp * exp(-d * d / 800.0) * 0.08 * present * (1.0 + iBeat);
-    \\    }
-    \\
-    \\    // Grain: per-block flicker — CRT static breathing under the image.
-    \\    col += (hash21(fc + fract(iSwarmTime) * 100.0) - 0.5) * 0.012;
-    \\
-    \\    fragColor = vec4(col, 1.0);
+    \\    // The beat lifts both tips together; the wings sweep back along
+    \\    // the body. Beaten here, the wings move at the display's rate
+    \\    // however slowly the flock steps.
+    \\    float beat = 0.1 + 0.5 * sin(aMove.z + aMove.w * uLead);
+    \\    if (aMove.w == 0.0) beat = 0.0;
+    \\    vec2 lift = aWing.zw * sin(beat);
+    \\    vec2 reach = aWing.xy * cos(beat);
+    \\    vec2 sweep = aPosBody.zw * 0.81 * (1.0 + 0.7 * aLook.z);
+    \\    vWings = vec4(lift - reach - sweep, lift + reach - sweep);
+    \\    if (aMove.w == 0.0) vWings = vec4(0.0);
+    \\    float ext = length(aPosBody.zw) + max(length(vWings.xy), length(vWings.zw)) + 3.0 * aLook.w;
+    \\    vP = aCorner * ext;
+    \\    vBody = aPosBody.zw;
+    \\    vLook = aLook;
+    \\    vec2 at = aPosBody.xy + aMove.xy * uLead;
+    \\    gl_Position = vec4((at + vP) / uRes * 2.0 - 1.0, 0.0, 1.0);
     \\}
 ;
 
-const Accum = struct {
-    dens: [field_cells]f32,
-    velx: [field_cells]f32,
-    vely: [field_cells]f32,
-    agit: [field_cells]f32,
-    bytes: [field_cells * 4]u8,
-};
+// A bird is three tapered strokes: the body, nose to tail, and a wing from
+// the shoulder out to each tip. Flat ink with one pixel of antialiasing.
+const bird_frag: [*:0]const u8 =
+    \\#version 300 es
+    \\precision highp float;
+    \\in vec2 vP;
+    \\flat in vec2 vBody;
+    \\flat in vec4 vWings;
+    \\flat in vec4 vLook;
+    \\uniform vec3 uInk;
+    \\uniform vec3 uFar;
+    \\out vec4 fragColor;
+    \\
+    \\// Distance to a stroke from a to b whose radius runs from r0 to r1.
+    \\float stroke(vec2 p, vec2 a, vec2 b, float r0, float r1) {
+    \\    vec2 pa = p - a;
+    \\    vec2 ba = b - a;
+    \\    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
+    \\    return length(pa - ba * h) - mix(r0, r1, h);
+    \\}
+    \\
+    \\void main() {
+    \\    float size = vLook.w;
+    \\    float flash = vLook.z;
+    \\    // A stubby body, fuller toward the head, and two pointed wings
+    \\    // broad where they join it.
+    \\    float d = stroke(vP, vBody, -vBody, 1.3 * size, 0.55 * size);
+    \\    vec2 shoulder = vBody * 0.25;
+    \\    float chord = (1.3 + 1.1 * flash) * size;
+    \\    d = min(d, stroke(vP, shoulder, shoulder + vWings.xy, chord, 0.15 * size));
+    \\    d = min(d, stroke(vP, shoulder, shoulder + vWings.zw, chord, 0.15 * size));
+    \\    float a = vLook.x * clamp(0.5 - d, 0.0, 1.0);
+    \\    // A flashing wing catches the light, however far off.
+    \\    vec3 col = mix(uInk, uFar, vLook.y * 0.6 * (1.0 - flash));
+    \\    col = mix(col, vec3(1.0), flash * 0.45);
+    \\    fragColor = vec4(col * a, a);
+    \\}
+;
 
 pub const Context = struct {
-    audio: ?*audio_mod.AudioCapture,
-    sys: boids_mod.BoidSystem,
     allocator: std.mem.Allocator,
-    accum: *Accum,
+    music: spectral.Analyzer,
+    flock: flock_mod.Flock,
+    rng: std.Random.DefaultPrng,
 
-    now: f64 = 0,
+    width: f32,
+    height: f32,
+    /// Time owed to the flock since its last step.
+    owed: f32 = 0,
+    /// A kick heard since the last step.
+    kick: bool = false,
 
-    // Audio analysis (glitch.zig pattern, shared in bands.zig)
-    an: bands_mod.Splitter = .{},
+    // The flock's day. With music it stays up. In quiet it flies for a
+    // while, comes down to roost, and goes up again.
+    roost_enabled: bool,
+    roost: bool = false,
+    phase_t: f32 = 0,
+    phase_len: f32,
 
-    /// Roost state: sustained silence settles the flock onto window tops;
-    /// returning music bursts it back into the air.
-    quiet_t: f32 = 0,
-    roost: f32 = 0,
+    // Ink for the nearest birds and for the farthest.
+    ink: [3]f32 = .{ 0.9, 0.9, 0.9 },
+    far: [3]f32 = .{ 0.4, 0.45, 0.6 },
 
-    // Render config (hot-reloads with the config watcher).
-    mute: f32 = 0.55,
-    pixel: f32 = 30.0,
-    contour: bool = false,
+    inst: []flock_mod.Instance,
+    inst_n: usize = 0,
+    /// The instances changed since they were last sent to the GPU.
+    inst_dirty: bool = false,
 
-    // Frame snapshot for the compute pass (FrameState slices aren't
-    // guaranteed to outlive update()).
-    windows: [max_windows]shader_mod.ShaderProgram.WindowRect = undefined,
-    window_count: u8 = 0,
-    palette: ?*const palette_mod.Palette = null,
-    palette_uploaded: bool = false,
-
-    /// GL resources — created lazily on first upload, when GL is current.
-    field_tex: c.GLuint = 0,
-    canvas_tex: c.GLuint = 0,
+    // GL, created on the first upload.
+    gl_ready: bool = false,
+    gl_failed: bool = false,
+    prog: c.GLuint = 0,
+    vao: c.GLuint = 0,
+    quad_vbo: c.GLuint = 0,
+    inst_vbo: c.GLuint = 0,
+    tex: c.GLuint = 0,
     fbo: c.GLuint = 0,
-    canvas_w: c.GLsizei = 0,
-    canvas_h: c.GLsizei = 0,
-    compute: ?shader_mod.ShaderProgram = null,
+    u_res: c.GLint = -1,
+    u_ink: c.GLint = -1,
+    u_far: c.GLint = -1,
+    u_lead: c.GLint = -1,
 
-    // Uniforms on the compute program, and on the main (upscale) program.
-    cu: Uniforms(.{
-        .field = "iField",
-        .pixel = "iPixel",
-        .time = "iSwarmTime",
-        .beat = "iBeat",
-        .bass = "iBass",
-        .energy = "iEnergy",
-        .mute = "iMute",
-        .contour = "iContour",
-    }) = .{},
-    mu: Uniforms(.{ .canvas = "iCanvas" }) = .{},
+    mu: Uniforms(.{ .flock = "iFlock" }) = .{},
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
-        const audio = try audio_mod.spawnIfMusic(allocator, params);
-        errdefer if (audio) |cap| audio_mod.shutdown(cap, allocator);
+        var music = try spectral.Analyzer.init(allocator, params);
+        errdefer music.deinit(allocator);
 
-        const accum = try allocator.create(Accum);
-        accum.* = std.mem.zeroes(Accum);
+        const count: usize = @intCast(std.math.clamp(params.getInt("count", 4000), 1, flock_mod.max_birds));
+        const speed = std.math.clamp(params.getFloat("speed", 300.0), 60.0, 900.0);
+        var flock = try flock_mod.Flock.init(allocator, count, width, height, speed);
+        errdefer flock.deinit();
 
-        const count: u32 = @intCast(std.math.clamp(params.getInt("count", 240), 0, boids_mod.max_boids));
-
-        var sys = boids_mod.BoidSystem.init(count, width, height);
-        sys.base_speed = params.getFloat("speed", 220.0);
-        sys.perception = params.getFloat("perception", 240.0);
-        sys.separation_dist = params.getFloat("separation", 54.0);
+        const inst = try allocator.alloc(flock_mod.Instance, count);
 
         return .{
-            .audio = audio,
-            .sys = sys,
             .allocator = allocator,
-            .accum = accum,
-            .mute = params.getFloat("mute", 0.55),
-            .pixel = std.math.clamp(params.getFloat("pixel", 30.0), 1.0, 120.0),
-            .contour = params.getBool("contour", false),
+            .music = music,
+            .flock = flock,
+            .rng = std.Random.DefaultPrng.init(0xF10C_C0DE),
+            .width = width,
+            .height = height,
+            .roost_enabled = params.getBool("roost", true),
+            .phase_len = 45.0,
+            .inst = inst,
         };
     }
 
     pub fn update(self: *Context, state: effects.FrameState) void {
         const dt = @min(state.dt, 0.05);
-        self.now += dt;
-        const wave = audio_mod.waveformOr0(self.audio);
+        const r = self.rng.random();
+        const kicked = self.music.update(dt);
 
-        // 6 spectrum bands + beat detection (same as glitch.zig, bands.zig)
-        const beat_hit = self.an.update(&wave, dt);
-        var punch: f32 = 1.0;
-        if (beat_hit)
-            punch = std.math.clamp(self.an.flux / (self.an.flux_avg * 3.0 + 0.03), 1.0, 2.0);
-
-        // Silence settles the flock; sound lifts it. Roost ramps in slowly
-        // (the birds drift down over a few seconds) but releases fast.
-        if (self.an.energy < 0.05) {
-            self.quiet_t += dt;
-        } else {
-            self.quiet_t = @max(0.0, self.quiet_t - dt * 6.0);
+        // ---- the day ----
+        self.phase_t += dt;
+        if (self.music.bands.energy_ema > 0.06 or kicked) {
+            // Sound keeps the flock up, and puts it up if it was down.
+            self.roost = false;
+            self.phase_t = 0;
+            self.phase_len = 8.0; // once it goes quiet, not long to settle
+        } else if (self.roost_enabled and self.phase_t > self.phase_len) {
+            self.roost = !self.roost;
+            self.phase_t = 0;
+            self.phase_len = if (self.roost) 30.0 + r.float(f32) * 15.0 else 50.0 + r.float(f32) * 35.0;
         }
-        const roost_target: f32 = std.math.clamp((self.quiet_t - 4.0) / 3.0, 0.0, 1.0);
-        const roost_prev = self.roost;
-        const roost_k: f32 = if (roost_target > self.roost) 0.5 else 2.5;
-        self.roost += (roost_target - self.roost) * @min(1.0, roost_k * dt);
-        // The frame the roost breaks, the flock explodes off its perches.
-        const burst = roost_prev > 0.55 and self.roost <= 0.55;
 
-        // Flock + predator simulation
-        // The flock perches on and steers around the windows as plain rects.
-        var rects: [hypr.max_visible_windows]particles_sys.Rect = undefined;
-        const n_rects = @min(state.windows.len, rects.len);
-        for (state.windows[0..n_rects], rects[0..n_rects]) |w, *r| r.* = .{ .x = w.x, .y = w.y, .w = w.w, .h = w.h };
-        self.sys.update(dt, state.cursor[0], state.cursor[1], rects[0..n_rects], .{
-            .bass = self.an.bass,
-            .beat = self.an.beat,
-            .beat_hit = beat_hit,
-            .punch = punch,
-            .total_energy = self.an.energy,
-            .roost = self.roost,
-            .burst = burst,
-        });
+        var rects: [max_windows]flock_mod.Rect = undefined;
+        const n = @min(state.windows.len, max_windows);
+        for (state.windows[0..n], rects[0..n]) |w, *rect| {
+            rect.* = .{ .x = w.x, .y = w.y, .w = w.w, .h = w.h, .address = w.address };
+        }
+        self.kick = self.kick or kicked;
+        self.owed = @min(self.owed + dt, step * 2.0);
+        var stepped = false;
+        while (self.owed >= step) : (self.owed -= step) {
+            stepped = true;
+            self.flock.update(.{
+                .dt = step,
+                .windows = rects[0..n],
+                .cursor = state.cursor,
+                .bass = self.music.bass(),
+                .kick = if (self.kick) 1.0 else 0.0,
+                .roost = self.roost,
+            });
+            self.kick = false;
+            if (self.flock.alarm) {
+                // Flushed by the falcon: a short, nervous flight before it
+                // dares come down again.
+                self.roost = false;
+                self.phase_t = 0;
+                self.phase_len = 16.0 + r.float(f32) * 10.0;
+            }
+        }
 
-        // Snapshot what the compute pass needs.
-        self.window_count = @intCast(@min(state.windows.len, max_windows));
-        for (0..self.window_count) |i| self.windows[i] = state.windows[i];
         if (state.palette) |p| {
-            if (self.palette != p) self.palette_uploaded = false;
-            self.palette = p;
+            self.ink = .{ p.foreground.r, p.foreground.g, p.foreground.b };
+            // Far birds fade toward the theme's bright blue, held down
+            // toward the background: distance, not another color.
+            const tint = if (p.color_count > 12) p.colors[12] else p.foreground;
+            const bg = p.background;
+            self.far = .{
+                (tint.r * 0.6 + self.ink[0] * 0.4) * 0.6 + bg.r * 0.4,
+                (tint.g * 0.6 + self.ink[1] * 0.4) * 0.6 + bg.g * 0.4,
+                (tint.b * 0.6 + self.ink[2] * 0.4) * 0.6 + bg.b * 0.4,
+            };
         }
 
-        self.splatField();
-    }
-
-    /// Rasterize the flock into the density/velocity/agitation field.
-    /// Each boid drops a 7x7 gaussian; velocity is density-weighted so the
-    /// shader can streak the cloud along local motion.
-    fn splatField(self: *Context) void {
-        const a = self.accum;
-        @memset(&a.dens, 0);
-        @memset(&a.velx, 0);
-        @memset(&a.vely, 0);
-        @memset(&a.agit, 0);
-
-        const sx = @as(f32, field_w) / self.sys.width;
-        const sy = @as(f32, field_h) / self.sys.height;
-
-        for (0..self.sys.count) |i| {
-            const b = self.sys.boids[i];
-            const fx = b.x * sx;
-            const fy = b.y * sy;
-            const cx: i32 = @intFromFloat(@floor(fx));
-            const cy: i32 = @intFromFloat(@floor(fy));
-
-            var oy: i32 = -3;
-            while (oy <= 3) : (oy += 1) {
-                var ox: i32 = -3;
-                while (ox <= 3) : (ox += 1) {
-                    const gx = cx + ox;
-                    const gy = cy + oy;
-                    if (gx < 0 or gx >= field_w or gy < 0 or gy >= field_h) continue;
-                    const dx = (@as(f32, @floatFromInt(gx)) + 0.5) - fx;
-                    const dy = (@as(f32, @floatFromInt(gy)) + 0.5) - fy;
-                    const w = @exp(-(dx * dx + dy * dy) * 0.22);
-                    const idx: usize = @intCast(gy * field_w + gx);
-                    a.dens[idx] += w;
-                    a.velx[idx] += b.vx * w;
-                    a.vely[idx] += b.vy * w;
-                    a.agit[idx] += b.agit * w;
-                }
-            }
-        }
-
-        // Pack to RGBA8: R/G = density-weighted velocity (biased ±vel_scale),
-        // B = agitation, A = soft-saturated density.
-        for (0..field_cells) |i| {
-            const d = a.dens[i];
-            var vx: f32 = 0;
-            var vy: f32 = 0;
-            var ag: f32 = 0;
-            if (d > 0.001) {
-                vx = std.math.clamp(a.velx[i] / d / vel_scale, -1.0, 1.0);
-                vy = std.math.clamp(a.vely[i] / d / vel_scale, -1.0, 1.0);
-                ag = std.math.clamp(a.agit[i] / d, 0.0, 1.0);
-            }
-            const dens = 1.0 - @exp(-d * 0.55);
-            a.bytes[i * 4 + 0] = @intFromFloat((vx * 0.5 + 0.5) * 255.0);
-            a.bytes[i * 4 + 1] = @intFromFloat((vy * 0.5 + 0.5) * 255.0);
-            a.bytes[i * 4 + 2] = @intFromFloat(ag * 255.0);
-            a.bytes[i * 4 + 3] = @intFromFloat(dens * 255.0);
+        if (stepped) {
+            self.inst_n = self.flock.instances(self.inst);
+            self.inst_dirty = true;
         }
     }
 
     fn ensureGl(self: *Context) bool {
-        if (self.compute != null) return true;
+        if (self.gl_ready) return true;
+        if (self.gl_failed) return false;
+        self.gl_failed = true;
 
-        self.compute = shader_mod.ShaderProgram.init(compute_frag) catch return false;
+        self.prog = geometry.compileProgram(bird_vert, bird_frag);
+        if (self.prog == 0) return false;
+        self.u_res = c.glGetUniformLocation(self.prog, "uRes");
+        self.u_ink = c.glGetUniformLocation(self.prog, "uInk");
+        self.u_far = c.glGetUniformLocation(self.prog, "uFar");
+        self.u_lead = c.glGetUniformLocation(self.prog, "uLead");
 
-        c.glGenTextures(1, &self.field_tex);
-        c.glBindTexture(c.GL_TEXTURE_2D, self.field_tex);
-        c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA8, field_w, field_h, 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, null);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+        const Instance = flock_mod.Instance;
+        const corners = [_]f32{ -1, -1, 1, -1, -1, 1, 1, 1 };
+        c.glGenVertexArrays(1, &self.vao);
+        c.glBindVertexArray(self.vao);
+        c.glGenBuffers(1, &self.quad_vbo);
+        c.glBindBuffer(c.GL_ARRAY_BUFFER, self.quad_vbo);
+        c.glBufferData(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(corners)), &corners, c.GL_STATIC_DRAW);
+        c.glEnableVertexAttribArray(0);
+        c.glVertexAttribPointer(0, 2, c.GL_FLOAT, c.GL_FALSE, 0, null);
 
-        // Canvas: one texel per block, nearest-upscaled by the main shader,
-        // which is what keeps the blocks razor sharp.
-        self.canvas_w = @intFromFloat(@ceil(self.sys.width / self.pixel));
-        self.canvas_h = @intFromFloat(@ceil(self.sys.height / self.pixel));
-        c.glGenTextures(1, &self.canvas_tex);
-        c.glBindTexture(c.GL_TEXTURE_2D, self.canvas_tex);
-        c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA8, self.canvas_w, self.canvas_h, 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, null);
+        c.glGenBuffers(1, &self.inst_vbo);
+        c.glBindBuffer(c.GL_ARRAY_BUFFER, self.inst_vbo);
+        c.glBufferData(c.GL_ARRAY_BUFFER, @intCast(@sizeOf(Instance) * self.inst.len), null, c.GL_STREAM_DRAW);
+        inline for (.{ 1, 2, 3, 4 }) |loc| {
+            c.glEnableVertexAttribArray(loc);
+            c.glVertexAttribPointer(loc, 4, c.GL_FLOAT, c.GL_FALSE, @sizeOf(Instance), @ptrFromInt((loc - 1) * 4 * @sizeOf(f32)));
+            c.glVertexAttribDivisor(loc, 1);
+        }
+        c.glBindVertexArray(0);
+        c.glBindBuffer(c.GL_ARRAY_BUFFER, 0);
+
+        c.glGenTextures(1, &self.tex);
+        c.glBindTexture(c.GL_TEXTURE_2D, self.tex);
+        c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA8, @intFromFloat(self.width), @intFromFloat(self.height), 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, null);
         c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_NEAREST);
         c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_NEAREST);
         c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
         c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
-
         c.glGenFramebuffers(1, &self.fbo);
         c.glBindFramebuffer(c.GL_FRAMEBUFFER, self.fbo);
-        c.glFramebufferTexture2D(c.GL_FRAMEBUFFER, c.GL_COLOR_ATTACHMENT0, c.GL_TEXTURE_2D, self.canvas_tex, 0);
-        const status = c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER);
+        c.glFramebufferTexture2D(c.GL_FRAMEBUFFER, c.GL_COLOR_ATTACHMENT0, c.GL_TEXTURE_2D, self.tex, 0);
+        const complete = c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER) == c.GL_FRAMEBUFFER_COMPLETE;
         c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
-        return status == c.GL_FRAMEBUFFER_COMPLETE;
+        if (!complete) {
+            log.err("flock layer framebuffer incomplete", .{});
+            return false;
+        }
+        self.gl_failed = false;
+        self.gl_ready = true;
+        return true;
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
         if (!self.ensureGl()) return;
-        const cp = &self.compute.?;
 
-        // ---- compute pass: render the effect at one fragment per block ----
-        self.cu.use(cp.program);
-
-        c.glActiveTexture(c.GL_TEXTURE0);
-        c.glBindTexture(c.GL_TEXTURE_2D, self.field_tex);
-        c.glTexSubImage2D(c.GL_TEXTURE_2D, 0, 0, 0, field_w, field_h, c.GL_RGBA, c.GL_UNSIGNED_BYTE, &self.accum.bytes[0]);
-        self.cu.int(.field, 0);
-
-        if (self.palette) |p| {
-            if (!self.palette_uploaded) {
-                cp.setPalette(p);
-                self.palette_uploaded = true;
-                c.glUseProgram(cp.program);
-            }
-        }
-
-        if (cp.i_resolution >= 0) c.glUniform3f(cp.i_resolution, self.sys.width, self.sys.height, 1.0);
-        for (0..self.window_count) |i| {
-            if (cp.i_windows[i] >= 0) {
-                const w = self.windows[i];
-                c.glUniform4f(cp.i_windows[i], w.x, w.y, w.w, w.h);
-            }
-        }
-        if (cp.i_window_count >= 0) c.glUniform1i(cp.i_window_count, self.window_count);
-
-        self.cu.f1(.pixel, self.pixel);
-        self.cu.f1(.time, @floatCast(self.now));
-        self.cu.f1(.beat, self.an.beat);
-        self.cu.f1(.bass, self.an.bass);
-        self.cu.f1(.energy, self.an.energy);
-        self.cu.f1(.mute, self.mute);
-        self.cu.f1(.contour, if (self.contour) 1.0 else 0.0);
-
+        // ---- the flock, into its own layer ----
         c.glBindFramebuffer(c.GL_FRAMEBUFFER, self.fbo);
-        c.glViewport(0, 0, self.canvas_w, self.canvas_h);
-        c.glBindVertexArray(cp.vao);
-        c.glDrawArrays(c.GL_TRIANGLES, 0, 3);
+        c.glViewport(0, 0, @intFromFloat(self.width), @intFromFloat(self.height));
+        c.glClearColor(0, 0, 0, 0);
+        c.glClear(c.GL_COLOR_BUFFER_BIT);
+        if (self.inst_n > 0) {
+            c.glUseProgram(self.prog);
+            c.glUniform2f(self.u_res, self.width, self.height);
+            c.glUniform3f(self.u_ink, self.ink[0], self.ink[1], self.ink[2]);
+            c.glUniform3f(self.u_far, self.far[0], self.far[1], self.far[2]);
+            c.glBindVertexArray(self.vao);
+            // The last step ended `owed` ago; draw the birds that far along
+            // the step before it.
+            c.glUniform1f(self.u_lead, self.owed - step);
+            if (self.inst_dirty) {
+                c.glBindBuffer(c.GL_ARRAY_BUFFER, self.inst_vbo);
+                // A fresh store each time: writing into the one the GPU may
+                // still be drawing from makes the driver wait for it.
+                c.glBufferData(c.GL_ARRAY_BUFFER, @intCast(@sizeOf(flock_mod.Instance) * self.inst.len), null, c.GL_STREAM_DRAW);
+                c.glBufferSubData(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(flock_mod.Instance) * self.inst_n), self.inst.ptr);
+                self.inst_dirty = false;
+            }
+            // Premultiplied over: where birds overlap the ink builds up,
+            // which is what makes the thick of the flock read as mass.
+            c.glEnable(c.GL_BLEND);
+            c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
+            c.glDrawArraysInstanced(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(self.inst_n));
+            c.glDisable(c.GL_BLEND);
+            c.glBindVertexArray(0);
+            c.glBindBuffer(c.GL_ARRAY_BUFFER, 0);
+        }
         c.glBindFramebuffer(c.GL_FRAMEBUFFER, 0);
 
-        // ---- main pass setup: hand the canvas to the upscale shader ----
+        // ---- hand the layer to the main pass ----
         self.mu.use(prog.program);
         c.glActiveTexture(c.GL_TEXTURE0);
-        c.glBindTexture(c.GL_TEXTURE_2D, self.canvas_tex);
-        self.mu.int(.canvas, 0);
+        c.glBindTexture(c.GL_TEXTURE_2D, self.tex);
+        self.mu.int(.flock, 0);
     }
 
     pub fn deinit(self: *Context) void {
         if (self.fbo != 0) c.glDeleteFramebuffers(1, &self.fbo);
-        if (self.canvas_tex != 0) c.glDeleteTextures(1, &self.canvas_tex);
-        if (self.field_tex != 0) c.glDeleteTextures(1, &self.field_tex);
-        if (self.compute) |*cp| cp.deinit();
-        if (self.audio) |cap| audio_mod.shutdown(cap, self.allocator);
-        self.allocator.destroy(self.accum);
+        if (self.tex != 0) c.glDeleteTextures(1, &self.tex);
+        if (self.inst_vbo != 0) c.glDeleteBuffers(1, &self.inst_vbo);
+        if (self.quad_vbo != 0) c.glDeleteBuffers(1, &self.quad_vbo);
+        if (self.vao != 0) c.glDeleteVertexArrays(1, &self.vao);
+        if (self.prog != 0) c.glDeleteProgram(self.prog);
+        self.music.deinit(self.allocator);
+        self.flock.deinit();
+        self.allocator.free(self.inst);
     }
 };

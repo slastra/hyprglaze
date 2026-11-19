@@ -281,7 +281,7 @@ pub const Renderer = struct {
     }
 
     /// Follow a change in the surface's buffer size or scale. Effects capture
-    /// their bounds at init — milkdrop sizes its FBOs, swarm its canvas — so
+    /// their bounds at init — milkdrop sizes its FBOs, swarm its flock layer — so
     /// any change to the buffer size rebuilds the effect, not just a scale
     /// change. Returns false when the effect rebuild failed and should be
     /// retried on a later frame (the Wayland flags are left set for that).
