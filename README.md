@@ -36,10 +36,10 @@ hyprglaze renders GLSL shaders and modular effects on the background layer. The 
 | `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `glitch` | Circuit-bent video feedback: a camera filming its own monitor, with your window frames as the only light. Stutter, freezes, skipping and slit-scan playback, sync loss, mosaic, crude dither, all in the theme's surface tones with brief accent bursts; music speeds the bends up |
 | `tide` | Rising water line tied to wall-clock time, with teardrops and splash jets |
-| `fire` | Flames rise from window top edges; moving windows leave a directional wake |
-| `voltaic` | Lightning arcs between window borders, St. Elmo's fire on the focused frame, beat-driven discharges |
+| `fire` | Flames and smoke rise from window top edges and the bottom of the screen as a simulated gas, in the theme's own reds, yellows and gray. Windows are solid bodies in the air around them: drag one and its flame streams back over it and trails behind, the air it pushes bends its neighbors' flames, and when it stops the flame stands back up. The fire lights the wall and the smoke around it |
+| `voltaic` | Electrical arcs between window borders: thin, jagged channels that strike, writhe and stretch, then cool from white through blue to violet where they went out. Small arcs crawl the focused frame, beats drive discharges, and loud passages hold a standing arc between the two largest windows |
 | `moire` | Fine ring gratings radiating from invisible bodies orbiting windows; where they cross, moiré fringes. Gravitationally lensed, audio-reactive |
-| `swarm` | Boid murmuration in pixel-block ink; a hawk dives on beats, silence settles the birds onto windows |
+| `swarm` | A murmuration: thousands of starlings, each one drawn, wheeling as one flock that pours around windows. Birds bank into their turns and waves of flashing wings cross the flock. The cursor is a falcon, bass draws the flock tight and a kick sends a wave through it, and in quiet they come down to roost along the tops of your windows |
 | `ivy` | Bioluminescent vines climb window frames and screen edges until the frame is clad, then mature in place; they wilt when their window moves or closes and wait dormant while it is on another workspace |
 | `weft` | Windows shine through a grainy diffraction weave; the audio waveform threads through the fringes |
 | `whorl` | Cyclic cellular automaton on a phosphor CRT: two-tone spiral waves break around windows, music wired into the rules |

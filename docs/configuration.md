@@ -128,6 +128,12 @@ max_calls_per_minute = 6
 start_hour = 6.0      # hour at which the tide is empty
 end_hour   = 24.0     # hour at which the tide is full
 
+[fire]
+height = 1.0          # flame height multiplier (0.3-3.0); the focused window burns taller
+smoke = 1.0           # how much smoke the flames give off (0 for none, up to 3.0)
+floor = 1.0           # flames along the bottom of the screen (0 for none, up to 1.5)
+glow = 1.0            # light the fire throws on its surroundings (0 for none, up to 3.0)
+
 [voltaic]
 arc_rate = 1.0        # ambient strike frequency multiplier
 # music = true        # beats drive discharges; false = no capture, ambient arcs only
@@ -168,14 +174,10 @@ brightness = 1.0      # foliage glow multiplier
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [swarm]
-count = 240           # birds (max 256)
-speed = 220.0         # base flight speed (px/s)
-perception = 240.0    # neighbor sense radius
-separation = 54.0     # bird spacing; larger means bigger formations
-mute = 0.55           # ink saturation: 0 = full palette color, 1 = greyscale
-pixel = 30.0          # block size in px; 1.0 = full-res smooth rendering
-contour = false       # true = topographic isoline mode instead of blocks
-# music = true        # beats send the hawk; silence settles the birds
+count = 4000          # starlings (max 8192)
+speed = 300.0         # cruise speed, px/s on a 1440-line screen
+roost = true          # in quiet the flock comes down to roost on window tops, then flies again
+# music = true        # bass draws the flock tight, kicks send a wave through it, sound keeps it up
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 ```
 
