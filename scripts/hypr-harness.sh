@@ -106,7 +106,12 @@ cleanup() {
     fi
     return $rc
 }
-trap cleanup EXIT INT TERM
+# A signal must end the run, not just clean up under it: a bare handler
+# returns into the script, which then carries on (and keeps the flock lock)
+# with its compositor gone.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cp tools/harness_nested.lua "$OUT/cfg/hypr/hyprland.lua"
 cat > "$OUT/cfg/hypr/hyprglaze.toml" <<'TOML'
