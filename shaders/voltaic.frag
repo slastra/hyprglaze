@@ -14,18 +14,23 @@ uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
-// Bolt geometry from voltaic.zig: midpoint-displaced segments regenerated
-// each re-strike tick. iSegs holds (x1, y1, x2, y2); brightness is packed
-// four-per-vec4 in iSegB and unpacked with [i>>2][i&3]. Branch segments
-// arrive dimmer and taper to nothing, so width can derive from brightness.
-uniform vec4 iSegs[240];
-uniform vec4 iSegB[60];
-uniform int iSegCount;
+// Arc geometry from voltaic.zig. Every channel is a polyline of short
+// segments in chunks of eight. Row c of iSegTex is chunk c: texels 0-7 are
+// the segments (x1, y1, x2, y2), texels 8-15 their (brightness, core
+// half-width px, cool, -), cool running from 0, live, to 1, an ember.
+// iChunkBox[c] is the chunk's bounds padded by the glow's reach, so one
+// test skips all eight segments.
+uniform highp sampler2D iSegTex;
+uniform vec4 iChunkBox[256];
+uniform int iChunkCount;
+uniform float iPx;         // pixel scale against a 1440-line screen
 uniform float iBeat;
 uniform float iBass;
 uniform float iTreble;
 uniform float iFlash;
-uniform int iGhostStart;   // segments at/after this index are afterglow embers
+
+// Must match glow_reach in voltaic.zig.
+const float REACH = 170.0;
 
 out vec4 fragColor;
 
@@ -39,9 +44,16 @@ float hash21(vec2 p) {
 
 // ---------- palette ----------
 
-// Electric blue/cyan pulled from the theme's bright accents; near-white core.
+// Push a palette color's chroma without moving its hue: theme accents are
+// often pastel, and a pastel glow over a dark bench reads as gray.
+vec3 vivid(vec3 c, float k) {
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return clamp(mix(vec3(l), c, k), 0.0, 1.0);
+}
+
+// Electric blue from the theme's bright blue.
 vec3 glowColor() {
-    if (iPaletteSize > 12) return mix(iPalette[12], iPalette[14], 0.4);
+    if (iPaletteSize > 12) return vivid(iPalette[12], 1.7);
     return vec3(0.30, 0.55, 1.0);
 }
 
@@ -69,8 +81,8 @@ float windowSdf(vec2 p, vec4 win) {
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
 }
 
-// Whisper of steady glow on the focused frame — the crawling arcs (CPU-side
-// bolt segments hugging the border) carry the show; this just keeps focus
+// Whisper of steady glow on the focused frame. The crawling arcs (CPU-side
+// channels hugging the border) carry the show; this just keeps focus
 // readable in the gaps between crawls.
 float focusRim(vec2 fc, vec4 win, float focus_amt) {
     if (focus_amt < 0.01 || win.z < 1.0) return 0.0;
@@ -98,64 +110,92 @@ void main() {
     // room lighting up. Fast CPU-side decay keeps it a snap, not a wash.
     col += (bg * 1.6 + gcol * 0.5) * iFlash * 0.17 * vig;
 
-    // Three-layer bolt glow — each layer models a distinct physical region:
-    //   corona: very wide diffuse glow that lights up air around the channel
-    //   halo:   colored mid-range bloom (plasma sheath)
-    //   core:   overexposed white return-stroke channel
-    vec3 light = vec3(0.0);
-    float ember = 0.0;   // afterglow channel glow (tinted violet below)
-    for (int i = 0; i < iSegCount && i < 240; i++) {
-        vec4 s = iSegs[i];
+    // A channel is drawn the way a hot arc photographs:
+    //   core:   a thin, crisp, near-white line
+    //   sheath: the tight glare hugging it, falling off as inverse square
+    //   glow:   the light the channel throws into the air around it
+    // Core and sheath are distance fields joined with max(), so joints and
+    // crossings never pile up into blobs. The glow is the channel treated
+    // as a line light: each segment's inverse-square light integrated along
+    // its length (closed form, two atans), summed over segments. A summed
+    // integral is smooth across every kink, where a distance field would
+    // crease into rays. A window takes it to zero at REACH, so the chunk
+    // boxes are never visible as a cutoff.
+    float px = max(iPx, 0.1);
+    float reach = REACH * px;
+    float glow_r = 4.5 * px * (1.0 + iBass * 0.35);
 
-        // Bounding-box reject. The outer corona (exp(-d*0.011)) drops below
-        // the grain noise floor (~0.012) only at d>320px; pad to 400 so the
-        // falloff is invisible even perpendicular to long segments.
-        vec2 lo = min(s.xy, s.zw) - 400.0;
-        vec2 hi = max(s.xy, s.zw) + 400.0;
-        if (fc.x < lo.x || fc.x > hi.x || fc.y < lo.y || fc.y > hi.y) continue;
+    vec3 light = vec3(0.0);  // glow, sheath, core
+    vec2 ember = vec2(0.0);  // afterglow: glow, channel (tinted violet below)
+    for (int c = 0; c < iChunkCount && c < 256; c++) {
+        vec4 box = iChunkBox[c];
+        if (fc.x < box.x || fc.x > box.z || fc.y < box.y || fc.y > box.w) continue;
 
-        float b = iSegB[i >> 2][i & 3];
-        if (b < 0.004) continue;
+        for (int k = 0; k < 8; k++) {
+            vec4 pr = texelFetch(iSegTex, ivec2(8 + k, c), 0);
+            float b = pr.x;
+            if (b < 0.004) continue;
+            vec4 s = texelFetch(iSegTex, ivec2(k, c), 0);
 
-        vec2 pa = fc - s.xy;
-        vec2 ba = s.zw - s.xy;
-        float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
-        float d = length(pa - ba * h);
+            vec2 pa = fc - s.xy;
+            vec2 ba = s.zw - s.xy;
+            float len = length(ba);
+            if (len < 1e-3) continue;
+            vec2 dir = ba / len;
+            float t = dot(pa, dir);                  // along the segment
+            float perp = dot(pa, vec2(-dir.y, dir.x));
+            float d = length(pa - dir * clamp(t, 0.0, len));
+            if (d > reach) continue;
 
-        // Dimmer (branch) segments are also thinner; bass fattens everything.
-        float w = mix(0.55, 1.0, min(b, 1.0)) * (1.0 + iBass * 0.35);
+            float hh = sqrt(perp * perp + glow_r * glow_r);
+            float win = 1.0 - d * d / (reach * reach);
+            // 1 on a long straight channel's axis, glow_r / distance away.
+            float g = (atan((len - t) / hh) + atan(t / hh)) * glow_r / (hh * 3.14159265) * win * win;
 
-        // Afterglow embers: no hot core, just a soft violet glow. A tight inner
-        // channel plus a wider haze so the cooling ionized air reads as a cloud.
-        if (i >= iGhostStart) {
-            ember = max(ember, exp(-d * 0.045 / w) * b + exp(-d * 0.013) * b * 0.5);
-            continue;
+            // A channel cools from live (0) to ember (1): the ember has no
+            // hot core, just the dull channel and its glow.
+            float cool = pr.z;
+            ember.x += b * cool * g;
+            ember.y = max(ember.y, b * cool * exp(-d / (5.0 * px)));
+
+            float w = pr.y;
+            float sr = 2.6 * w;
+            b *= 1.0 - cool;
+            light.x += b * g;
+            light.y = max(light.y, b / (1.0 + d * d / (sr * sr)));
+            light.z = max(light.z, min(b * 1.8, 1.0) * smoothstep(w + 0.75, w - 0.75, d));
         }
-
-        // Wide outer corona: lights up the space around the bolt.
-        light.x = max(light.x, exp(-d * 0.011) * b * 0.24);
-        // Colored plasma halo.
-        light.y = max(light.y, exp(-d * 0.038 / w) * b);
-        // Overexposed white core — blows out to white at the channel center.
-        light.z = max(light.z, exp(-d * d * 0.42 / (w * w)) * b);
     }
 
     // Steady rim on the focused window (cross-fading through transitions).
+    float rim = 0.0;
     for (int i = 0; i < iWindowCount && i < 32; i++) {
         float focus_amt = 0.0;
         if (i == iFocusedIndex) focus_amt = max(focus_amt, smoothstep(0.0, 1.0, iTransition));
         if (i == iPrevIndex)    focus_amt = max(focus_amt, 1.0 - smoothstep(0.0, 1.0, iTransition));
-        light.y += focusRim(fc, iWindows[i], focus_amt);
+        rim += focusRim(fc, iWindows[i], focus_amt);
     }
 
-    col += gcol * light.x * 0.60;           // wide corona: faint space-lighting
-    col += gcol * light.y * 0.90;           // colored plasma halo
-    col += ccol * light.z * 3.20;           // overexposed core — blows out to white
+    // Hot to cool, outward: white core, pale sheath, blue glow thinning to
+    // the theme's violet where it is faint.
+    vec3 ecol = emberColor();
+    col += gcol * rim * 0.55;
+    // Summed light is compressed, so channels bunched in one gap glow
+    // brighter without washing out to white.
+    float glow = 1.0 - exp(-light.x * 1.3);
+    col += mix(mix(gcol, ecol, 0.6), gcol, smoothstep(0.03, 0.30, glow)) * glow * 0.62;
+    col += mix(gcol, ccol, 0.45) * light.y * 0.75;
 
-    // Cooling-ember afterglow: the ionized channel still glows after the bolt
-    // is gone — the recombination glow of real lightning's decaying channel.
-    // Theme purple, distinct from the live blue bolts.
-    col += emberColor() * ember * 1.9;
+    // Cooling-ember afterglow: the ionized channel still glows after the arc
+    // is out, the recombination glow of a decaying channel. Theme purple,
+    // distinct from the live blue arcs.
+    col += ecol * ((1.0 - exp(-ember.x * 1.3)) * 0.65 + ember.y * 0.85);
+
+    // The core goes on last and replaces rather than adds, so the line
+    // stays crisp however much glow is under it. A faint channel has a
+    // cooler core, blue rather than gray.
+    vec3 hot = mix(gcol, ccol, smoothstep(0.15, 0.7, light.y));
+    col = mix(col, max(col, hot), light.z);
 
     // Beat: the whole bench flashes faintly, like a capacitor letting go.
     col += gcol * iBeat * 0.045;

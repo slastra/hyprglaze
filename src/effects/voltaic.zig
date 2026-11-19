@@ -1,5 +1,4 @@
 const std = @import("std");
-const clock = @import("clock.zig");
 const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
@@ -12,37 +11,46 @@ const c = @import("c");
 
 const max_windows = 32;
 
+const WindowRect = shader_mod.ShaderProgram.WindowRect;
+
 /// Active arc pool. Arcs only strike between window borders.
-/// Larger pool accommodates multi-stroke follow-up arcs (one extra per spawn).
-const max_arcs = 16;
+const max_arcs = 12;
 
-// Segment budget shared by all bolts in a frame. Geometry is regenerated
-// every frame (deterministic per re-strike tick), so this is also the
-// uniform array size in the shader.
-const max_segments = 240;
-const seg_b_vec4s = max_segments / 4;
+// Geometry budget. Every channel is a polyline of short segments, emitted
+// in chunks of eight consecutive segments. A chunk is one row of an
+// RGBA32F texture (eight endpoint texels, then eight parameter texels) and
+// carries a padded bounding box, so the shader rejects a whole chunk with
+// one test and only walks the segments near the pixel.
+const seg_per_chunk = 8;
+const max_chunks = 256;
+const tex_w = seg_per_chunk * 2;
+const row_floats = tex_w * 4;
 
-// Bolt geometry re-randomizes at this rate; the strike index seeds the
-// midpoint-displacement RNG, so each strike is a brand-new jagged path.
-const restrike_hz: f32 = 13.0;
+/// How far a channel's glow reaches, in px at 1440 lines (scaled by `px`).
+/// The shader subtracts each falloff's value at this radius so the chunk
+/// boxes never show as a cutoff.
+const glow_reach: f32 = 170.0;
 
-// Main bolts subdivide to this many segments (power of two <= 16).
-// Both values must be powers of two — the midpoint-displacement algorithm
-// reads pts[i ± step/2] and requires a complete binary subdivision tree.
-const bolt_segs = 16;
-const branch_segs = 8;
+/// Most points one channel is cut into.
+const max_pts = 96;
+
+// A channel's fine structure (the crackle) re-seeds this many times per
+// beat while its gross path drifts continuously: 32 Hz at the 120 BPM
+// fallback. Real arcs do the same thing, re-igniting along a hot channel
+// that itself only wanders.
+const crackle_per_beat: f64 = 16.0;
 
 // Stepped-leader propagation time: how long a fresh stroke takes to bridge
 // the gap from source window to target. A hot tip rides the advancing front.
-// Kept very brief — real leaders cross in microseconds; this is just enough
+// Kept very brief: real leaders cross in microseconds; this is just enough
 // frames (~3-4 at 60fps) to read as a reach rather than an instant flash.
 const leader_extend: f32 = 0.055;
 
-// Pre-beat feeler tendrils: how far ahead of a downbeat the groping sparks
+// Pre-beat feeler streamers: how far ahead of a downbeat the groping sparks
 // begin to reach out from window edges (seconds).
 const tendril_lead: f32 = 0.12;
 
-// Storm mode: sustained energy locks a persistent arc between the two
+// Storm mode: sustained energy holds a standing arc between the two
 // largest windows. Engages above this smoothed-energy threshold, with
 // asymmetric ramps so it snaps on with a chorus and lingers a beat after.
 const storm_threshold: f32 = 0.32;
@@ -53,33 +61,30 @@ const storm_tau_out: f32 = 1.6;
 const spawn_min: f32 = 0.30;
 const spawn_max: f32 = 1.10;
 
-// Focus aura: short bolts crawling along the focused window's border,
+// Focus aura: short arcs crawling along the focused window's border,
 // plasma-globe style. Both endpoints live on the frame, parameterized by
 // perimeter position so they ride the window through moves and focus
 // transitions (the smoothed rect glides; the crawls glide with it).
 const max_crawls = 6;
-const crawl_segs = 8;
 
-// Afterglow: a pool of frozen channel snapshots, each from a strong strike,
-// fading independently. max_ghost caps one snapshot's segment count; max_embers
-// is how many recent strikes leave lingering violet ghosts at once.
-const max_ghost = 40;
-const max_embers = 4;
-const ember_life: f32 = 0.55;
+// Live channels one pair of windows carries before a new discharge takes
+// an existing channel instead, and the longest such a channel is kept lit.
+const pair_channels = 2;
+const max_burn: f32 = 2.5;
 
-/// A frozen imprint of a strong strike's channel — re-emitted each frame as
-/// dim violet segments that fade over ember_life, outliving the bolt itself.
-const Ember = struct {
-    segs: [max_ghost][4]f32 = undefined,
-    b: [max_ghost]f32 = undefined,
-    count: u32 = 0,
-    age: f32 = 0,
-    active: bool = false,
-};
+// Side streamers a main channel can carry at once, and how many crackle
+// ticks each one lives.
+const fork_slots = 3;
+const fork_ticks: f32 = 5.0;
+
+// Afterglow: an arc that has gone out leaves its channel cooling in place,
+// violet, for this many seconds (a hard strike's lingers longest).
+const cool_min: f32 = 0.18;
+const cool_max: f32 = 0.50;
 
 const Crawl = struct {
     /// Perimeter offset of the start point and arc-length of the walk to
-    /// the end point — resolved against the *current* focused rect each
+    /// the end point, resolved against the *current* focused rect each
     /// frame, never cached as coordinates.
     t0: f32 = 0,
     dl: f32 = 0,
@@ -90,25 +95,131 @@ const Crawl = struct {
     active: bool = false,
 };
 
+/// Where an arc roots on a window: a point on its border in the window's
+/// own 0..1 space, so the root rides the window through moves and resizes.
+const Anchor = struct {
+    addr: u64 = 0,
+    idx: u8 = 0,
+    n: [2]f32 = .{ 0, 0 },
+    /// On a top or bottom edge, so the root slides in x.
+    horiz: bool = false,
+
+    fn of(win: WindowRect, idx: usize, p: [2]f32) Anchor {
+        const w = @max(win.w, 1.0);
+        const h = @max(win.h, 1.0);
+        const dx = @min(p[0] - win.x, win.x + win.w - p[0]);
+        const dy = @min(p[1] - win.y, win.y + win.h - p[1]);
+        return .{
+            .addr = win.address,
+            .idx = @intCast(idx),
+            .n = .{
+                std.math.clamp((p[0] - win.x) / w, 0.0, 1.0),
+                std.math.clamp((p[1] - win.y) / h, 0.0, 1.0),
+            },
+            .horiz = dy <= dx,
+        };
+    }
+
+    /// This frame's root, `slide` px along its edge. Null once the window
+    /// is gone, which puts the arc out.
+    fn resolve(self: Anchor, windows: []const WindowRect, slide: f32) ?[2]f32 {
+        const win = find: {
+            if (self.addr != 0) {
+                for (windows) |w| if (w.address == self.addr) break :find w;
+                return null;
+            }
+            if (self.idx >= windows.len) return null;
+            break :find windows[self.idx];
+        };
+        var p = [2]f32{ win.x + self.n[0] * win.w, win.y + self.n[1] * win.h };
+        if (self.horiz) {
+            p[0] = std.math.clamp(p[0] + slide, win.x, win.x + win.w);
+        } else {
+            p[1] = std.math.clamp(p[1] + slide, win.y, win.y + win.h);
+        }
+        return p;
+    }
+};
+
 const Arc = struct {
-    a: [2]f32 = .{ 0, 0 },
-    b: [2]f32 = .{ 0, 0 },
+    from: Anchor = .{},
+    to: Anchor = .{},
     seed: u32 = 0,
     age: f32 = 0,
-    start_delay: f32 = 0, // seconds before this stroke begins (multi-stroke)
     life: f32 = 0,
     intensity: f32 = 0,
-    amp: f32 = 0,
-    captured: bool = false, // has this strike imprinted its afterglow ember yet
+    /// This channel's own looseness, around 1.
+    amp: f32 = 1,
+    /// Which side the channel bows to as it stretches, -1 or 1.
+    bow: f32 = 1,
+    /// Seconds after the leader lands that the channel re-ignites (a second
+    /// flash down the same path), 0 for none.
+    restrike: f32 = 0,
+    /// Age at which a later discharge last took this channel, -1 for never.
+    kicked: f32 = -1,
+    /// How long the dead channel takes to cool, and the crackle tick it
+    /// froze on when the current stopped.
+    cool: f32 = 0,
+    froze_at: ?u32 = null,
     active: bool = false,
 };
+
+/// One channel's points for this frame.
+const Path = struct {
+    pts: [max_pts + 1][2]f32 = undefined,
+    n: usize = 0,
+};
+
+fn hash32(x: u32) u32 {
+    var h = x;
+    h ^= h >> 16;
+    h *%= 0x7feb352d;
+    h ^= h >> 15;
+    h *%= 0x846ca68b;
+    h ^= h >> 16;
+    return h;
+}
+
+fn hashU(seed: u32, a: u32, b: u32) u32 {
+    return hash32(seed ^ hash32(a *% 0x9E3779B1 +% hash32(b *% 0x85EBCA6B +% 0x27d4eb2f)));
+}
+
+/// 0..1 from three integers.
+fn hash01(seed: u32, a: u32, b: u32) f32 {
+    return @as(f32, @floatFromInt(hashU(seed, a, b) >> 8)) * (1.0 / 16777216.0);
+}
+
+fn lattice(v: f32) u32 {
+    return @bitCast(@as(i32, @intFromFloat(v)));
+}
+
+/// Value noise over (x, t), -1..1, always smooth in t. `kinked` joins the
+/// lattice values along x with straight runs, so the curve turns sharp
+/// corners instead of rounding them.
+fn vnoise(seed: u32, x: f32, t: f32, kinked: bool) f32 {
+    const xi = @floor(x);
+    const ti = @floor(t);
+    const fx = x - xi;
+    const ft = t - ti;
+    const ux = if (kinked) fx else fx * fx * (3.0 - 2.0 * fx);
+    const ut = ft * ft * (3.0 - 2.0 * ft);
+    const X = lattice(xi);
+    const T = lattice(ti);
+    const a = hash01(seed, X, T);
+    const b = hash01(seed, X +% 1, T);
+    const cc = hash01(seed, X, T +% 1);
+    const d = hash01(seed, X +% 1, T +% 1);
+    const lo = a + (b - a) * ux;
+    const hi = cc + (d - cc) * ux;
+    return (lo + (hi - lo) * ut) * 2.0 - 1.0;
+}
 
 const smoothstep = bands_mod.smoothstep;
 
 /// Closest point on a window's border to `p`. Points inside the rect get
 /// pushed out to the nearest edge so arcs always root on the frame, not
 /// somewhere under the window.
-fn closestOnBorder(win: shader_mod.ShaderProgram.WindowRect, p: [2]f32) [2]f32 {
+fn closestOnBorder(win: WindowRect, p: [2]f32) [2]f32 {
     const x0 = win.x;
     const y0 = win.y;
     const x1 = win.x + win.w;
@@ -158,6 +269,9 @@ pub const Context = struct {
 
     width: f32,
     height: f32,
+    /// Pixel scale against a 1440-line screen, so a channel keeps its
+    /// proportions at 4K.
+    px: f32,
     now: f64 = 0,
 
     arcs: [max_arcs]Arc = @splat(.{}),
@@ -165,28 +279,28 @@ pub const Context = struct {
     spawn_timer: f32 = 0,
     arc_rate: f32 = 1.0,
 
+    /// The standing arc of storm mode, outside the pool so strikes never
+    /// recycle its slot.
+    storm_arc: Arc = .{},
+
     crawls: [max_crawls]Crawl = @splat(.{}),
     next_crawl: u8 = 0,
     crawl_timer: f32 = 0,
 
-    /// Branch probability per interior node — treble-driven, set each frame.
+    /// Chance a fork slot carries a streamer, treble-driven, set each frame.
     branch_chance: f32 = 0.15,
 
-    // Frame's bolt geometry: segment endpoints + per-segment brightness.
-    segs: [max_segments][4]f32 = undefined,
-    seg_b: [max_segments]f32 = undefined,
-    seg_count: u32 = 0,
-
-    // Afterglow: a pool of frozen channel snapshots from recent strong strikes,
-    // each fading independently. The ionized air still glowing after each bolt.
-    embers: [max_embers]Ember = @splat(.{}),
-    next_ember: u8 = 0,
-    // Index in segs[] where the appended ember segments begin — the shader
-    // tints everything past this index violet.
-    ghost_start_idx: u32 = 0,
+    // This frame's geometry: max_chunks rows of row_floats (see the budget
+    // notes above), plus one padded box per row.
+    tex_data: []f32,
+    boxes: [max_chunks][4]f32 = undefined,
+    chunk_count: u32 = 0,
+    /// Segments already in the open chunk (row `chunk_count`).
+    fill: u32 = 0,
+    tex: c.GLuint = 0,
 
     // Thunder flash: full-screen ambient brighten on big downbeat discharges,
-    // fast decay — the room lighting up.
+    // fast decay, the room lighting up.
     flash: f32 = 0,
 
     // Audio analysis (glitch.zig pattern, shared in bands.zig)
@@ -201,21 +315,24 @@ pub const Context = struct {
     beat_phase_total: f64 = 0,
     last_beat_now: f64 = -1.0,
 
-    /// Cached uniform locations — resolved on first upload, re-resolved on
-    /// shader hot-reload (program ID changes).
+    /// Cached uniform locations, resolved on first upload and re-resolved
+    /// on shader hot-reload (program ID changes).
     u: Uniforms(.{
-        .segs = "iSegs[0]",
-        .segb = "iSegB[0]",
-        .segcount = "iSegCount",
+        .segtex = "iSegTex",
+        .boxes = "iChunkBox[0]",
+        .chunks = "iChunkCount",
+        .px = "iPx",
         .time = "iVoltTime",
         .beat = "iBeat",
         .bass = "iBass",
         .treble = "iTreble",
         .flash = "iFlash",
-        .ghost_start = "iGhostStart",
     }) = .{},
 
     pub fn init(allocator: std.mem.Allocator, width: f32, height: f32, params: config_mod.EffectParams) !Context {
+        const tex_data = try allocator.alloc(f32, max_chunks * row_floats);
+        errdefer allocator.free(tex_data);
+        @memset(tex_data, 0);
         const audio = try audio_mod.spawnIfMusic(allocator, params);
 
         return .{
@@ -224,17 +341,37 @@ pub const Context = struct {
             .rng = std.Random.DefaultPrng.init(0x9E3779B97F4A7C15),
             .width = width,
             .height = height,
+            .px = std.math.clamp(height / 1440.0, 0.6, 2.0),
             .arc_rate = params.getFloat("arc_rate", 1.0),
+            .tex_data = tex_data,
         };
     }
 
-    /// Endpoints for a window-to-window arc: pick a window, partner with its
-    /// nearest neighbor (or a random other half the time), root both ends on
-    /// the facing borders with jitter so repeated strikes wander.
-    fn pickEndpoints(self: *Context, windows: []const shader_mod.ShaderProgram.WindowRect, a: *[2]f32, b: *[2]f32) bool {
+    /// Roots for an arc between windows `i` and `j`, on the facing borders,
+    /// jittered so repeated strikes wander. False when the borders touch
+    /// and there is no gap to strike across.
+    fn rootPair(self: *Context, windows: []const WindowRect, i: usize, j: usize, from: *Anchor, to: *Anchor) bool {
+        const r = self.rng.random();
+        const aim_j = [2]f32{
+            windows[j].x + windows[j].w * (0.2 + r.float(f32) * 0.6),
+            windows[j].y + windows[j].h * (0.2 + r.float(f32) * 0.6),
+        };
+        const a = closestOnBorder(windows[i], aim_j);
+        const b = closestOnBorder(windows[j], a);
+        const dx = b[0] - a[0];
+        const dy = b[1] - a[1];
+        if (dx * dx + dy * dy < 24.0 * 24.0) return false;
+        from.* = Anchor.of(windows[i], i, a);
+        to.* = Anchor.of(windows[j], j, b);
+        return true;
+    }
+
+    /// Pick a window and partner it with its nearest neighbor (or a random
+    /// other half the time).
+    fn pickPair(self: *Context, windows: []const WindowRect) ?[2]usize {
         const r = self.rng.random();
         const count = @min(windows.len, max_windows);
-        if (count < 2) return false;
+        if (count < 2) return null;
 
         const i = r.intRangeLessThan(usize, 0, count);
         var j: usize = 0;
@@ -254,173 +391,311 @@ pub const Context = struct {
             j = r.intRangeLessThan(usize, 0, count - 1);
             if (j >= i) j += 1;
         }
-
-        const aim_j = [2]f32{
-            windows[j].x + windows[j].w * (0.2 + r.float(f32) * 0.6),
-            windows[j].y + windows[j].h * (0.2 + r.float(f32) * 0.6),
-        };
-        a.* = closestOnBorder(windows[i], aim_j);
-        b.* = closestOnBorder(windows[j], a.*);
-        return true;
+        return .{ i, j };
     }
 
-    fn spawnArc(self: *Context, windows: []const shader_mod.ShaderProgram.WindowRect, intensity: f32) void {
+    /// A fresh arc. `sustain` (0..1) is how long it holds: a beat's
+    /// discharge snaps and is gone, an idle arc burns on and stretches.
+    fn spawnArc(self: *Context, windows: []const WindowRect, intensity: f32, sustain: f32) void {
         const r = self.rng.random();
-        var a: [2]f32 = undefined;
-        var b: [2]f32 = undefined;
-        if (!self.pickEndpoints(windows, &a, &b)) return;
+        const pair = self.pickPair(windows) orelse return;
 
-        const dx = b[0] - a[0];
-        const dy = b[1] - a[1];
-        const dist = @sqrt(dx * dx + dy * dy);
-        if (dist < 24.0) return; // overlapping borders — nothing to strike across
-
-        const amp = std.math.clamp(dist * 0.16, 14.0, 180.0) * (0.8 + r.float(f32) * 0.5);
-        const slot = self.next_slot;
-        self.next_slot = (self.next_slot + 1) % max_arcs;
-        self.arcs[slot] = .{
-            .a = a,
-            .b = b,
-            .seed = r.int(u32),
-            .age = 0,
-            .life = 0.18 + r.float(f32) * 0.30 + intensity * 0.12,
-            .intensity = intensity,
-            .amp = amp,
-            .active = true,
-        };
-
-        // Multi-stroke: real lightning fires 2-5 return strokes along the
-        // same channel ~60-90ms apart, each on a slightly different path.
-        // One follow-up stroke at high intensity gives that characteristic flicker.
-        if (intensity >= 0.75) {
-            const follow_slot = self.next_slot;
-            self.next_slot = (self.next_slot + 1) % max_arcs;
-            self.arcs[follow_slot] = .{
-                .a = a,
-                .b = b,
-                .seed = r.int(u32),
-                .age = 0,
-                .start_delay = 0.055 + r.float(f32) * 0.05,
-                .life = 0.10 + r.float(f32) * 0.08,
-                .intensity = intensity * 0.72,
-                .amp = amp * 0.88,
-                .active = true,
-            };
+        // Current takes the path that is already ionized. Once a gap holds
+        // its channels, a new discharge re-ignites the freshest of them
+        // rather than opening another beside it.
+        const wa = windows[pair[0]].address;
+        const wb = windows[pair[1]].address;
+        var live: u32 = 0;
+        var freshest: ?*Arc = null;
+        for (&self.arcs) |*o| {
+            if (!o.active or o.age >= o.life) continue;
+            const same = (o.from.addr == wa and o.to.addr == wb) or (o.from.addr == wb and o.to.addr == wa);
+            if (!same) continue;
+            live += 1;
+            if (freshest == null or o.age < freshest.?.age) freshest = o;
         }
+        if (live >= pair_channels) {
+            const o = freshest.?;
+            o.kicked = o.age;
+            o.intensity = @max(o.intensity, intensity);
+            if (o.age < max_burn) o.life = @max(o.life, o.age + 0.2);
+            return;
+        }
+
+        var arc = Arc{};
+        if (!self.rootPair(windows, pair[0], pair[1], &arc.from, &arc.to)) return;
+
+        const snap = 0.22 + r.float(f32) * 0.22;
+        const hold = 0.60 + r.float(f32) * 0.90;
+        arc.seed = r.int(u32);
+        arc.life = snap + (hold - snap) * sustain + intensity * 0.08;
+        arc.intensity = intensity;
+        arc.amp = 0.8 + r.float(f32) * 0.45;
+        arc.bow = if (r.boolean()) 1.0 else -1.0;
+        // A hard discharge re-ignites once down the same channel, the
+        // flicker of a multi-stroke flash.
+        if (intensity >= 0.75) arc.restrike = 0.05 + r.float(f32) * 0.06;
+        arc.cool = cool_min + (cool_max - cool_min) * smoothstep(0.6, 1.2, intensity);
+        arc.active = true;
+
+        self.arcs[self.next_slot] = arc;
+        self.next_slot = (self.next_slot + 1) % max_arcs;
     }
 
-    fn pushSeg(self: *Context, p: [2]f32, q: [2]f32, bright: f32) void {
-        if (self.seg_count >= max_segments) return;
-        self.segs[self.seg_count] = .{ p[0], p[1], q[0], q[1] };
-        self.seg_b[self.seg_count] = bright;
-        self.seg_count += 1;
+    /// Hand the standing arc to the pool to cool where it broke, freeing
+    /// its slot for the re-strike.
+    fn retire(self: *Context, arc: Arc) void {
+        var gone = arc;
+        gone.intensity *= self.storm * (0.55 + self.an.bass * 0.6);
+        gone.age = @max(gone.age, gone.life);
+        self.arcs[self.next_slot] = gone;
+        self.next_slot = (self.next_slot + 1) % max_arcs;
+        self.storm_arc.active = false;
     }
 
-    /// Midpoint-displacement bolt from `a` to `b`: split the chord in halves,
-    /// shoving each new midpoint sideways (and a little lengthwise) by a
-    /// shrinking random offset — the path wanders freely in 2D, diagonals
-    /// included. Branches peel off interior nodes at an angle, dimmer and
-    /// tapering, with their own (branch-free) subdivision.
-    fn genBolt(self: *Context, a: [2]f32, b: [2]f32, amp: f32, bright: f32, reach: f32, r: std.Random, comptime n: usize, taper: bool, branches: bool) void {
+    // ---- geometry emission ----
+
+    fn row(self: *Context, chunk: u32) []f32 {
+        return self.tex_data[chunk * row_floats ..][0..row_floats];
+    }
+
+    /// Close the open chunk, so the next segment starts a new one. Called
+    /// between channels: a chunk's box only stays tight while its segments
+    /// are neighbors.
+    fn closeChunk(self: *Context) void {
+        if (self.fill == 0) return;
+        const data = self.row(self.chunk_count);
+        // Unused slots: zero brightness, which the shader skips.
+        @memset(data[(seg_per_chunk + self.fill) * 4 ..], 0);
+        const pad = glow_reach * self.px;
+        const box = &self.boxes[self.chunk_count];
+        box.* = .{ box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad };
+        self.chunk_count += 1;
+        self.fill = 0;
+    }
+
+    /// One segment. `cool` runs from 0, a live channel, to 1, an ember.
+    fn pushSeg(self: *Context, p: [2]f32, q: [2]f32, bright: f32, half_w: f32, cool: f32) void {
+        if (self.chunk_count >= max_chunks or bright < 0.004) return;
+        const data = self.row(self.chunk_count);
+        const box = &self.boxes[self.chunk_count];
+        const lo = [2]f32{ @min(p[0], q[0]), @min(p[1], q[1]) };
+        const hi = [2]f32{ @max(p[0], q[0]), @max(p[1], q[1]) };
+        if (self.fill == 0) {
+            box.* = .{ lo[0], lo[1], hi[0], hi[1] };
+        } else {
+            box.* = .{ @min(box[0], lo[0]), @min(box[1], lo[1]), @max(box[2], hi[0]), @max(box[3], hi[1]) };
+        }
+        data[self.fill * 4 ..][0..4].* = .{ p[0], p[1], q[0], q[1] };
+        data[(seg_per_chunk + self.fill) * 4 ..][0..4].* = .{ bright, half_w, cool, 0 };
+        self.fill += 1;
+        if (self.fill == seg_per_chunk) self.closeChunk();
+    }
+
+    /// The channel from `a` to `b`: the chord cut into short segments and
+    /// pushed sideways by fractal noise sampled along its length. Each
+    /// octave halves the wavelength and scales the excursion by `gain`, so
+    /// the path is jagged at every scale down to the segment length.
+    ///
+    /// The long octaves drift smoothly in `drift_t` (the channel wanders);
+    /// the short ones re-seed on every crackle `tick` (it buzzes). `amp` is
+    /// the longest octave's excursion in px and `bow` an arch added at
+    /// mid-span. A `free_end` path is a streamer: rooted at `a` only, its
+    /// tip wanders.
+    fn buildPath(self: *const Context, out: *Path, a: [2]f32, b: [2]f32, seed: u32, amp: f32, bow: [2]f32, drift_t: f32, tick: u32, free_end: bool) void {
         const dx = b[0] - a[0];
         const dy = b[1] - a[1];
         const chord = @sqrt(dx * dx + dy * dy);
-        if (chord < 6.0) {
-            self.pushSeg(a, b, bright);
+        out.pts[0] = a;
+        if (chord < 4.0) {
+            out.pts[1] = b;
+            out.n = 1;
             return;
         }
         const ux = dx / chord;
         const uy = dy / chord;
 
-        var pts: [n + 1][2]f32 = undefined;
-        pts[0] = a;
-        pts[n] = b;
+        const seg_len = 11.0 * self.px;
+        const n = std.math.clamp(@as(usize, @intFromFloat(@round(chord / seg_len))), 4, max_pts);
+        const n_f: f32 = @floatFromInt(n);
+        // How far from a root the channel is held to it.
+        const pin_len = @min(chord * 0.22, 70.0 * self.px);
+        const gain: f32 = 0.66;
+        // Octaves shorter than this buzz instead of drifting.
+        const crackle_below = 90.0 * self.px;
+        // Per-point jitter under the shortest octave: the hairy edge.
+        const fuzz = std.math.clamp(amp * 0.09, 0.8 * self.px, 4.0 * self.px);
 
-        var off = @min(amp * 1.4, chord * 0.32);
-        var step: usize = n;
-        while (step > 1) : (step >>= 1) {
-            var i: usize = step / 2;
-            while (i < n) : (i += step) {
-                const p = pts[i - step / 2];
-                const q = pts[i + step / 2];
-                const side = (r.float(f32) * 2.0 - 1.0) * off;
-                const along = (r.float(f32) * 2.0 - 1.0) * off * 0.35;
-                pts[i] = .{
-                    (p[0] + q[0]) * 0.5 - uy * side + ux * along,
-                    (p[1] + q[1]) * 0.5 + ux * side + uy * along,
-                };
+        for (1..n + 1) |i| {
+            const s = @as(f32, @floatFromInt(i)) / n_f;
+            const x = s * chord;
+
+            var side: f32 = 0;
+            var along: f32 = 0;
+            var lambda = chord * 0.6;
+            var a_o = amp;
+            var o: u32 = 0;
+            while (o < 7 and lambda >= seg_len * 2.2) : (o += 1) {
+                const t: f32 = if (lambda < crackle_below)
+                    @floatFromInt(tick & 0xffff)
+                else
+                    drift_t * 0.5 * std.math.pow(f32, 1.6, @floatFromInt(o));
+                // The two longest octaves are the channel's sweep and stay
+                // round; the rest are its zigzag.
+                const kinked = o >= 2;
+                // Each octave starts at its own phase, or their corners
+                // would line up into a regular sawtooth.
+                const xo = x / lambda + hash01(seed, o, 9) * 16.0;
+                side += a_o * vnoise(seed +% o *% 7919, xo, t, kinked);
+                along += a_o * 0.3 * vnoise(seed +% o *% 7919 +% 0x51ed, xo, t, kinked);
+                lambda *= 0.5;
+                a_o *= gain;
             }
-            off *= 0.45;
-        }
+            side += fuzz * (hash01(seed, @intCast(i), tick) * 2.0 - 1.0);
 
-        // Continuous shimmer: a fast electric writhe layered on the discrete
-        // midpoint shape, so the channel never freezes between restrike ticks.
-        // Endpoints stay rooted on the window borders; only interior nodes
-        // buzz. Two incommensurate sines with spatial phase read as chaotic
-        // rather than a regular wave; treble (hi-hats) drives it harder.
-        const sh = std.math.clamp(amp * 0.014, 0.3, 1.4) * (0.8 + self.an.treble * 0.3);
-        for (1..n) |i| {
-            const ph = pts[i][0] * 0.043 + pts[i][1] * 0.031;
-            const wig = (@sin(clock.phase(self.now, 24.0) + ph) + 0.5 * @sin(clock.phase(self.now, 53.0) + ph * 1.7)) * sh;
-            pts[i][0] -= uy * wig;
-            pts[i][1] += ux * wig;
-        }
+            // Held at the roots, free in between. The linear start lets the
+            // channel leave a border at an angle.
+            const near = @min(1.0, x / pin_len);
+            const far = if (free_end) 1.0 else @min(1.0, (chord - x) / pin_len);
+            const hold = (1.0 - (1.0 - near) * (1.0 - near)) * (1.0 - (1.0 - far) * (1.0 - far));
+            const arch = if (free_end) s else @sin(std.math.pi * s);
 
-        // Stepped-leader reach: only draw segments the advancing front has
-        // reached. The frontier segment is partial (lerped) and glows hot —
-        // the bright leader tip feeling its way toward the target window.
-        const n_f = @as(f32, @floatFromInt(n));
+            out.pts[i] = .{
+                a[0] + ux * (x + along * hold) - uy * side * hold + bow[0] * arch,
+                a[1] + uy * (x + along * hold) + ux * side * hold + bow[1] * arch,
+            };
+        }
+        if (!free_end) out.pts[n] = b;
+        out.n = n;
+    }
+
+    /// Emit a path as one channel. `reach` (0..1) draws only as far as an
+    /// advancing leader has got, its frontier segment burning hot. A
+    /// tapered channel thins and dims to nothing at its tip.
+    fn emitPath(self: *Context, path: *const Path, reach: f32, bright: f32, half_w: f32, taper: bool, cool: f32) void {
+        self.closeChunk();
+        const n_f: f32 = @floatFromInt(path.n);
         const reach_n = std.math.clamp(reach, 0.0, 1.0) * n_f;
-        for (0..n) |i| {
-            const fi = @as(f32, @floatFromInt(i));
+        for (0..path.n) |i| {
+            const fi: f32 = @floatFromInt(i);
             if (fi >= reach_n) break;
             const frac = @min(reach_n - fi, 1.0);
             const t = fi / n_f;
-            var sb = if (taper) bright * (1.0 - t * 0.75) else bright;
-            // Per-segment brightness ripple — an unstable arc's glow crawls
-            // and stutters along the channel rather than burning evenly.
-            const bz = pts[i][0] * 0.02 + pts[i][1] * 0.02;
-            sb *= 0.90 + 0.10 * @sin(clock.phase(self.now, 40.0) + bz);
-            // Hot leader tip: the advancing frontier segment burns brighter.
-            if (frac < 1.0) sb *= 1.0 + (1.0 - frac) * 1.4;
-            const q = [2]f32{
-                pts[i][0] + (pts[i + 1][0] - pts[i][0]) * frac,
-                pts[i][1] + (pts[i + 1][1] - pts[i][1]) * frac,
-            };
-            self.pushSeg(pts[i], q, sb);
-        }
-
-        if (branches) {
-            for (2..n - 1) |i| {
-                if (r.float(f32) > self.branch_chance) continue;
-                // Branch continues roughly along the local bolt direction,
-                // rotated outward — like a stepped leader forking.
-                var ldx = pts[i + 1][0] - pts[i - 1][0];
-                var ldy = pts[i + 1][1] - pts[i - 1][1];
-                const ll = @sqrt(ldx * ldx + ldy * ldy);
-                if (ll < 1.0) continue;
-                ldx /= ll;
-                ldy /= ll;
-                const sign: f32 = if (r.boolean()) 1.0 else -1.0;
-                const ang = (0.35 + r.float(f32) * 0.55) * sign;
-                const ca = @cos(ang);
-                const sa = @sin(ang);
-                const bx = ldx * ca - ldy * sa;
-                const by = ldx * sa + ldy * ca;
-                const blen = chord * (0.18 + r.float(f32) * 0.30);
-                const end = [2]f32{ pts[i][0] + bx * blen, pts[i][1] + by * blen };
-                // Branches near the source are brighter; tip branches are dim.
-                const t_node = @as(f32, @floatFromInt(i)) / n_f;
-                const branch_bright = bright * (0.58 - t_node * 0.22);
-                // Draw the child seed unconditionally so the parent RNG stream
-                // stays aligned whether or not the fork has sparked yet — keeps
-                // branches from flickering as the leader front advances.
-                const bseed = r.int(u32);
-                // A fork only sparks once the leader front passes its node.
-                if (@as(f32, @floatFromInt(i)) >= reach_n) continue;
-                var bprng = std.Random.DefaultPrng.init(@as(u64, bseed) ^ 0xD1B54A32D192ED03);
-                self.genBolt(pts[i], end, blen * 0.35, branch_bright, 1.0, bprng.random(), branch_segs, true, false);
+            var sb = bright;
+            var sw = half_w;
+            if (taper) {
+                sb *= (1.0 - t) * (1.0 - t * 0.5);
+                sw *= 1.0 - t * 0.45;
             }
+            if (frac < 1.0) sb *= 1.0 + (1.0 - frac) * 1.4;
+            const p = path.pts[i];
+            const q = [2]f32{
+                p[0] + (path.pts[i + 1][0] - p[0]) * frac,
+                p[1] + (path.pts[i + 1][1] - p[1]) * frac,
+            };
+            self.pushSeg(p, q, sb, sw, cool);
+        }
+        self.closeChunk();
+    }
+
+    /// One arc for this frame: its channel and its side streamers while
+    /// it burns, then the same channel cooling once it is out. `gain`
+    /// scales its light.
+    fn drawArc(self: *Context, arc: *Arc, windows: []const WindowRect, tick_now: u32, tick_f: f32, wander: f32, gain: f32) void {
+        const age = arc.age;
+        const out = age >= arc.life;
+        // With the current gone nothing re-ignites the channel: its fine
+        // structure holds the shape it died in and only drifts.
+        if (out and arc.froze_at == null) arc.froze_at = tick_now;
+        const tick = if (out) arc.froze_at.? else tick_now;
+
+        // The roots creep along their borders, as an arc's feet do on an
+        // electrode.
+        const slide = 34.0 * self.px;
+        const a = arc.from.resolve(windows, vnoise(arc.seed ^ 0xA53C, age * 0.9, 0, false) * slide) orelse {
+            arc.active = false;
+            return;
+        };
+        const b = arc.to.resolve(windows, vnoise(arc.seed ^ 0x5AC3, age * 0.9, 0, false) * slide) orelse {
+            arc.active = false;
+            return;
+        };
+        const dx = b[0] - a[0];
+        const dy = b[1] - a[1];
+        const chord = @sqrt(dx * dx + dy * dy);
+        if (chord < 24.0) return;
+
+        const p = @min(age / arc.life, 1.0);
+        const reach = std.math.clamp(age / leader_extend, 0.0, 1.0);
+        // Seconds since the leader landed and the channel lit.
+        const lit = age - leader_extend;
+
+        var env: f32 = 0.55;
+        if (lit >= 0) {
+            var pulse = @exp(-lit / 0.07);
+            if (arc.restrike > 0 and lit > arc.restrike) pulse += 0.8 * @exp(-(lit - arc.restrike) / 0.05);
+            if (arc.kicked >= 0) pulse += @exp(-(age - arc.kicked) / 0.06);
+            env = 0.62 + 0.8 * pulse;
+        }
+        // Dying: the channel dims, cools from white through blue to violet
+        // and starts to drop out. Once it is out the ember fades on alone.
+        const dying = smoothstep(0.6, 1.0, p);
+        env *= 1.0 - 0.45 * dying;
+        if (out) {
+            const q = (age - arc.life) / arc.cool;
+            env *= (1.0 - q) * (1.0 - q);
+        } else {
+            if (hash01(arc.seed, tick, 2) < dying * 0.5) env *= 0.35;
+            env *= 0.82 + 0.30 * hash01(arc.seed, tick, 1);
+        }
+        env *= arc.intensity * gain;
+        if (env < 0.012) return;
+
+        // A fresh strike is taut. As it burns the hot channel loosens,
+        // bows to one side and lifts, until it is too long to hold.
+        const grow = smoothstep(0.0, 1.0, age / (arc.life + arc.cool));
+        const amp = std.math.clamp(chord * 0.07, 6.0 * self.px, 64.0 * self.px) * arc.amp * wander * (0.55 + 0.85 * grow);
+        const lean = arc.bow * chord * 0.09 * grow;
+        const bow = [2]f32{ -dy / chord * lean, dx / chord * lean + chord * 0.05 * grow };
+
+        var path: Path = .{};
+        self.buildPath(&path, a, b, arc.seed, amp, bow, age + @as(f32, @floatFromInt(arc.seed & 0xff)), tick, false);
+        const half_w = self.px * (0.6 + 0.3 * @min(env, 1.2));
+        self.emitPath(&path, reach, env, half_w, false, dying);
+        if (out) return;
+
+        // Side streamers: short sparks that shoot off a node of the
+        // channel, each alive for a few crackle ticks.
+        const n_f: f32 = @floatFromInt(path.n);
+        var fork: Path = .{};
+        for (0..fork_slots) |k| {
+            const ku: u32 = @intCast(k);
+            const e_f = (tick_f + @as(f32, @floatFromInt(k)) * 1.37) / fork_ticks;
+            const epoch: u32 = @intFromFloat(e_f);
+            const ph = e_f - @floor(e_f);
+            const fseed = hashU(arc.seed, epoch, ku);
+            if (hash01(fseed, 0, 0) > self.branch_chance) continue;
+            const node_f = (0.12 + 0.76 * hash01(fseed, 1, 0)) * n_f;
+            if (node_f >= reach * n_f) continue; // the leader has not got there
+            const node: usize = @intFromFloat(node_f);
+            if (node < 1 or node + 1 > path.n) continue;
+            var tx = path.pts[node + 1][0] - path.pts[node - 1][0];
+            var ty = path.pts[node + 1][1] - path.pts[node - 1][1];
+            const tl = @sqrt(tx * tx + ty * ty);
+            if (tl < 1.0) continue;
+            tx /= tl;
+            ty /= tl;
+            const sign: f32 = if (hash01(fseed, 2, 0) < 0.5) -1.0 else 1.0;
+            const ang = (0.45 + 0.6 * hash01(fseed, 3, 0)) * sign;
+            const ca = @cos(ang);
+            const sa = @sin(ang);
+            // It shoots out over the first third of its life, then fades.
+            const shot = smoothstep(0.0, 0.3, ph);
+            const len = std.math.clamp(chord * (0.10 + 0.20 * hash01(fseed, 4, 0)), 30.0 * self.px, 260.0 * self.px) * shot;
+            const root = path.pts[node];
+            const tip = [2]f32{ root[0] + (tx * ca - ty * sa) * len, root[1] + (tx * sa + ty * ca) * len };
+            self.buildPath(&fork, root, tip, fseed, len * 0.10, .{ 0, 0 }, age, tick, true);
+            self.emitPath(&fork, 1.0, env * 0.6 * (1.0 - ph), half_w * 0.75, true, dying);
         }
     }
 
@@ -445,13 +720,6 @@ pub const Context = struct {
         // on strong downbeat discharges; storm passages keep it flickering.
         self.flash *= @exp(-7.0 * dt);
         if (self.flash < 0.004) self.flash = 0;
-
-        // Afterglow embers each age independently; strong strikes add new ones.
-        for (&self.embers) |*e| {
-            if (!e.active) continue;
-            e.age += dt;
-            if (e.age >= ember_life) e.active = false;
-        }
 
         // ---- BPM-phase sync ----
         // Advance before snap so crossing detection uses the pre-snap fraction.
@@ -480,12 +748,12 @@ pub const Context = struct {
 
         // Half-beat "and": 8th-note syncopation.
         const half_crossed = ppf < 0.5 and cpf >= 0.5;
-        // Coasting arc: full beat elapsed without a detected hit — keeps the
-        // display alive during quiet passages at the fallback 120 BPM.
+        // Coasting arc: full beat elapsed without a detected hit, which keeps
+        // the display alive during quiet passages at the fallback 120 BPM.
         const full_crossed = cpf < ppf and !beat_hit;
 
         // Pre-beat charge: in the lead window before the next predicted
-        // downbeat, feeler tendrils grope out from window edges. Ramps 0→1
+        // downbeat, feeler streamers grope out from window edges. Ramps 0→1
         // across the window. Gated on music energy so silence stays calm and
         // the free-running clock can't make the edges twitch in the quiet.
         const beat_period = 60.0 / @max(self.bpm_est, 1.0);
@@ -499,34 +767,39 @@ pub const Context = struct {
         for (&self.arcs) |*arc| {
             if (!arc.active) continue;
             arc.age += dt;
-            if (arc.age >= arc.life) arc.active = false;
+            if (arc.age >= arc.life + arc.cool) arc.active = false;
+        }
+        if (self.storm_arc.active) {
+            self.storm_arc.age += dt;
+            if (self.storm_arc.age >= self.storm_arc.life) self.retire(self.storm_arc);
         }
 
-        // Treble bushes the bolts out: hi-hats raise the fork probability.
-        self.branch_chance = std.math.clamp(0.12 + self.an.treble * 0.45, 0.12, 0.55);
+        // Treble bushes the channels out: hi-hats raise the streamer chance.
+        self.branch_chance = std.math.clamp(0.18 + self.an.treble * 0.45, 0.18, 0.6);
 
-        // Ambient strikes fill silences; BPM-synced arcs take over during music.
-        // Rate reduced so both systems don't stack to a busy tangle.
+        // Idle arcs fill silences and burn long; with music they come
+        // faster and shorter, and the beat's own discharges take over.
+        const calm = 1.0 - std.math.clamp(self.an.energy * 3.0, 0.0, 1.0);
         self.spawn_timer -= dt * self.arc_rate * (0.18 + self.an.energy * 1.2);
         if (self.spawn_timer <= 0) {
             self.spawn_timer = spawn_min + r.float(f32) * (spawn_max - spawn_min);
-            self.spawnArc(state.windows, 0.7 + r.float(f32) * 0.4);
+            self.spawnArc(state.windows, 0.7 + r.float(f32) * 0.4, calm);
         }
 
         // Downbeat discharge: bright pair on every detected beat.
         // Punch factor rewards sharp transients over soft hits.
         if (beat_hit) {
             const punch = std.math.clamp(self.an.flux / (self.an.flux_avg * 3.0 + 0.03), 1.0, 2.0);
-            self.spawnArc(state.windows, 1.1 * punch);
-            self.spawnArc(state.windows, 0.9 * punch);
+            self.spawnArc(state.windows, 1.1 * punch, 0);
+            self.spawnArc(state.windows, 0.9 * punch, 0);
             // Thunder flash: the room lights up, scaled by how hard the drop hit.
             self.flash = @max(self.flash, std.math.clamp((punch - 1.0) * 0.9 + 0.35, 0.0, 1.0));
         }
 
         // Half-beat arc: softer, syncopated eighth-note feel.
-        if (half_crossed) self.spawnArc(state.windows, 0.55 + r.float(f32) * 0.15);
+        if (half_crossed) self.spawnArc(state.windows, 0.55 + r.float(f32) * 0.15, 0);
         // Coasting arc: one per beat when flux detection misses (quiet passages).
-        if (full_crossed and self.an.energy > 0.02) self.spawnArc(state.windows, 0.6 + r.float(f32) * 0.2);
+        if (full_crossed and self.an.energy > 0.02) self.spawnArc(state.windows, 0.6 + r.float(f32) * 0.2, 0.3);
 
         // ---- focus crawls ----
         const focused = state.focused_win;
@@ -535,7 +808,9 @@ pub const Context = struct {
             cr.age += dt;
             if (cr.age >= cr.life) cr.active = false;
         }
-        if (focused.hasArea()) {
+        // The focus rect outlives the last window, so ask for one too.
+        const framed = focused.hasArea() and state.windows.len > 0;
+        if (framed) {
             // Treble makes the border fizz harder: faster spawns, hotter arcs.
             self.crawl_timer -= dt * (1.0 + self.an.treble * 2.0);
             if (self.crawl_timer <= 0) {
@@ -548,134 +823,99 @@ pub const Context = struct {
                     .dl = 60.0 + r.float(f32) * 200.0,
                     .seed = r.int(u32),
                     .age = 0,
-                    .life = 0.08 + r.float(f32) * 0.16,
+                    .life = 0.10 + r.float(f32) * 0.22,
                     .intensity = (0.35 + r.float(f32) * 0.25) * (0.8 + self.an.treble * 0.8),
                     .active = true,
                 };
             }
         }
 
-        // ---- bolt geometry ----
-        // Regenerated every frame, but deterministically seeded from
-        // (arc seed, strike index): the path holds steady within a strike
-        // tick and snaps to a new shape restrike_hz times per second.
-        self.seg_count = 0;
-        // BPM-locked restrike: 8th-note subdivisions (8 shapes per beat).
-        // beat_phase_total is monotonic so the counter never jumps backward.
-        const strike: u32 = @intFromFloat(@max(self.beat_phase_total, 0.0) * 8.0);
+        // ---- geometry ----
+        // Rebuilt every frame from each arc's seed, its age and the crackle
+        // tick, so a channel holds its gross shape and only drifts while its
+        // fine structure re-seeds with every tick.
+        self.chunk_count = 0;
+        self.fill = 0;
+        const tick_f: f32 = @floatCast(@mod(@max(self.beat_phase_total, 0.0) * crackle_per_beat, 1048576.0));
+        const tick: u32 = @intFromFloat(tick_f);
 
-        // Mids drive the wander: geometry regenerates every strike, so a
-        // thick chorus makes live bolts writhe wider mid-flight.
+        // Mids drive the wander: a thick chorus makes live channels writhe
+        // wider.
         const wander = 1.0 + self.an.mid * 0.8;
 
         for (&self.arcs) |*arc| {
             if (!arc.active) continue;
-            // start_delay > 0: this return stroke hasn't fired yet
-            const eff_age = arc.age - arc.start_delay;
-            if (eff_age < 0) continue;
-            var prng = std.Random.DefaultPrng.init(@as(u64, arc.seed) ^ (@as(u64, strike) *% 0x9E3779B97F4A7C15));
-            const ar = prng.random();
-            const flick = 0.55 + 0.9 * ar.float(f32);
-            const p = eff_age / arc.life;
-            const env = smoothstep(0.0, 0.08, p) * (1.0 - p) * (1.0 - p) * arc.intensity * flick;
-            if (env < 0.012) continue;
-            // Brief stepped-leader reach at the start of each (return) stroke.
-            const reach = std.math.clamp(eff_age / leader_extend, 0.0, 1.0);
-            const before = self.seg_count;
-            self.genBolt(arc.a, arc.b, arc.amp * wander, env, reach, ar, bolt_segs, false, true);
-
-            // Imprint a strong, fully-extended strike into a fresh ember slot,
-            // exactly once (the frame its leader completes). Each ember then
-            // ages on its own, outliving the bolt so the violet ghost lingers
-            // at this spot while new strikes fire elsewhere.
-            if (arc.intensity >= 0.9 and reach >= 1.0 and !arc.captured) {
-                arc.captured = true;
-                const slot = self.next_ember;
-                self.next_ember = (self.next_ember + 1) % max_embers;
-                const e = &self.embers[slot];
-                var gi: u32 = 0;
-                var k = before;
-                while (k < self.seg_count and gi < max_ghost) : (k += 1) {
-                    e.segs[gi] = self.segs[k];
-                    e.b[gi] = self.seg_b[k];
-                    gi += 1;
-                }
-                e.count = gi;
-                e.age = 0;
-                e.active = true;
-            }
+            self.drawArc(arc, state.windows, tick, tick_f, wander, 1.0);
         }
 
-        // Storm arc: while sustained energy holds, a continuous discharge
-        // locks between the two largest windows, dancing along their borders
-        // with every re-strike. Endpoints resolve fresh each frame so it
-        // tracks moving windows like the crawls do.
+        // Storm arc: while sustained energy holds, a standing discharge
+        // burns between the two largest windows. It stretches and bows like
+        // any arc, and when it breaks (or a beat lands) it re-strikes across
+        // a fresh, shorter path: a Jacob's ladder.
         if (self.storm > 0.05) {
-            const wcount = @min(state.windows.len, max_windows);
-            var big: [2]usize = .{ 0, 0 };
-            var big_area: [2]f32 = .{ 0, 0 };
-            for (0..wcount) |i| {
-                const w = state.windows[i];
-                const area = w.w * w.h;
-                if (area > big_area[0]) {
-                    big[1] = big[0];
-                    big_area[1] = big_area[0];
-                    big[0] = i;
-                    big_area[0] = area;
-                } else if (area > big_area[1]) {
-                    big[1] = i;
-                    big_area[1] = area;
+            if (self.storm_arc.active and beat_hit) self.retire(self.storm_arc);
+            if (!self.storm_arc.active) {
+                const wcount = @min(state.windows.len, max_windows);
+                var big: [2]usize = .{ 0, 0 };
+                var big_area: [2]f32 = .{ 0, 0 };
+                for (0..wcount) |i| {
+                    const w = state.windows[i];
+                    const area = w.w * w.h;
+                    if (area > big_area[0]) {
+                        big[1] = big[0];
+                        big_area[1] = big_area[0];
+                        big[0] = i;
+                        big_area[0] = area;
+                    } else if (area > big_area[1]) {
+                        big[1] = i;
+                        big_area[1] = area;
+                    }
+                }
+                var arc = Arc{};
+                if (big_area[1] > 0 and self.rootPair(state.windows, big[0], big[1], &arc.from, &arc.to)) {
+                    arc.seed = r.int(u32);
+                    arc.life = 1.3 + r.float(f32) * 1.2;
+                    arc.intensity = 1.0;
+                    arc.amp = 0.9 + r.float(f32) * 0.4;
+                    arc.bow = if (r.boolean()) 1.0 else -1.0;
+                    arc.cool = cool_max;
+                    arc.active = true;
+                    self.storm_arc = arc;
                 }
             }
-            if (big_area[1] > 0) {
-                var prng = std.Random.DefaultPrng.init(@as(u64, 0x57052) ^ (@as(u64, strike) *% 0x9E3779B97F4A7C15));
-                const ar = prng.random();
-                const wi = state.windows[big[0]];
-                const wj = state.windows[big[1]];
-                // Per-strike jittered aim so the arc dances along the borders.
-                const aim = [2]f32{
-                    wj.x + wj.w * (0.2 + ar.float(f32) * 0.6),
-                    wj.y + wj.h * (0.2 + ar.float(f32) * 0.6),
-                };
-                const a = closestOnBorder(wi, aim);
-                const b = closestOnBorder(wj, a);
-                const dx = b[0] - a[0];
-                const dy = b[1] - a[1];
-                const dist = @sqrt(dx * dx + dy * dy);
-                if (dist > 24.0) {
-                    const flick = 0.55 + 0.9 * ar.float(f32);
-                    const env = self.storm * (0.55 + self.an.bass * 0.6) * flick;
-                    const amp = std.math.clamp(dist * 0.16, 14.0, 180.0);
-                    self.genBolt(a, b, amp * wander, env, 1.0, ar, bolt_segs, false, true);
-                }
+            if (self.storm_arc.active) {
+                const gain = self.storm * (0.55 + self.an.bass * 0.6);
+                self.drawArc(&self.storm_arc, state.windows, tick, tick_f, wander, gain);
             }
+        } else if (self.storm_arc.active) {
+            self.retire(self.storm_arc);
         }
 
         // Crawl geometry: endpoints resolved against the current focused
         // rect, so the arcs hug the frame wherever it is this frame.
-        if (focused.hasArea()) {
+        var path: Path = .{};
+        if (framed) {
             for (&self.crawls) |*cr| {
                 if (!cr.active) continue;
-                var prng = std.Random.DefaultPrng.init(@as(u64, cr.seed) ^ (@as(u64, strike) *% 0x9E3779B97F4A7C15));
-                const ar = prng.random();
-                const flick = 0.55 + 0.9 * ar.float(f32);
                 const p = cr.age / cr.life;
+                const flick = 0.75 + 0.5 * hash01(cr.seed, tick, 1);
                 const env = smoothstep(0.0, 0.15, p) * (1.0 - p) * cr.intensity * flick;
                 if (env < 0.012) continue;
                 const a = perimeterPoint(focused, cr.t0);
                 const b = perimeterPoint(focused, cr.t0 + cr.dl);
-                self.genBolt(a, b, @min(cr.dl * 0.30, 36.0), env, 1.0, ar, crawl_segs, false, false);
+                self.buildPath(&path, a, b, cr.seed, @min(cr.dl * 0.09, 12.0 * self.px), .{ 0, 0 }, cr.age * 3.0, tick, false);
+                self.emitPath(&path, 1.0, env, self.px * 0.7, false, 0);
             }
         }
 
-        // ---- pre-beat feeler tendrils ----
+        // ---- pre-beat feeler streamers ----
         // As a downbeat approaches, faint sparks reach out from each window's
         // edge toward its nearest neighbor, groping partway across the gap.
-        // They never fully bridge — the beat discharge completes the circuit.
-        // Reuses genBolt's reach to grow each stub in step with the charge.
+        // They never fully bridge: the beat discharge completes the circuit.
         if (charge > 0.02) {
             const wcount = @min(state.windows.len, max_windows);
             const ntend = @min(wcount, 6);
+            const beat_no: u32 = @intFromFloat(@mod(@max(self.beat_phase_total, 0.0), 1048576.0));
             for (0..ntend) |i| {
                 const wi = state.windows[i];
                 // Nearest neighbor by center distance.
@@ -700,62 +940,128 @@ pub const Context = struct {
                 const dy = target[1] - a[1];
                 const dist = @sqrt(dx * dx + dy * dy);
                 if (dist < 24.0) continue;
-                var prng = std.Random.DefaultPrng.init((@as(u64, @intCast(i)) *% 0x2545F4914F6CDD1D) ^ (@as(u64, strike) *% 0x9E3779B97F4A7C15));
-                const ar = prng.random();
-                const flick = 0.55 + 0.9 * ar.float(f32);
+                // One shape per window per beat, so a feeler grows rather
+                // than re-rolling on every tick.
+                const seed = hashU(0x7e4d, @intCast(i), beat_no);
+                const flick = 0.75 + 0.5 * hash01(seed, tick, 1);
                 // Grope partway only; the discharge finishes the connection.
-                const reach = charge * 0.7;
-                const bright = (0.08 + 0.16 * charge) * flick * (1.0 - self.storm * 0.6);
+                const reach = charge * (0.45 + 0.35 * hash01(seed, 0, 0));
+                const bright = (0.10 + 0.20 * charge) * flick * (1.0 - self.storm * 0.6);
                 if (bright < 0.012) continue;
-                const amp = std.math.clamp(dist * 0.10, 8.0, 80.0);
-                self.genBolt(a, target, amp * wander, bright, reach, ar, crawl_segs, true, false);
+                const tip = [2]f32{ a[0] + dx * reach, a[1] + dy * reach };
+                const amp = std.math.clamp(dist * reach * 0.10, 4.0 * self.px, 40.0 * self.px);
+                self.buildPath(&path, a, tip, seed, amp * wander, .{ 0, 0 }, charge, tick, true);
+                self.emitPath(&path, 1.0, bright, self.px * 0.7, true, 0);
             }
         }
 
-        // ---- afterglow re-emission ----
-        // Append every active ember's frozen channel as dim segments that fade
-        // linearly over its life. Everything past ghost_start_idx is tinted
-        // violet by the shader. Embers from several recent strikes coexist, so
-        // violet ghosts linger at old strike sites as new bolts fire elsewhere.
-        self.ghost_start_idx = self.seg_count;
-        for (&self.embers) |*e| {
-            if (!e.active) continue;
-            const gp = e.age / ember_life;
-            const gfade = (1.0 - gp) * 0.5;
-            for (0..e.count) |k| {
-                if (self.seg_count >= max_segments) break;
-                self.segs[self.seg_count] = e.segs[k];
-                self.seg_b[self.seg_count] = e.b[k] * gfade;
-                self.seg_count += 1;
-            }
-        }
+        self.closeChunk();
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
+        c.glUseProgram(prog.program);
+
+        if (self.tex == 0) {
+            c.glGenTextures(1, &self.tex);
+            c.glBindTexture(c.GL_TEXTURE_2D, self.tex);
+            // Float data textures must be NEAREST to be complete.
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_NEAREST);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_NEAREST);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+            c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA32F, tex_w, max_chunks, 0, c.GL_RGBA, c.GL_FLOAT, null);
+        }
+        c.glActiveTexture(c.GL_TEXTURE0);
+        c.glBindTexture(c.GL_TEXTURE_2D, self.tex);
+        const n = self.chunk_count;
+        if (n > 0) c.glTexSubImage2D(c.GL_TEXTURE_2D, 0, 0, 0, tex_w, @intCast(n), c.GL_RGBA, c.GL_FLOAT, @ptrCast(self.tex_data.ptr));
 
         self.u.use(prog.program);
+        self.u.int(.segtex, 0);
+        self.u.f4v(.boxes, @intCast(n), &self.boxes[0]);
+        self.u.int(.chunks, @intCast(n));
+        self.u.f1(.px, self.px);
 
-        const n = self.seg_count;
-        self.u.f4v(.segs, @intCast(n), &self.segs[0]);
-        if (self.u.loc(.segb) >= 0) {
-            // Brightness packed 4-per-vec4; shader unpacks with [i>>2][i&3].
-            var packed_b: [seg_b_vec4s][4]f32 = @splat(.{ 0, 0, 0, 0 });
-            for (0..n) |i| packed_b[i / 4][i % 4] = self.seg_b[i];
-            self.u.f4v(.segb, @intCast((n + 3) / 4), &packed_b[0]);
-        }
-        self.u.int(.segcount, @intCast(n));
-
-        // Effect-local time (fire.zig pattern) — keeps corona noise
+        // Effect-local time (fire.zig pattern) keeps the grain's noise
         // coordinates small so f32 precision holds over long sessions.
         self.u.f1(.time, @floatCast(self.now));
         self.u.f1(.beat, self.an.beat);
         self.u.f1(.bass, self.an.bass);
         self.u.f1(.treble, self.an.treble);
         self.u.f1(.flash, self.flash);
-        self.u.int(.ghost_start, @intCast(self.ghost_start_idx));
     }
 
     pub fn deinit(self: *Context) void {
         if (self.audio) |cap| audio_mod.shutdown(cap, self.allocator);
+        if (self.tex != 0) c.glDeleteTextures(1, &self.tex);
+        self.allocator.free(self.tex_data);
     }
 };
+
+fn testContext() Context {
+    return .{
+        .allocator = std.testing.allocator,
+        .audio = null,
+        .rng = std.Random.DefaultPrng.init(1),
+        .width = 2560,
+        .height = 1440,
+        .px = 1.0,
+        .tex_data = &.{},
+    };
+}
+
+test "an anchor rides its window and goes out with it" {
+    const win = WindowRect{ .x = 100, .y = 200, .w = 400, .h = 300, .address = 7 };
+    const an = Anchor.of(win, 0, .{ 500, 350 }); // right edge, halfway up
+    try std.testing.expect(!an.horiz);
+
+    const moved = [_]WindowRect{.{ .x = 900, .y = 50, .w = 200, .h = 100, .address = 7 }};
+    const p = an.resolve(&moved, 0).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 1100), p[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), p[1], 1e-3);
+    // A slide stays on the edge.
+    const q = an.resolve(&moved, 500).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 150), q[1], 1e-3);
+
+    const others = [_]WindowRect{.{ .x = 0, .y = 0, .w = 10, .h = 10, .address = 8 }};
+    try std.testing.expect(an.resolve(&others, 0) == null);
+}
+
+test "a channel is rooted at both ends and a streamer at one" {
+    const ctx = testContext();
+    var path: Path = .{};
+    const a = [2]f32{ 100, 100 };
+    const b = [2]f32{ 900, 400 };
+    ctx.buildPath(&path, a, b, 0xC0FFEE, 40, .{ 0, 30 }, 1.5, 12, false);
+    try std.testing.expect(path.n >= 4 and path.n <= max_pts);
+    try std.testing.expectEqual(a, path.pts[0]);
+    try std.testing.expectEqual(b, path.pts[path.n]);
+    // The same seed, time and tick give the same channel: nothing in a
+    // frame's geometry depends on call order.
+    var again: Path = .{};
+    ctx.buildPath(&again, a, b, 0xC0FFEE, 40, .{ 0, 30 }, 1.5, 12, false);
+    try std.testing.expectEqual(path.pts[path.n / 2], again.pts[path.n / 2]);
+
+    ctx.buildPath(&path, a, b, 0xC0FFEE, 40, .{ 0, 0 }, 1.5, 12, true);
+    try std.testing.expectEqual(a, path.pts[0]);
+    try std.testing.expect(path.pts[path.n][0] != b[0] or path.pts[path.n][1] != b[1]);
+}
+
+test "chunks hold eight segments and pad their box by the glow's reach" {
+    var ctx = testContext();
+    ctx.tex_data = try std.testing.allocator.alloc(f32, max_chunks * row_floats);
+    defer std.testing.allocator.free(ctx.tex_data);
+
+    for (0..10) |i| {
+        const x: f32 = @floatFromInt(i * 10);
+        ctx.pushSeg(.{ x, 0 }, .{ x + 10, 5 }, 1.0, 1.0, 0);
+    }
+    ctx.closeChunk();
+    try std.testing.expectEqual(@as(u32, 2), ctx.chunk_count);
+    try std.testing.expectApproxEqAbs(-glow_reach, ctx.boxes[0][0], 1e-3);
+    try std.testing.expectApproxEqAbs(80 + glow_reach, ctx.boxes[0][2], 1e-3);
+    // The second chunk's six unused slots are dark.
+    const second = ctx.row(1);
+    try std.testing.expectEqual(@as(f32, 1.0), second[(seg_per_chunk + 1) * 4]);
+    try std.testing.expectEqual(@as(f32, 0.0), second[(seg_per_chunk + 2) * 4]);
+}
