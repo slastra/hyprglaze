@@ -629,6 +629,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .time = time,
                 .cursor = trans.current_cursor,
                 .focused_win = trans.current_win,
+                .focused_address = cached_win_address,
                 .windows = cached_windows[0..cached_window_count],
                 .window_info = cached_window_info[0..cached_window_count],
                 .focused_class = cached_focused_class,

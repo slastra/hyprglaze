@@ -31,6 +31,7 @@ const amorphous = @import("effects/amorphous.zig");
 const laser = @import("effects/laser/context.zig");
 const flux = @import("effects/flux.zig");
 const coral = @import("effects/coral.zig");
+const cellbloom = @import("effects/cellbloom.zig");
 
 /// Class and title of one mapped window (truncated copies), parallel to
 /// `FrameState.windows` by index.
@@ -50,6 +51,11 @@ pub const FrameState = struct {
     time: f32,
     cursor: [2]f32,
     focused_win: transition_mod.Rect,
+    /// Address of the focused window (0 = never had one). `focused_win`
+    /// glides from the last window to this one; this is where it is
+    /// going. It keeps its last value when focus lands on nothing, so
+    /// look the address up in `windows` before trusting it.
+    focused_address: u64 = 0,
     windows: []const shader_mod.ShaderProgram.WindowRect,
     window_info: ?[]const WindowInfo = null,
     focused_class: [64]u8 = @splat(0),
@@ -107,6 +113,7 @@ pub const Effect = union(enum) {
     laser: laser.Context,
     flux: flux.Context,
     coral: coral.Context,
+    cellbloom: cellbloom.Context,
 
     /// Config section an effect reads its params from. Defaults to the
     /// variant name; the exceptions: starfield and milkdrop intentionally

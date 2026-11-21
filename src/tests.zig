@@ -15,6 +15,8 @@ test {
     _ = @import("effects/laser/trace.zig");
     _ = @import("effects/clock.zig");
     _ = @import("effects/coral.zig");
+    _ = @import("effects/cellbloom.zig");
+    _ = @import("effects/lamps.zig");
     _ = @import("effects/voltaic.zig");
     _ = @import("effects/fire.zig");
     _ = @import("effects/swarm/flock.zig");

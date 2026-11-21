@@ -12,7 +12,7 @@ has the short version.
 # Effects: particles, windowglow, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
-#          flux, coral
+#          flux, coral, cellbloom
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -161,6 +161,18 @@ cursor = true         # the cursor draws seed as it moves
 music = true          # bass swells the folds, pulses of light run along them and flare on kicks
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 # map = true          # diagnostic: feed rate along x, kill rate along y (Pearson's map)
+
+[cellbloom]
+size = 1.0            # how big a full grown cell is (0.6-2.5); smaller means more of them, up to 512
+speed = 1.0           # pace of the culture's life: feeding, growth, division, starving (0 = still, up to 4)
+color = 5             # the cells' color, as a palette slot: the accent fur uses (-1 = the foreground)
+lens = 1.0            # how much of the microscope shows: out-of-focus dust on the glass, and grain
+                      #   (0 = a clean view, up to 3)
+light = "focus"       # where the lamp is: "focus" = behind the focused window, fading over to the next
+                      #   when focus moves; "cursor" = carried by the cursor; "fixed" = off the upper left
+music = true          # loud music quickens the culture and feeds it; each beat sets a few full-grown cells
+                      #   dividing; each cell's light drifts slowly with its own band. Nothing blinks
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [glitch]
 lines = 720           # feedback loop's video resolution in lines (120-2160); fewer = chunkier
