@@ -19,6 +19,7 @@ scripts/hypr-harness.sh scripts/laser.probe.sh         # beams aimed at a few po
 scripts/hypr-harness.sh scripts/flux-life.probe.sh     # magnets through open, close, workspace switch
 scripts/hypr-harness.sh scripts/coral.probe.sh         # reef through a move, a workspace round-trip, a close
 scripts/hypr-harness.sh scripts/cellbloom.probe.sh     # the culture, a focus change, a window dragged through it, the cursor
+scripts/hypr-harness.sh scripts/orbs.probe.sh          # the spheres round two windows, a focus change, the cursor
 HG_EFFECT=flux scripts/hypr-harness.sh scripts/effect.probe.sh   # any effect, a run of grabs
 ```
 

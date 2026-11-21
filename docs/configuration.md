@@ -12,7 +12,7 @@ has the short version.
 # Effects: particles, windowglow, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
-#          flux, coral, cellbloom
+#          flux, coral, cellbloom, orbs
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -172,6 +172,18 @@ light = "focus"       # where the lamp is: "focus" = behind the focused window, 
                       #   when focus moves; "cursor" = carried by the cursor; "fixed" = off the upper left
 music = true          # loud music quickens the culture and feeds it; each beat sets a few full-grown cells
                       #   dividing; each cell's light drifts slowly with its own band. Nothing blinks
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
+
+[orbs]
+size = 1.0            # how big the spheres are (0.7-1.4)
+speed = 1.0           # how fast the field slides toward the eye (0 = still, up to 6)
+key = 5               # the lamp's color, as a palette slot, paled toward the foreground (-1 = the foreground)
+fill = 4              # the color of the dim light in the shadows, as a palette slot
+blur = 1.0            # how shallow the focus is: soft outlines near and far (0 = everything sharp, up to 3)
+grain = 1.0           # film grain over the picture (0 = none, up to 3)
+light = "focus"       # where the lamp is: "focus" = behind the focused window, fading over to the next
+                      #   when focus moves; "cursor" = carried by the cursor; "fixed" = off to the right
+music = true          # each sphere swells a little with its own band; a loud passage quickens the slide
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [glitch]
