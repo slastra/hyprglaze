@@ -21,6 +21,7 @@ scripts/hypr-harness.sh scripts/coral.probe.sh         # reef through a move, a 
 scripts/hypr-harness.sh scripts/cellbloom.probe.sh     # the culture, a focus change, a window dragged through it, the cursor
 scripts/hypr-harness.sh scripts/orbs.probe.sh          # the spheres round two windows, a focus change, the cursor
 scripts/hypr-harness.sh scripts/memphis.probe.sh       # the print round two windows, a focus change, the cursor
+scripts/hypr-harness.sh scripts/darkwave.probe.sh      # the lamp board, a focus ring, a window's bow wave, the cursor's wake
 HG_EFFECT=flux scripts/hypr-harness.sh scripts/effect.probe.sh   # any effect, a run of grabs
 ```
 

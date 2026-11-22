@@ -12,7 +12,7 @@ has the short version.
 # Effects: particles, windowglow, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
-#          flux, coral, cellbloom, orbs, memphis
+#          flux, coral, cellbloom, orbs, memphis, darkwave
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -194,6 +194,16 @@ paper = -1            # the color behind them, as a palette slot (-1 = the backg
 tint = 0.24           # how much of the ink is mixed into the paper (0 = plain paper, up to 1)
 music = true          # each dot field swells and each zigzag stretches with its own band; a loud
                       #   passage quickens the drift
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
+
+[darkwave]
+size = 1.0            # how far apart the lamps are (0.5-3); 1 is sixty rows up the screen
+speed = 1.0           # how fast the swell drifts and the lamps change (0 = still, up to 6)
+color = 0.45          # the share of lamps that wake in a theme color rather than white (0-1)
+glow = 1.0            # how strong the halos round the brightest lamps are (0 = none, up to 3)
+music = true          # each color has a band of the spectrum to itself (red lowest, then yellow, green,
+                      #   cyan, blue, magenta) and its lamps wake while that band is loud; white lamps keep
+                      #   to the swell; each beat pushes the swell forward
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [glitch]
