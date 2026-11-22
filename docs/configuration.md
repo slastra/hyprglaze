@@ -12,7 +12,7 @@ has the short version.
 # Effects: particles, windowglow, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
-#          flux, coral, cellbloom, orbs
+#          flux, coral, cellbloom, orbs, memphis
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -184,6 +184,16 @@ grain = 1.0           # film grain over the picture (0 = none, up to 3)
 light = "focus"       # where the lamp is: "focus" = behind the focused window, fading over to the next
                       #   when focus moves; "cursor" = carried by the cursor; "fixed" = off to the right
 music = true          # each sphere swells a little with its own band; a loud passage quickens the slide
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
+
+[memphis]
+size = 1.0            # how big the shapes are (0.6-1.6); smaller means more of them
+speed = 1.0           # how fast the sheets of shapes drift (0 = still, up to 6)
+ink = 5               # the color of the shapes, as a palette slot (-1 = the foreground)
+paper = -1            # the color behind them, as a palette slot (-1 = the background)
+tint = 0.24           # how much of the ink is mixed into the paper (0 = plain paper, up to 1)
+music = true          # each dot field swells and each zigzag stretches with its own band; a loud
+                      #   passage quickens the drift
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [glitch]
