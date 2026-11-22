@@ -152,11 +152,23 @@ pub const Bands = struct {
             const decay = @min(1.0, 5.0 * dt);
             self.bands[b] += (raw - self.bands[b]) * (if (raw > self.bands[b]) attack else decay);
             self.smooth[b] += (self.bands[b] - self.smooth[b]) * @min(1.0, 8.0 * dt);
+            // Each of these only ever gets nearer nothing, never there.
+            // Left to it they become numbers too small to matter and
+            // many times slower to reckon with, and so does everything an
+            // effect works out from them: once inaudible, they are
+            // nothing.
+            if (raw == 0 and self.bands[b] < silent) self.bands[b] = 0;
+            if (self.bands[b] == 0 and self.smooth[b] < silent) self.smooth[b] = 0;
+            if (self.peak[b] < silent * silent) self.peak[b] = 0;
         }
         const energy = (self.bands[0] + self.bands[1] + self.bands[2] +
             self.bands[3] + self.bands[4] + self.bands[5]) / 6.0;
         self.energy_ema += (energy - self.energy_ema) * @min(1.0, 2.0 * dt);
+        if (energy == 0 and self.energy_ema < silent) self.energy_ema = 0;
     }
+
+    /// Below this a level is taken for silence.
+    const silent = 1e-5;
 };
 
 /// The front-end most audio effects share: optional capture (the effect's
@@ -200,3 +212,28 @@ pub const Analyzer = struct {
         return self.onset.beat;
     }
 };
+
+test "in silence every level comes to exactly nothing, and stays a number worth reckoning with on the way" {
+    var bands = Bands{};
+    var mags: [n_bins]f32 = @splat(0);
+    // Loud, then nothing for two minutes.
+    for (&mags) |*m| m.* = 0.4;
+    for (0..240) |_| bands.update(&mags, 1.0 / 120.0);
+    for (bands.bands) |b| try std.testing.expect(b > 0.5);
+    mags = @splat(0);
+    const smallest = std.math.floatMin(f32);
+    for (0..120 * 120) |_| {
+        bands.update(&mags, 1.0 / 120.0);
+        for (bands.bands, bands.smooth, bands.peak) |b, s, p| {
+            try std.testing.expect(b == 0 or b >= smallest);
+            try std.testing.expect(s == 0 or s >= smallest);
+            try std.testing.expect(p == 0 or p >= smallest);
+        }
+        try std.testing.expect(bands.energy_ema == 0 or bands.energy_ema >= smallest);
+    }
+    for (bands.bands, bands.smooth) |b, s| {
+        try std.testing.expectEqual(@as(f32, 0), b);
+        try std.testing.expectEqual(@as(f32, 0), s);
+    }
+    try std.testing.expectEqual(@as(f32, 0), bands.energy_ema);
+}
