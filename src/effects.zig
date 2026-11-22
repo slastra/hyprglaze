@@ -35,6 +35,7 @@ const cellbloom = @import("effects/cellbloom.zig");
 const orbs = @import("effects/orbs.zig");
 const memphis = @import("effects/memphis.zig");
 const darkwave = @import("effects/darkwave.zig");
+const skein = @import("effects/skein.zig");
 
 /// Class and title of one mapped window (truncated copies), parallel to
 /// `FrameState.windows` by index.
@@ -120,6 +121,7 @@ pub const Effect = union(enum) {
     orbs: orbs.Context,
     memphis: memphis.Context,
     darkwave: darkwave.Context,
+    skein: skein.Context,
 
     /// Config section an effect reads its params from. Defaults to the
     /// variant name; the exceptions: starfield and milkdrop intentionally

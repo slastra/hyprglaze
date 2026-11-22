@@ -20,6 +20,7 @@ test {
     _ = @import("effects/orbs.zig");
     _ = @import("effects/memphis.zig");
     _ = @import("effects/darkwave.zig");
+    _ = @import("effects/skein.zig");
     _ = @import("effects/voltaic.zig");
     _ = @import("effects/fire.zig");
     _ = @import("effects/swarm/flock.zig");

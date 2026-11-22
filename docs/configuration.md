@@ -12,7 +12,7 @@ has the short version.
 # Effects: particles, windowglow, concentric, fluid, starfield,
 #          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
-#          flux, coral, cellbloom, orbs, memphis, darkwave
+#          flux, coral, cellbloom, orbs, memphis, darkwave, skein
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -204,6 +204,20 @@ glow = 1.0            # how strong the halos round the brightest lamps are (0 = 
 music = true          # each color has a band of the spectrum to itself (red lowest, then yellow, green,
                       #   cyan, blue, magenta) and its lamps wake while that band is loud; white lamps keep
                       #   to the swell; each beat pushes the swell forward
+# sink = "..."        # PulseAudio monitor source (auto-detected by default)
+
+[skein]
+size = 1.0            # how far the lobes stand off the middle (0.4-1.8)
+speed = 1.0           # how fast the waves travel (0 = still, up to 6)
+lines = 1.0           # how many lines a ribbon has: 1 is 28 in one and 20 in the other (0.3-2.5)
+width = 1.0           # how thick a line is: 1 is an eighth of a percent of the screen's height (0.3-4)
+from = 5              # the color at the left, as a palette slot (-1 = the foreground)
+to = 4                # the color at the right, as a palette slot
+pale = 0.25           # how far both colors are paled toward the foreground (0-1)
+embrace = true        # bend to pass behind the focused window and widen to show round it, when the
+                      #   window is under about half the screen's height and width
+music = true          # each wave swells with its own band (the bass heavily, the top quickly), and the
+                      #   top bands run fine ripples along the edges
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 
 [glitch]

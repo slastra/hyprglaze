@@ -22,6 +22,7 @@ scripts/hypr-harness.sh scripts/cellbloom.probe.sh     # the culture, a focus ch
 scripts/hypr-harness.sh scripts/orbs.probe.sh          # the spheres round two windows, a focus change, the cursor
 scripts/hypr-harness.sh scripts/memphis.probe.sh       # the print round two windows, a focus change, the cursor
 scripts/hypr-harness.sh scripts/darkwave.probe.sh      # the lamp board, a focus ring, a window's bow wave, the cursor's wake
+scripts/hypr-harness.sh scripts/skein.probe.sh         # the ribbons, the bend behind the focused window, a pluck
 HG_EFFECT=flux scripts/hypr-harness.sh scripts/effect.probe.sh   # any effect, a run of grabs
 ```
 
