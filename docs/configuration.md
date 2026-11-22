@@ -214,8 +214,6 @@ width = 1.0           # how thick a line is: 1 is an eighth of a percent of the 
 from = 5              # the color at the left, as a palette slot (-1 = the foreground)
 to = 4                # the color at the right, as a palette slot
 pale = 0.25           # how far both colors are paled toward the foreground (0-1)
-embrace = true        # bend to pass behind the focused window and widen to show round it, when the
-                      #   window is under about half the screen's height and width
 music = true          # each wave swells with its own band (the bass heavily, the top quickly), and the
                       #   top bands run fine ripples along the edges
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)

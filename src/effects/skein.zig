@@ -3,10 +3,8 @@ const shader_mod = @import("../core/shader.zig");
 const config_mod = @import("../core/config.zig");
 const effects = @import("../effects.zig");
 const spectral = @import("spectral.zig");
-const lamps_mod = @import("lamps.zig");
 
 const Uniforms = @import("uniforms.zig").Uniforms;
-const WindowRect = shader_mod.ShaderProgram.WindowRect;
 
 const c = @import("c");
 
@@ -24,23 +22,20 @@ const c = @import("c");
 //     swell and sink and it never quite repeats.
 //   - Its string: the edge is also a string under tension,
 //
-//         v' = c^2 u_xx - k v - s u,    u' = v
+//         v' = c^2 u_xx - k v - s u + n v_xx,    u' = v
 //
-//     (the last term a weak spring back to its place, so that what a
-//     pluck leaves behind does not linger)
+//     (a weak spring back to its place, so that what a pluck leaves
+//     behind does not linger, and a smoothing of anything only a few
+//     points long)
 //     which the cursor plucks. Moving up or down through a ribbon the
 //     cursor carries the lines it is among along with it, and what it
 //     lets go of runs off both ways along the ribbon as a pulse. Moving
 //     along the ribbon, or at rest, it does nothing.
-//   - The path they are laid along: a line across the middle of the
-//     screen, bent to pass behind the focused window, and how far the
-//     waves stand off it, widened there until the lobes show above the
-//     window and below it. When focus moves the bend behind the old
-//     window eases out as the one behind the new eases in (lamps.zig).
-//     Only a window with room round it is bent for: a tile that fills
-//     most of the screen's height or width hides the skein whatever it
-//     does, so the skein passes straight behind it and holds still as
-//     focus moves from tile to tile.
+//   - The line they are laid along, straight across the middle of the
+//     screen. The skein keeps to it whatever the windows do. (It used to
+//     bend to pass behind the focused window. Every focus change,
+//     workspace switch and window animation then swung the whole ribbon,
+//     which on a busy desktop read as a fault.)
 //
 // In music it dances. Each wave listens to one band and stands taller
 // as that band sounds, sinking back as it fades, so the big lobes swell
@@ -55,7 +50,10 @@ const c = @import("c");
 // The edges are worked out here at a few hundred points across the
 // screen and handed to the shader as a texture, with their slopes; the
 // shader finds, for each pixel, the lines of each ribbon nearest it
-// (shaders/skein.frag). Lengths are px, up from the bottom of the screen.
+// (shaders/skein.frag). It draws them only where there is room to see
+// them: in the narrow gaps between tiled windows a few thin lines
+// crossing read as flickering hatch marks, so there they fade to nothing.
+// Lengths are px, up from the bottom of the screen.
 
 /// Points across the screen an edge is worked out at. Must match SAMPLES
 /// in the shader.
@@ -80,9 +78,20 @@ const drain_edge = 16.0;
 /// Weak: a pulse runs off long before it tells, and what is left behind
 /// sways back over a second or two.
 const spring = 2.0;
-/// The most of a point's spacing a pulse may cross in one step of a
-/// string; a frame is cut into as many steps as that takes.
-const courant = 0.8;
+/// A string is carried on in steps of one fixed length, this many a
+/// second, however the frames fall: in each a pulse crosses two thirds of
+/// a point's spacing. The steps must not vary. Cut each frame into its own
+/// number of steps and frames of uneven length pump a wave a few points
+/// long until it fills the screen, which is what a desktop of tiled
+/// windows did.
+const string_hz = 480.0;
+/// Most steps one frame may take; a longer stall drops its backlog.
+const most_steps = 24;
+/// How fast a wave only a few points long is smoothed away, in points
+/// squared a second. A pulse from a pluck is some forty points long and
+/// hardly feels it; anything near the grid's own scale is gone in a few
+/// hundredths of a second.
+const smoothing = 12.0;
 /// Steps of a string between looks at whether it is still, and what
 /// counts as still, px. Anything that dies away is put to rest below
 /// `rest`: left to itself it would shrink for ever into numbers many
@@ -99,19 +108,6 @@ const drag = 0.55;
 const pluck_width = 0.022;
 const catch_margin = 0.025;
 const most_pull = 0.13;
-
-/// How far past the focused window's sides the bend behind it runs out,
-/// in screen heights, how far past its top and bottom the lobes are
-/// widened to show, the widest they are ever made, and how fast the path
-/// follows, per second.
-const bend_run = 0.3;
-const show_past = 0.07;
-const widest = 0.32;
-const follow = 2.4;
-/// A window is bent for in full up to the first of these parts of the
-/// screen's height, and not at all from the second; likewise its width.
-const room_tall = [2]f32{ 0.36, 0.5 };
-const room_wide = [2]f32{ 0.42, 0.62 };
 
 /// How quickly a wave follows each band, low to high: the pull of the
 /// spring it follows on, per second, as the band rises and as it falls.
@@ -193,6 +189,8 @@ const cast = [n_ribbons][2][n_waves]Wave{
 pub const String = struct {
     u: [cells]f32 = @splat(0),
     v: [cells]f32 = @splat(0),
+    /// Time not yet carried on.
+    owed: f32 = 0,
     ticks: u32 = 0,
     /// Whether anything is moving on it.
     awake: bool = false,
@@ -230,21 +228,32 @@ pub const String = struct {
 
     /// Carry it `dt` on. False when it is still, and was not touched.
     pub fn step(self: *String, dt_in: f32) bool {
-        if (!self.awake) return false;
-        const dt = std.math.clamp(dt_in, 0.0, 1.0 / 30.0);
-        // Points a pulse crosses in a second, and so the steps this
-        // frame takes.
+        if (!self.awake) {
+            self.owed = 0;
+            return false;
+        }
+        // Points a pulse crosses in a second, and in a step.
         const speed = string_speed * @as(f32, samples - 1);
-        const n: usize = @intFromFloat(@max(1.0, @ceil(speed * dt / courant)));
-        const h = dt / @as(f32, @floatFromInt(n));
+        const h = 1.0 / string_hz;
+        comptime std.debug.assert(string_speed * @as(f32, samples - 1) / string_hz < 0.75);
+        comptime std.debug.assert(4.0 * smoothing / string_hz < 0.5);
         const c2 = speed * speed;
+        self.owed += std.math.clamp(dt_in, 0.0, 0.05);
         var looked = false;
         var most: f32 = 0;
-        for (0..n) |_| {
-            const mid = self.u[1 .. cells - 1];
-            for (mid, self.u[0 .. cells - 2], self.u[2..cells], self.v[1 .. cells - 1], drain[1 .. cells - 1]) |m, l, r, *v, d| {
-                v.* += (c2 * (l + r - 2.0 * m) - d * v.* - spring * m) * h;
+        var steps: usize = 0;
+        while (self.owed >= h and steps < most_steps) : (steps += 1) {
+            self.owed -= h;
+            // What pulls on each point: the string's tension, the drag,
+            // the weak spring back to its place, and the smoothing of
+            // anything sharp, which works on how fast the points move.
+            var pull: [cells]f32 = undefined;
+            pull[0] = 0;
+            pull[cells - 1] = 0;
+            for (pull[1 .. cells - 1], self.u[1 .. cells - 1], self.u[0 .. cells - 2], self.u[2..cells], self.v[1 .. cells - 1], self.v[0 .. cells - 2], self.v[2..cells], drain[1 .. cells - 1]) |*a, m, l, r, v, vl, vr, d| {
+                a.* = c2 * (l + r - 2.0 * m) - d * v - spring * m + smoothing * (vl + vr - 2.0 * v);
             }
+            for (&self.v, pull) |*v, a| v.* += a * h;
             for (&self.u, self.v) |*u, v| u.* += v * h;
             self.ticks +%= 1;
             if (self.ticks % look_every != 0) continue;
@@ -256,6 +265,8 @@ pub const String = struct {
                 most = @max(most, @max(@abs(u.*), @abs(v.*) / speed));
             }
         }
+        // A stall drops its backlog.
+        if (self.owed >= h) self.owed = 0;
         if (looked and most < still) {
             self.u = @splat(0);
             self.v = @splat(0);
@@ -265,9 +276,6 @@ pub const String = struct {
     }
 };
 
-/// A window the path bends behind, and how much (0 to 1).
-pub const Bend = struct { rect: WindowRect, strength: f32 };
-
 /// The edges of every ribbon as the shader takes them: at each point
 /// the first edge's height, the second's, and the slope of each.
 pub const Edges = [n_ribbons][samples][4]f32;
@@ -275,14 +283,11 @@ pub const Edges = [n_ribbons][samples][4]f32;
 pub const Skein = struct {
     width: f32,
     height: f32,
-    /// How far the waves stand off the path with nothing focused.
+    /// How far the waves stand off the middle of the screen.
     reach: f32,
     waves: [n_ribbons][2][n_waves]Wave = cast,
     ripples: [n_ribbons][2]Ripple = shivers,
     strings: [n_ribbons][2]String = @splat(@splat(.{})),
-    /// The path, and how far the waves stand off it, at each point.
-    path: [samples]f32,
-    off: [samples]f32,
     edges: Edges = undefined,
     /// Where the cursor was, px.
     cursor: ?[2]f32 = null,
@@ -294,8 +299,6 @@ pub const Skein = struct {
             .width = width,
             .height = height,
             .reach = reach * size * height,
-            .path = @splat(0.5 * height),
-            .off = @splat(reach * size * height),
         };
         for (&self.waves) |*ribbon| {
             for (ribbon) |*edge| {
@@ -319,7 +322,7 @@ pub const Skein = struct {
     /// Carry everything `dt` on. `heard` is how loud each band of the
     /// music is (0 to 1), `haste` how many times their own pace the
     /// waves travel at (less than nothing: backward).
-    pub fn step(self: *Skein, dt_in: f32, cursor: [2]f32, bends: []const Bend, heard: [6]f32, haste: f32) void {
+    pub fn step(self: *Skein, dt_in: f32, cursor: [2]f32, heard: [6]f32, haste: f32) void {
         const dt = std.math.clamp(dt_in, 0.0, 0.05);
         for (&self.waves) |*ribbon| {
             for (ribbon) |*edge| {
@@ -329,49 +332,11 @@ pub const Skein = struct {
         for (&self.ripples) |*ribbon| {
             for (ribbon) |*ripple| ripple.phase = @mod(ripple.phase + tau * dt / ripple.period, tau);
         }
-        self.lay(dt, bends);
         self.strum(cursor);
         for (&self.strings) |*ribbon| {
             for (ribbon) |*string| _ = string.step(dt);
         }
         self.compose(heard);
-    }
-
-    /// How much room there is round a window to show the skein in: all
-    /// for a small one, none for one that fills most of the screen's
-    /// height or of its width.
-    pub fn room(self: *const Skein, w: WindowRect) f32 {
-        const tall = std.math.clamp((w.h / self.height - room_tall[0]) / (room_tall[1] - room_tall[0]), 0.0, 1.0);
-        const wide = std.math.clamp((w.w / self.width - room_wide[0]) / (room_wide[1] - room_wide[0]), 0.0, 1.0);
-        return (1.0 - tall * tall * (3.0 - 2.0 * tall)) * (1.0 - wide * wide * (3.0 - 2.0 * wide));
-    }
-
-    /// Ease the path toward passing behind the windows it is bent
-    /// behind, and the waves' reach toward showing round them.
-    fn lay(self: *Skein, dt: f32, bends: []const Bend) void {
-        const ease = 1.0 - @exp(-follow * dt);
-        const run = bend_run * self.height;
-        for (&self.path, &self.off, 0..) |*path, *off, i| {
-            const px = self.x(i);
-            var want_path = 0.5 * self.height;
-            var want_off = self.reach;
-            for (bends) |bend| {
-                const w = bend.rect;
-                // One behind the window, falling to none `run` past
-                // either side of it.
-                const outside = @max(@max(w.x - px, px - (w.x + w.w)), 0.0);
-                const t = 1.0 - @min(1.0, outside / run);
-                const behind = bend.strength * self.room(w) * t * t * (3.0 - 2.0 * t);
-                if (behind <= 0) continue;
-                want_path += behind * (w.y + 0.5 * w.h - 0.5 * self.height);
-                const show = @min(0.5 * w.h + show_past * self.height, widest * self.height);
-                want_off += behind * @max(0.0, show - self.reach);
-            }
-            path.* += (want_path - path.*) * ease;
-            off.* += (want_off - off.*) * ease;
-            if (@abs(want_path - path.*) < 0.01) path.* = want_path;
-            if (@abs(want_off - off.*) < 0.01) off.* = want_off;
-        }
     }
 
     /// The cursor, moving up or down through a ribbon, carries the
@@ -415,7 +380,8 @@ pub const Skein = struct {
     /// `height` times sin(k x - phase) added to `to` along the points,
     /// each from the last by one turn of a fixed angle.
     fn addSine(to: *[samples]f32, length: f32, phase: f32, height: f32) void {
-        if (height == 0) return;
+        // A thousandth of a pixel is nothing.
+        if (@abs(height) < 1e-3) return;
         const turn = tau / (length * @as(f32, samples - 1));
         const cs = @cos(turn);
         const sn = @sin(turn);
@@ -434,11 +400,9 @@ pub const Skein = struct {
         const dx = self.width / @as(f32, samples - 1);
         for (&self.edges, self.waves, self.ripples, &self.strings) |*edges, ribbon, ripples, *strings| {
             for (ribbon, ripples, strings, 0..) |edge, ripple, *string, which| {
-                // The waves as they are in silence, as parts of how far
-                // they stand off the path here. What the music adds to
-                // them and the ripple are in px, and the same px
-                // wherever on the path: where the lobes are widened
-                // round a window the music does not widen them again.
+                // The waves as they are in silence, as parts of the
+                // edge's reach, and what the music adds to them with the
+                // ripple, in px.
                 var shape: [samples]f32 = @splat(0);
                 var more: [samples]f32 = @splat(0);
                 for (edge, wave_lift) |wave, lift| {
@@ -446,8 +410,8 @@ pub const Skein = struct {
                     addSine(&more, wave.length, wave.phase, self.reach * wave.amp * lift * heard[wave.band]);
                 }
                 addSine(&more, ripple.length, ripple.phase, ripple_height * self.height * heard[ripple.band]);
-                for (edges, shape, more, self.path, self.off, 0..) |*out, sh, m, path, off, i| {
-                    out[which] = path + off * sh + m + string.at(i);
+                for (edges, shape, more, 0..) |*out, sh, m, i| {
+                    out[which] = 0.5 * self.height + self.reach * sh + m + string.at(i);
                 }
             }
             // The slopes, from the points to either side.
@@ -496,8 +460,12 @@ pub const Tune = struct {
         }
         for (&self.heard, &self.moving, bands) |*h, *v, b| {
             // Anything that is not a number (a capture that hiccups)
-            // would never leave: put it down.
-            if (!std.math.isFinite(h.*) or !std.math.isFinite(v.*) or (b <= 0 and @abs(h.*) < rest and @abs(v.*) < rest)) {
+            // would never leave: put it down. So is anything that has
+            // all but died away, whether or not the band itself has
+            // quite reached nothing: followed down it becomes a number
+            // many times slower to reckon with, and the waves are
+            // worked out from it at every point of every edge.
+            if (!std.math.isFinite(h.*) or !std.math.isFinite(v.*) or (b < rest and @abs(h.*) < rest and @abs(v.*) < rest)) {
                 h.* = 0;
                 v.* = 0;
             }
@@ -518,7 +486,6 @@ pub const Context = struct {
     music: spectral.Analyzer = .{},
     skein: Skein,
     tune: Tune = .{},
-    focus: lamps_mod.Lamps = .{},
     speed: f32,
     /// Lines in each ribbon, and their width in px.
     lines: [n_ribbons]f32,
@@ -528,7 +495,6 @@ pub const Context = struct {
     from: f32,
     to: f32,
     pale: f32,
-    embrace: bool,
     tex: c.GLuint = 0,
 
     u: Uniforms(.{
@@ -555,7 +521,6 @@ pub const Context = struct {
             .from = @floatFromInt(std.math.clamp(params.getInt("from", 5), -1, 15)),
             .to = @floatFromInt(std.math.clamp(params.getInt("to", 4), -1, 15)),
             .pale = std.math.clamp(params.getFloat("pale", 0.25), 0.0, 1.0),
-            .embrace = params.getBool("embrace", true),
         };
     }
 
@@ -564,27 +529,7 @@ pub const Context = struct {
         _ = self.music.update(dt);
         self.tune.step(dt, &self.music.bands.bands);
 
-        // The path bends behind the focused window, and when focus
-        // moves that bend eases out as the next eases in.
-        var id: u64 = lamps_mod.home_id;
-        if (self.embrace and state.focused_address > lamps_mod.cursor_id) {
-            for (state.windows) |w| {
-                if (w.address == state.focused_address and w.w >= 1.0 and w.h >= 1.0) id = w.address;
-            }
-        }
-        self.focus.step(dt, id, .{ 0, 0 }, state.windows);
-        var bends: [lamps_mod.max_lamps]Bend = undefined;
-        var n: usize = 0;
-        for (self.focus.lamps) |lamp| {
-            if (lamp.id <= lamps_mod.cursor_id or lamp.strength() <= 0) continue;
-            for (state.windows) |w| {
-                if (w.address != lamp.id or w.w < 1.0 or w.h < 1.0) continue;
-                bends[n] = .{ .rect = w, .strength = lamp.strength() };
-                n += 1;
-                break;
-            }
-        }
-        self.skein.step(dt, state.cursor, bends[0..n], self.tune.heard, self.speed * self.tune.haste());
+        self.skein.step(dt, state.cursor, self.tune.heard, self.speed * self.tune.haste());
     }
 
     pub fn upload(self: *Context, prog: *const shader_mod.ShaderProgram) void {
@@ -624,7 +569,7 @@ test "the edges stay within their reach of the path, cross each other, and their
     var crossings: usize = 0;
     var widest_gap: f32 = 0;
     for (0..40) |_| {
-        for (0..300) |_| skein.step(0.02, nowhere, &.{}, flat, 1.0);
+        for (0..300) |_| skein.step(0.02, nowhere, flat, 1.0);
         for (skein.edges) |edges| {
             for (edges, 0..) |e, i| {
                 try std.testing.expect(@abs(e[0] - 1080.0) <= most and @abs(e[1] - 1080.0) <= most);
@@ -713,13 +658,13 @@ test "the cursor plucks a ribbon by moving up or down through it, and not by mov
         }
     }.any;
     // Along the middle of the screen, through every ribbon: nothing.
-    for (0..60) |i| skein.step(1.0 / 120.0, .{ 600 + 30 * @as(f32, @floatFromInt(i)), 1080 }, &.{}, flat, 0.0);
+    for (0..60) |i| skein.step(1.0 / 120.0, .{ 600 + 30 * @as(f32, @floatFromInt(i)), 1080 }, flat, 0.0);
     try std.testing.expect(!awake(&skein));
     // Up and down well above them all: nothing.
-    for (0..60) |i| skein.step(1.0 / 120.0, .{ 1000, 2000 + 2 * @as(f32, @floatFromInt(i)) }, &.{}, flat, 0.0);
+    for (0..60) |i| skein.step(1.0 / 120.0, .{ 1000, 2000 + 2 * @as(f32, @floatFromInt(i)) }, flat, 0.0);
     try std.testing.expect(!awake(&skein));
     // A jump from there into the middle of one: nothing.
-    skein.step(1.0 / 120.0, .{ 3000, 1080 }, &.{}, flat, 0.0);
+    skein.step(1.0 / 120.0, .{ 3000, 1080 }, flat, 0.0);
     try std.testing.expect(!awake(&skein));
 
     // Up through the first ribbon where it stands widest.
@@ -730,10 +675,10 @@ test "the cursor plucks a ribbon by moving up or down through it, and not by mov
     const px = skein.x(at);
     const lo = @min(skein.edges[0][at][0], skein.edges[0][at][1]);
     skein.cursor = null;
-    skein.step(1.0 / 120.0, .{ px, lo - 300 }, &.{}, flat, 0.0);
+    skein.step(1.0 / 120.0, .{ px, lo - 300 }, flat, 0.0);
     try std.testing.expect(!awake(&skein));
     const before = skein.edges[0][at];
-    for (0..30) |i| skein.step(1.0 / 120.0, .{ px, lo - 60 + 6 * @as(f32, @floatFromInt(i)) }, &.{}, flat, 0.0);
+    for (0..30) |i| skein.step(1.0 / 120.0, .{ px, lo - 60 + 6 * @as(f32, @floatFromInt(i)) }, flat, 0.0);
     try std.testing.expect(awake(&skein));
     // The lower edge, which it went through, has gone up with it, by a
     // good part of the way and no more than it may be pulled.
@@ -741,37 +686,12 @@ test "the cursor plucks a ribbon by moving up or down through it, and not by mov
     try std.testing.expect(pulled > 15.0 and pulled <= most_pull * 2160.0 + 1.0);
     // Let go, it all runs off and the edges are back where they were.
     for (0..120 * 30) |_| {
-        skein.step(1.0 / 120.0, .{ px, lo + 120 }, &.{}, flat, 0.0);
+        skein.step(1.0 / 120.0, .{ px, lo + 120 }, flat, 0.0);
         if (!awake(&skein)) break;
     }
     try std.testing.expect(!awake(&skein));
     try std.testing.expectApproxEqAbs(before[0], skein.edges[0][at][0], 0.01);
     try std.testing.expectApproxEqAbs(before[1], skein.edges[0][at][1], 0.01);
-}
-
-test "the path bends behind a focused window and the lobes are widened to show round it, and both ease back when it goes" {
-    var skein = Skein.init(3840, 2160, 1.0, 3);
-    const win = WindowRect{ .x = 2400, .y = 1300, .w = 900, .h = 700, .address = 0xa0 };
-    const bends = [_]Bend{.{ .rect = win, .strength = 1 }};
-    for (0..600) |_| skein.step(1.0 / 120.0, nowhere, &bends, flat, 1.0);
-    const behind: usize = @intFromFloat(skein.point(win.x + 0.5 * win.w));
-    const far: usize = @intFromFloat(skein.point(400));
-    // Behind the window the path is at its middle, and the waves reach
-    // past its top and bottom.
-    try std.testing.expectApproxEqAbs(win.y + 0.5 * win.h, skein.path[behind], 1.0);
-    try std.testing.expect(skein.off[behind] > 0.5 * win.h + 0.05 * 2160.0);
-    try std.testing.expect(skein.off[behind] <= widest * 2160.0 + 0.5);
-    // Well off to the side nothing has changed.
-    try std.testing.expectApproxEqAbs(@as(f32, 1080), skein.path[far], 0.5);
-    try std.testing.expectApproxEqAbs(reach * 2160.0, skein.off[far], 0.5);
-    // And between, it runs smoothly from one to the other.
-    for (1..samples) |i| try std.testing.expect(@abs(skein.path[i] - skein.path[i - 1]) < 8.0);
-
-    for (0..1200) |_| skein.step(1.0 / 120.0, nowhere, &.{}, flat, 1.0);
-    for (skein.path, skein.off) |path, off| {
-        try std.testing.expectEqual(@as(f32, 1080), path);
-        try std.testing.expectEqual(skein.reach, off);
-    }
 }
 
 test "a wave follows its band without a start or a stop, the low bands slowly and the top ones fast, and a ripple is as high as its band is loud" {
@@ -836,8 +756,8 @@ test "a wave follows its band without a start or a stop, the low bands slowly an
     var sung = Skein.init(3840, 2160, 1.0, 3);
     var heard: [6]f32 = @splat(0);
     heard[0] = 1;
-    hush.step(0.01, nowhere, &.{}, flat, 0.0);
-    sung.step(0.01, nowhere, &.{}, heard, 0.0);
+    hush.step(0.01, nowhere, flat, 0.0);
+    sung.step(0.01, nowhere, heard, 0.0);
     var most = [2]f32{ 0, 0 };
     for (hush.edges[0], sung.edges[0]) |h, s| {
         most[0] = @max(most[0], @abs(h[0] - 1080.0));
@@ -857,7 +777,7 @@ test "a wave follows its band without a start or a stop, the low bands slowly an
             for (edge) |*wave| wave.amp = 0;
         }
     }
-    bare.step(0.01, nowhere, &.{}, heard, 0.0);
+    bare.step(0.01, nowhere, heard, 0.0);
     for (bare.edges, shivers) |edges, ripples| {
         for (ripples, 0..) |ripple, which| {
             var high: f32 = 0;
@@ -868,64 +788,40 @@ test "a wave follows its band without a start or a stop, the low bands slowly an
     }
 }
 
-test "music adds the same to the skein with a window to show round as without, and every band full on never throws it off the screen" {
-    var plain = Skein.init(3840, 2160, 1.0, 3);
-    var round = Skein.init(3840, 2160, 1.0, 3);
-    // A window a third of the screen's height, focused.
-    const bends = [_]Bend{.{ .rect = .{ .x = 1200, .y = 300, .w = 1400, .h = 700, .address = 0xa0 }, .strength = 1 }};
-    for (0..1200) |_| {
-        plain.step(1.0 / 120.0, nowhere, &.{}, flat, 0.0);
-        round.step(1.0 / 120.0, nowhere, &bends, flat, 0.0);
-    }
-    const quiet = [2]Edges{ plain.edges, round.edges };
-    const full: [6]f32 = @splat(1);
-    plain.step(0.0, nowhere, &.{}, full, 0.0);
-    round.step(0.0, nowhere, &bends, full, 0.0);
-    var widest_lobe: f32 = 0;
-    for (0..n_ribbons) |r| {
-        for (0..samples) |i| {
-            for (0..2) |which| {
-                // What the music moved each edge by, here.
-                const moved = [2]f32{ plain.edges[r][i][which] - quiet[0][r][i][which], round.edges[r][i][which] - quiet[1][r][i][which] };
-                try std.testing.expectApproxEqAbs(moved[0], moved[1], 0.05);
-                widest_lobe = @max(widest_lobe, @abs(round.edges[r][i][which] - round.path[i]));
-            }
-        }
-    }
-    // Widened round the window and with everything sounding, the
-    // farthest any line stands off the path is under half the screen.
-    try std.testing.expect(widest_lobe > 0.3 * 2160.0 and widest_lobe < 0.5 * 2160.0);
-}
-
-test "a tile that fills most of the screen is passed straight behind, so the skein holds still as focus moves between tiles" {
+test "with every band of the music full on, no line stands farther off the middle than under half the screen" {
     var skein = Skein.init(3840, 2160, 1.0, 3);
-    // Two tiles side by side, full height, and focus going from one to
-    // the other and back.
-    const left = WindowRect{ .x = 20, .y = 20, .w = 1890, .h = 2120, .address = 0xa0 };
-    const right = WindowRect{ .x = 1930, .y = 20, .w = 1890, .h = 2120, .address = 0xb0 };
-    try std.testing.expectEqual(@as(f32, 0), skein.room(left));
-    for (0..6) |turn| {
-        const focused = if (turn % 2 == 0) left else right;
-        const bends = [_]Bend{.{ .rect = focused, .strength = 1 }};
-        for (0..240) |_| {
-            skein.step(1.0 / 120.0, nowhere, &bends, flat, 1.0);
-            for (skein.path, skein.off) |path, off| {
-                try std.testing.expectEqual(@as(f32, 1080), path);
-                try std.testing.expectEqual(skein.reach, off);
+    const full: [6]f32 = @splat(1);
+    var widest_lobe: f32 = 0;
+    for (0..2000) |_| {
+        skein.step(1.0 / 120.0, nowhere, full, 3.0);
+        for (skein.edges) |edges| {
+            for (edges) |e| widest_lobe = @max(widest_lobe, @max(@abs(e[0] - 1080.0), @abs(e[1] - 1080.0)));
+        }
+    }
+    try std.testing.expect(widest_lobe > 0.25 * 2160.0 and widest_lobe < 0.42 * 2160.0);
+}
+
+test "the skein keeps to the middle of the screen whatever the windows do" {
+    // It is given no windows to go by: nothing in its step takes one.
+    const takes = @typeInfo(@TypeOf(Skein.step)).@"fn".param_types;
+    try std.testing.expectEqual(@as(usize, 5), takes.len);
+    var skein = Skein.init(3840, 2160, 1.0, 3);
+    var sum: f64 = 0;
+    var n: f64 = 0;
+    for (0..40) |_| {
+        for (0..300) |_| skein.step(0.02, nowhere, flat, 1.0);
+        for (skein.edges) |edges| {
+            for (edges) |e| {
+                sum += e[0] + e[1];
+                n += 2;
             }
         }
     }
-    // Stacked tiles half the screen high, and one nearly as wide as the
-    // screen, likewise; a small floating window is bent for in full, and
-    // between the two it shades off.
-    try std.testing.expect(skein.room(.{ .x = 0, .y = 0, .w = 1890, .h = 1050 }) < 0.05);
-    try std.testing.expectEqual(@as(f32, 0), skein.room(.{ .x = 0, .y = 0, .w = 3000, .h = 600 }));
-    try std.testing.expectEqual(@as(f32, 1), skein.room(.{ .x = 0, .y = 0, .w = 1400, .h = 700 }));
-    const middling = skein.room(.{ .x = 0, .y = 0, .w = 1400, .h = 900 });
-    try std.testing.expect(middling > 0.2 and middling < 0.8);
+    // Over time the edges lie as much above the middle as below it.
+    try std.testing.expectApproxEqAbs(@as(f64, 1080), sum / n, 25.0);
 }
 
-test "two minutes of a wild cursor, windows coming and going, loud music and uneven frames leave the skein on the screen" {
+test "two minutes of a wild cursor, loud music and uneven frames leave the skein on the screen" {
     var prng = std.Random.DefaultPrng.init(11);
     const r = prng.random();
     var skein = Skein.init(3840, 2160, 1.0, 3);
@@ -933,7 +829,6 @@ test "two minutes of a wild cursor, windows coming and going, loud music and une
     var bands: [6]f32 = @splat(0);
     var cursor = [2]f32{ 1900, 1000 };
     var vel = [2]f32{ 0, 0 };
-    var win = WindowRect{ .x = 900, .y = 700, .w = 900, .h = 700, .address = 0xa0 };
     for (0..120 * 120) |_| {
         // Mostly steady frames, now and then a long stall.
         const dt: f32 = if (r.float(f32) < 0.02) 0.3 * r.float(f32) else 1.0 / 120.0 + 0.004 * r.float(f32);
@@ -950,14 +845,7 @@ test "two minutes of a wild cursor, windows coming and going, loud music and une
         }
         cursor[0] = @mod(cursor[0], 3840.0);
         cursor[1] = @mod(cursor[1], 2160.0);
-        if (r.float(f32) < 0.01) {
-            win.x = r.float(f32) * 2800;
-            win.y = r.float(f32) * 1300;
-            win.w = 300 + r.float(f32) * 1600;
-            win.h = 200 + r.float(f32) * 1400;
-        }
-        const bends = [_]Bend{.{ .rect = win, .strength = r.float(f32) }};
-        skein.step(dt, cursor, &bends, tune.heard, tune.haste());
+        skein.step(dt, cursor, tune.heard, tune.haste());
         // No edge farther from the middle of the screen than two thirds
         // of its height, and no string pulled farther than it may be.
         for (skein.edges) |edges| {
@@ -985,4 +873,62 @@ test "a band that is not a number for a moment does not stay with the skein" {
     for (0..240) |_| tune.step(1.0 / 120.0, &bands);
     for (tune.heard) |h| try std.testing.expect(h > 0.4 and h < 0.6);
     try std.testing.expect(std.math.isFinite(tune.loud));
+}
+
+test "a band that never quite reaches silence still leaves the skein at rest" {
+    var tune = Tune{};
+    var bands: [6]f32 = @splat(0.8);
+    for (0..240) |_| tune.step(1.0 / 120.0, &bands);
+    // Silence as an analyser gives it: ever smaller, never nothing.
+    for (0..120 * 60) |n| {
+        for (&bands) |*b| b.* *= 0.96;
+        tune.step(1.0 / 120.0, &bands);
+        if (n > 120 * 20) {
+            for (tune.heard, tune.moving) |h, v| {
+                try std.testing.expectEqual(@as(f32, 0), h);
+                try std.testing.expectEqual(@as(f32, 0), v);
+            }
+        }
+    }
+}
+
+test "frames of uneven length never pump a string: plucked, it dies away however the time is cut up" {
+    const cases = [_]struct { a: f32, b: f32, random: bool }{
+        .{ .a = 0.00833, .b = 0.00833, .random = false },
+        .{ .a = 0.0040, .b = 0.0127, .random = false },
+        .{ .a = 0.0070, .b = 0.0097, .random = false },
+        .{ .a = 0.0060, .b = 0.0107, .random = false },
+        .{ .a = 0.0020, .b = 0.0147, .random = false },
+        .{ .a = 0.0005, .b = 0.0330, .random = false },
+        .{ .a = 0.0065, .b = 0.0085, .random = true },
+        .{ .a = 0.0020, .b = 0.0150, .random = true },
+        .{ .a = 0.0001, .b = 0.1000, .random = true },
+    };
+    for (cases) |case| {
+        var prng = std.Random.DefaultPrng.init(5);
+        const r = prng.random();
+        var string = String{};
+        string.pluck(380, 60.0, 16.9);
+        var t: f32 = 0;
+        var n: usize = 0;
+        var kink: f32 = 0;
+        var high: f32 = 0;
+        while (t < 30.0) : (n += 1) {
+            const dt = if (case.random) case.a + (case.b - case.a) * r.float(f32) else if (n % 2 == 0) case.a else case.b;
+            t += dt;
+            // Kept awake with a whisper, as a hand resting on the mouse
+            // keeps it.
+            if (n % 40 == 0) string.pluck(100 + 500 * r.float(f32), 0.5 * (r.float(f32) - 0.5), 16.9);
+            _ = string.step(dt);
+            // Never rough, even while the pluck is still on it: no point
+            // out of line with its neighbors by a pixel.
+            for (1..cells - 1) |i| {
+                kink = @max(kink, @abs(string.u[i - 1] - 2.0 * string.u[i] + string.u[i + 1]));
+                if (t > 12.0) high = @max(high, @abs(string.u[i]));
+            }
+        }
+        try std.testing.expect(kink < 1.0);
+        // And once the pluck has run off, nothing left but the whispers.
+        try std.testing.expect(high < 2.0);
+    }
 }

@@ -1,14 +1,14 @@
 # Probe for skein: the ribbons at rest round two windows, a run of grabs
-# (with music if any), focus moved from one window to the other so the
-# ribbons bend behind it, and the cursor drawn up through them.
+# (with music if any), focus moved from one window to the other (which
+# must leave the ribbons where they are), and the cursor drawn up through
+# them.
 #
 #   HG_BMODE=2560x1440 scripts/hypr-harness.sh scripts/skein.probe.sh
 #
 # HG_MUSIC=true HG_SINK=<null sink> lets it hear a track played into that
 # sink (see voltaic.probe.sh); HG_SHOTS (4) grabs HG_GAP (3s) apart.
 # HG_THEME the theme; HG_SIZE, HG_SPEED, HG_LINES, HG_WIDTH, HG_FROM,
-# HG_TO, HG_PALE and HG_EMBRACE the [skein] knobs; HG_BARE=1 opens no
-# windows.
+# HG_TO and HG_PALE the [skein] knobs; HG_BARE=1 opens no windows.
 # Produces $OUT/shots/skein-*.png.
 
 # Screenshots only, so hidden (15fps) is fine; HG_SHOW=1 to watch it.
@@ -31,7 +31,6 @@ width = ${HG_WIDTH:-1.0}
 from = ${HG_FROM:-5}
 to = ${HG_TO:-4}
 pale = ${HG_PALE:-0.25}
-embrace = ${HG_EMBRACE:-true}
 TOML
 [ -n "${HG_SINK:-}" ] && echo "sink = \"$HG_SINK\"" >> "$OUT/ccfg/hypr/hyprglaze.toml"
 [ -f "$HOME/.config/hyprglaze/themes.json" ] && mkdir -p "$OUT/ccfg/hyprglaze" &&
@@ -53,8 +52,8 @@ for i in $(seq 1 "${HG_SHOTS:-4}"); do
 done
 
 if [ -z "${HG_BARE:-}" ]; then
-    # Focus moves from the second window to the first: the ribbons ease
-    # out from behind the one and in behind the other.
+    # Focus moves from the second window to the first: the ribbons take
+    # no notice.
     ADDR_A=$(hcj clients | jq -r '.[]|select(.class=="fx-a")|.address')
     E "hl.dispatch(hl.dsp.focus({ window = 'address:$ADDR_A' }))" >/dev/null
     sleep 2.5; grab skein-focus "$MON_B"
