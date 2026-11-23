@@ -50,10 +50,7 @@ const c = @import("c");
 // The edges are worked out here at a few hundred points across the
 // screen and handed to the shader as a texture, with their slopes; the
 // shader finds, for each pixel, the lines of each ribbon nearest it
-// (shaders/skein.frag). It draws them only where there is room to see
-// them: in the narrow gaps between tiled windows a few thin lines
-// crossing read as flickering hatch marks, so there they fade to nothing.
-// Lengths are px, up from the bottom of the screen.
+// (shaders/skein.frag). Lengths are px, up from the bottom of the screen.
 
 /// Points across the screen an edge is worked out at. Must match SAMPLES
 /// in the shader.

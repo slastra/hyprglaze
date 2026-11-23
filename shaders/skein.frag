@@ -6,15 +6,8 @@ precision highp float;
 // which are worked out on the CPU at a few hundred points across the
 // screen and handed over as a texture, with their slopes. A pixel finds
 // the lines of each ribbon nearest it and how far from them it is.
-//
-// The skein is drawn only where there is room to see it. Through the
-// narrow gaps between tiled windows, or between a window and the edge of
-// the screen, a few thin lines crossing show as flickering hatch marks;
-// there the lines fade to nothing and the gap is plain background.
+// It is drawn everywhere, the gaps between windows and under them alike.
 uniform vec3 iResolution;
-
-uniform vec4 iWindows[32];   // each window on screen: x, y, w, h px, up from the bottom left
-uniform int iWindowCount;
 
 uniform vec3 iPalette[16];
 uniform int iPaletteSize;
@@ -23,10 +16,6 @@ uniform vec3 iPaletteFg;
 
 const int SAMPLES = 768;
 const int RIBBONS = 2;
-// A gap this narrow, as a part of the screen's height, shows none of the
-// skein, and one this wide shows all of it.
-const float NARROW = 0.012;
-const float WIDE = 0.075;
 
 uniform sampler2D iSkeinEdges;  // a row a ribbon: the first edge's height px, the second's, the slope of each
 uniform vec3 iSkeinLook;        // lines in the first ribbon, in the second, a line's width px
@@ -67,36 +56,6 @@ float ribbon(int r, float lines, vec2 p) {
     return min(cover, 1.0);
 }
 
-// How much room there is to see the skein at `p`: nothing in a gap
-// narrower than NARROW, all in one wider than WIDE, and all under a
-// window. The gap is how far it is across the open space the pixel is
-// in, from the window or screen edge on one side to the one on the
-// other, the lesser of across and up.
-float room(vec2 p) {
-    float left = 0.0, right = iResolution.x;
-    float below = 0.0, above = iResolution.y;
-    for (int i = 0; i < iWindowCount && i < 32; i++) {
-        vec4 w = iWindows[i];
-        if (w.z < 1.0 || w.w < 1.0) continue;
-        vec2 lo = w.xy, hi = w.xy + w.zw;
-        bool in_x = p.x > lo.x && p.x < hi.x;
-        bool in_y = p.y > lo.y && p.y < hi.y;
-        // Under a window it is drawn in full: a translucent window shows
-        // it through, and the narrow-gap fade must not black it out.
-        if (in_x && in_y) return 1.0;
-        if (in_y) {
-            if (hi.x <= p.x) left = max(left, hi.x);
-            else right = min(right, lo.x);
-        }
-        if (in_x) {
-            if (hi.y <= p.y) below = max(below, hi.y);
-            else above = min(above, lo.y);
-        }
-    }
-    float gap = min(right - left, above - below) / iResolution.y;
-    return smoothstep(NARROW, WIDE, gap);
-}
-
 vec3 slot(float s, vec3 otherwise) {
     int i = int(s);
     return (iPaletteSize == 0 || s < 0.0 || i >= iPaletteSize) ? otherwise : iPalette[i];
@@ -104,8 +63,7 @@ vec3 slot(float s, vec3 otherwise) {
 
 void main() {
     vec2 p = gl_FragCoord.xy;
-    float seen = room(p);
-    float cover = seen > 0.0 ? seen * max(ribbon(0, iSkeinLook.x, p), ribbon(1, iSkeinLook.y, p)) : 0.0;
+    float cover = max(ribbon(0, iSkeinLook.x, p), ribbon(1, iSkeinLook.y, p));
 
     vec3 bg = (iPaletteSize > 0) ? iPaletteBg : vec3(0.118, 0.118, 0.180);
     vec3 fg = (iPaletteSize > 0) ? iPaletteFg : vec3(0.9);
