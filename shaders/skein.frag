@@ -68,9 +68,10 @@ float ribbon(int r, float lines, vec2 p) {
 }
 
 // How much room there is to see the skein at `p`: nothing in a gap
-// narrower than NARROW, all in one wider than WIDE. The gap is how far it
-// is across the open space the pixel is in, from the window or screen
-// edge on one side to the one on the other, the lesser of across and up.
+// narrower than NARROW, all in one wider than WIDE, and all under a
+// window. The gap is how far it is across the open space the pixel is
+// in, from the window or screen edge on one side to the one on the
+// other, the lesser of across and up.
 float room(vec2 p) {
     float left = 0.0, right = iResolution.x;
     float below = 0.0, above = iResolution.y;
@@ -80,8 +81,9 @@ float room(vec2 p) {
         vec2 lo = w.xy, hi = w.xy + w.zw;
         bool in_x = p.x > lo.x && p.x < hi.x;
         bool in_y = p.y > lo.y && p.y < hi.y;
-        // Under a window it is not seen at all.
-        if (in_x && in_y) return 0.0;
+        // Under a window it is drawn in full: a translucent window shows
+        // it through, and the narrow-gap fade must not black it out.
+        if (in_x && in_y) return 1.0;
         if (in_y) {
             if (hi.x <= p.x) left = max(left, hi.x);
             else right = min(right, lo.x);
